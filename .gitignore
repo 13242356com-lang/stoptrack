@@ -1,0 +1,30 @@
+# build
+node_modules/
+# Cloudflare Pages output (rebuilt on deploy)
+dist/
+# transient build intermediates
+build/build_src.tsx
+build/app.js
+
+# runtime data (never commit factory data / secrets)
+# server's stops/production/sessions store
+server/stoptrack-data.json
+server/node_modules/
+# gateway FileSink output / demo events
+*.jsonl
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# machine-specific / local (absolute Node path, per-machine)
+.claude/launch.json
+.venv/
+.env
+
+# os / editor
+.DS_Store
+Thumbs.db
+*.swp

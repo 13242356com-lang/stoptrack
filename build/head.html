@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f172a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>StopTrack — ASLA Downtime</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+  <style>
+    html, body { margin: 0; padding: 0; background: #0f172a; }
+    @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+    input[type=number]::-webkit-outer-spin-button,
+    input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    input[type=number] { -moz-appearance: textfield; }
+    #boot, #err { font-family: system-ui, -apple-system, sans-serif; }
+    #err { display:none; position:fixed; inset:0; background:#0f172a; color:#fecaca; padding:20px; overflow:auto; z-index:9999; }
+    #err h2 { color:#f87171; margin:0 0 8px; font-size:18px; }
+    #err pre { white-space:pre-wrap; word-break:break-word; background:#1e293b; color:#fca5a5; padding:12px; border-radius:8px; font-size:12px; }
+    #err button { margin-top:12px; background:#dc2626; color:#fff; border:0; padding:10px 16px; border-radius:8px; font-weight:600; }
+  </style>
+</head>
+<body>
+  <div id="root"><div id="boot" style="padding:24px;color:#94a3b8">Loading StopTrack…</div></div>
+
+  <div id="err">
+    <h2>StopTrack couldn't start</h2>
+    <p id="err-msg" style="color:#fca5a5;font-size:14px"></p>
+    <pre id="err-detail"></pre>
+    <button onclick="location.reload()">Reload</button>
+  </div>
+
+  <script>
+    function showError(title, detail) {
+      var e = document.getElementById('err');
+      document.getElementById('err-msg').textContent = title || 'Unexpected error.';
+      document.getElementById('err-detail').textContent = detail || '';
+      if (e) e.style.display = 'block';
+    }
+    window.addEventListener('error', function (ev) {
+      showError('A script error occurred while running the app.', (ev.message || '') + '\n' + (ev.filename || '') + ':' + (ev.lineno || ''));
+    });
+    window.addEventListener('unhandledrejection', function (ev) {
+      showError('A background task failed.', String(ev.reason && ev.reason.stack || ev.reason || ''));
+    });
+    window.addEventListener('load', function () {
+      setTimeout(function () {
+        if (typeof React === 'undefined' || typeof ReactDOM === 'undefined') {
+          showError('Could not load React from the internet.',
+            'This version needs a connection the first time it opens (for React and Tailwind). Connect to Wi-Fi/data and reload.');
+        }
+      }, 1500);
+    });
+  </script>
+
+  <!-- App: pre-compiled plain JavaScript (no JSX, no Babel). -->
+  <script>

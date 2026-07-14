@@ -1,0 +1,10 @@
+# Normalize line endings so the built index.html is byte-stable across
+# Windows/Linux and never shows spurious diffs.
+* text=auto eol=lf
+
+# Treat the built artifact and scaffold as LF text explicitly.
+index.html      text eol=lf
+build/head.html text eol=lf
+build/tail.html text eol=lf
+build/icons.js  text eol=lf
+StopTrack.tsx   text eol=lf

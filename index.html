@@ -1,0 +1,2608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f172a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>StopTrack — ASLA Downtime</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+  <style>
+    html, body { margin: 0; padding: 0; background: #0f172a; }
+    @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+    input[type=number]::-webkit-outer-spin-button,
+    input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    input[type=number] { -moz-appearance: textfield; }
+    #boot, #err { font-family: system-ui, -apple-system, sans-serif; }
+    #err { display:none; position:fixed; inset:0; background:#0f172a; color:#fecaca; padding:20px; overflow:auto; z-index:9999; }
+    #err h2 { color:#f87171; margin:0 0 8px; font-size:18px; }
+    #err pre { white-space:pre-wrap; word-break:break-word; background:#1e293b; color:#fca5a5; padding:12px; border-radius:8px; font-size:12px; }
+    #err button { margin-top:12px; background:#dc2626; color:#fff; border:0; padding:10px 16px; border-radius:8px; font-weight:600; }
+  </style>
+</head>
+<body>
+  <div id="root"><div id="boot" style="padding:24px;color:#94a3b8">Loading StopTrack…</div></div>
+
+  <div id="err">
+    <h2>StopTrack couldn't start</h2>
+    <p id="err-msg" style="color:#fca5a5;font-size:14px"></p>
+    <pre id="err-detail"></pre>
+    <button onclick="location.reload()">Reload</button>
+  </div>
+
+  <script>
+    function showError(title, detail) {
+      var e = document.getElementById('err');
+      document.getElementById('err-msg').textContent = title || 'Unexpected error.';
+      document.getElementById('err-detail').textContent = detail || '';
+      if (e) e.style.display = 'block';
+    }
+    window.addEventListener('error', function (ev) {
+      showError('A script error occurred while running the app.', (ev.message || '') + '\n' + (ev.filename || '') + ':' + (ev.lineno || ''));
+    });
+    window.addEventListener('unhandledrejection', function (ev) {
+      showError('A background task failed.', String(ev.reason && ev.reason.stack || ev.reason || ''));
+    });
+    window.addEventListener('load', function () {
+      setTimeout(function () {
+        if (typeof React === 'undefined' || typeof ReactDOM === 'undefined') {
+          showError('Could not load React from the internet.',
+            'This version needs a connection the first time it opens (for React and Tailwind). Connect to Wi-Fi/data and reload.');
+        }
+      }, 1500);
+    });
+  </script>
+
+  <!-- App: pre-compiled plain JavaScript (no JSX, no Babel). -->
+  <script>
+"use strict";
+var __rest = (this && this.__rest) || function (s, e) {
+    var t = {};
+    for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p) && e.indexOf(p) < 0)
+        t[p] = s[p];
+    if (s != null && typeof Object.getOwnPropertySymbols === "function")
+        for (var i = 0, p = Object.getOwnPropertySymbols(s); i < p.length; i++) {
+            if (e.indexOf(p[i]) < 0 && Object.prototype.propertyIsEnumerable.call(s, p[i]))
+                t[p[i]] = s[p[i]];
+        }
+    return t;
+};
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+function Icon({ size = 18, className = "", fill = "none", children }) {
+    return (React.createElement("svg", { xmlns: "http://www.w3.org/2000/svg", width: size, height: size, viewBox: "0 0 24 24", fill: fill, stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", className: className, style: { display: "inline-block", verticalAlign: "middle", flexShrink: 0 } }, children));
+}
+const I = (paths) => (props) => React.createElement(Icon, Object.assign({}, props), paths);
+const Play = I(React.createElement("polygon", { points: "6 3 20 12 6 21 6 3" }));
+const Square = I(React.createElement("rect", { x: "3", y: "3", width: "18", height: "18", rx: "2" }));
+const Pause = I(React.createElement(React.Fragment, null, React.createElement("rect", { x: "6", y: "4", width: "4", height: "16", rx: "1" }), React.createElement("rect", { x: "14", y: "4", width: "4", height: "16", rx: "1" })));
+const Clock = I(React.createElement(React.Fragment, null, React.createElement("circle", { cx: "12", cy: "12", r: "10" }), React.createElement("polyline", { points: "12 6 12 12 16 14" })));
+const Factory = I(React.createElement(React.Fragment, null, React.createElement("path", { d: "M2 20a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8l-7 5V8l-7 5V4a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z" }), React.createElement("path", { d: "M17 18h1" }), React.createElement("path", { d: "M12 18h1" }), React.createElement("path", { d: "M7 18h1" })));
+const AlertCircle = I(React.createElement(React.Fragment, null, React.createElement("circle", { cx: "12", cy: "12", r: "10" }), React.createElement("line", { x1: "12", y1: "8", x2: "12", y2: "12" }), React.createElement("line", { x1: "12", y1: "16", x2: "12.01", y2: "16" })));
+const BarChart3 = I(React.createElement(React.Fragment, null, React.createElement("path", { d: "M3 3v18h18" }), React.createElement("path", { d: "M18 17V9" }), React.createElement("path", { d: "M13 17V5" }), React.createElement("path", { d: "M8 17v-3" })));
+const List = I(React.createElement(React.Fragment, null, React.createElement("line", { x1: "8", y1: "6", x2: "21", y2: "6" }), React.createElement("line", { x1: "8", y1: "12", x2: "21", y2: "12" }), React.createElement("line", { x1: "8", y1: "18", x2: "21", y2: "18" }), React.createElement("line", { x1: "3", y1: "6", x2: "3.01", y2: "6" }), React.createElement("line", { x1: "3", y1: "12", x2: "3.01", y2: "12" }), React.createElement("line", { x1: "3", y1: "18", x2: "3.01", y2: "18" })));
+const User = I(React.createElement(React.Fragment, null, React.createElement("path", { d: "M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" }), React.createElement("circle", { cx: "12", cy: "7", r: "4" })));
+const RefreshCw = I(React.createElement(React.Fragment, null, React.createElement("path", { d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" }), React.createElement("path", { d: "M21 3v5h-5" }), React.createElement("path", { d: "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" }), React.createElement("path", { d: "M3 21v-5h5" })));
+const Trash2 = I(React.createElement(React.Fragment, null, React.createElement("path", { d: "M3 6h18" }), React.createElement("path", { d: "M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" }), React.createElement("line", { x1: "10", y1: "11", x2: "10", y2: "17" }), React.createElement("line", { x1: "14", y1: "11", x2: "14", y2: "17" })));
+const CheckCircle = I(React.createElement(React.Fragment, null, React.createElement("path", { d: "M22 11.08V12a10 10 0 1 1-5.93-9.14" }), React.createElement("polyline", { points: "22 4 12 14.01 9 11.01" })));
+const Settings = I(React.createElement(React.Fragment, null, React.createElement("path", { d: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z" }), React.createElement("circle", { cx: "12", cy: "12", r: "3" })));
+const Plus = I(React.createElement(React.Fragment, null, React.createElement("line", { x1: "12", y1: "5", x2: "12", y2: "19" }), React.createElement("line", { x1: "5", y1: "12", x2: "19", y2: "12" })));
+const X = I(React.createElement(React.Fragment, null, React.createElement("line", { x1: "18", y1: "6", x2: "6", y2: "18" }), React.createElement("line", { x1: "6", y1: "6", x2: "18", y2: "18" })));
+const Download = I(React.createElement(React.Fragment, null, React.createElement("path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }), React.createElement("polyline", { points: "7 10 12 15 17 10" }), React.createElement("line", { x1: "12", y1: "15", x2: "12", y2: "3" })));
+const Search = I(React.createElement(React.Fragment, null, React.createElement("circle", { cx: "11", cy: "11", r: "8" }), React.createElement("line", { x1: "21", y1: "21", x2: "16.65", y2: "16.65" })));
+const Moon = I(React.createElement("path", { d: "M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" }));
+const Sun = I(React.createElement(React.Fragment, null, React.createElement("circle", { cx: "12", cy: "12", r: "4" }), React.createElement("path", { d: "M12 2v2" }), React.createElement("path", { d: "M12 20v2" }), React.createElement("path", { d: "m4.93 4.93 1.41 1.41" }), React.createElement("path", { d: "m17.66 17.66 1.41 1.41" }), React.createElement("path", { d: "M2 12h2" }), React.createElement("path", { d: "M20 12h2" }), React.createElement("path", { d: "m6.34 17.66-1.41 1.41" }), React.createElement("path", { d: "m19.07 4.93-1.41 1.41" })));
+const TrendingUp = I(React.createElement(React.Fragment, null, React.createElement("polyline", { points: "22 7 13.5 15.5 8.5 10.5 2 17" }), React.createElement("polyline", { points: "16 7 22 7 22 13" })));
+const RotateCcw = I(React.createElement(React.Fragment, null, React.createElement("path", { d: "M3 2v6h6" }), React.createElement("path", { d: "M3.51 9a9 9 0 1 0 2.13-3.36L3 8" })));
+const Zap = I(React.createElement("polygon", { points: "13 2 3 14 12 14 11 22 21 10 12 10 13 2" }));
+const Archive = I(React.createElement(React.Fragment, null, React.createElement("rect", { x: "2", y: "3", width: "20", height: "5", rx: "1" }), React.createElement("path", { d: "M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" }), React.createElement("path", { d: "M10 12h4" })));
+const Sparkles = I(React.createElement(React.Fragment, null, React.createElement("path", { d: "m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z" }), React.createElement("path", { d: "M5 3v4" }), React.createElement("path", { d: "M19 17v4" }), React.createElement("path", { d: "M3 5h4" }), React.createElement("path", { d: "M17 19h4" })));
+const Lock = I(React.createElement(React.Fragment, null, React.createElement("rect", { x: "3", y: "11", width: "18", height: "11", rx: "2", ry: "2" }), React.createElement("path", { d: "M7 11V7a5 5 0 0 1 10 0v4" })));
+const Unlock = I(React.createElement(React.Fragment, null, React.createElement("rect", { x: "3", y: "11", width: "18", height: "11", rx: "2", ry: "2" }), React.createElement("path", { d: "M7 11V7a5 5 0 0 1 9.9-1" })));
+const PencilLine = I(React.createElement(React.Fragment, null, React.createElement("path", { d: "M12 20h9" }), React.createElement("path", { d: "M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" })));
+const DEFAULT_MACHINES = [
+    "ASLA - Infeed", "ASLA - Lamination", "ASLA - Laser", "ASLA - Outfeed", "Stringer",
+];
+const DEFAULT_REASONS = [
+    "Mechanical fault", "Quality check", "Waiting on maintenance", "Teflon change",
+    "Laser cleaning", "Material shortage", "Changeover / Setup", "Foil / infeed jam",
+    "Operator break", "Electrical fault", "Other",
+];
+const DEFAULT_QUICK_STOPS = [
+    { label: "Mechanical fault", reason: "Mechanical fault" },
+    { label: "Quality check", reason: "Quality check" },
+    { label: "Maintenance", reason: "Waiting on maintenance" },
+    { label: "Teflon change", reason: "Teflon change" },
+    { label: "Laser cleaning", reason: "Laser cleaning" },
+    { label: "Foil jam", reason: "Foil / infeed jam" },
+];
+const DAY = 24 * 60 * 60 * 1000;
+const RETENTION_MS = 60 * DAY;
+const fmtDur = (ms) => {
+    const s = Math.floor(ms / 1000);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    return `${h > 0 ? h + "h " : ""}${m > 0 || h > 0 ? m + "m " : ""}${sec}s`;
+};
+const fmtTime = (ts) => new Date(ts).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const fmtClock = (ms) => {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    return `${String(Math.floor(s / 3600)).padStart(2, "0")}:${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+};
+const dayKey = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1}/${d.getDate()}`; };
+const relTime = (ts) => {
+    if (!ts)
+        return "never";
+    const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    if (s < 45)
+        return "just now";
+    if (s < 90)
+        return "1m ago";
+    if (s < 3600)
+        return `${Math.round(s / 60)}m ago`;
+    if (s < 5400)
+        return "1h ago";
+    if (s < 86400)
+        return `${Math.round(s / 3600)}h ago`;
+    return `${Math.round(s / 86400)}d ago`;
+};
+function shiftLengthMs(shift) {
+    if (!(shift === null || shift === void 0 ? void 0 : shift.start) || !(shift === null || shift === void 0 ? void 0 : shift.end))
+        return 0;
+    const [sh, sm] = shift.start.split(":").map(Number);
+    const [eh, em] = shift.end.split(":").map(Number);
+    let mins = (eh * 60 + em) - (sh * 60 + sm);
+    if (mins <= 0)
+        mins += 24 * 60;
+    return mins * 60 * 1000;
+}
+const machineSlug = (m) => String(m || "").replace(/[^a-zA-Z0-9]+/g, "-");
+const HOUR_MS = 60 * 60 * 1000;
+function computeOEE({ plannedMs, downtimeMs, unitsProduced, scrapCount, ratePerHour }) {
+    const planned = Math.max(0, plannedMs || 0);
+    const runMs = Math.max(0, planned - Math.max(0, downtimeMs || 0));
+    const units = Math.max(0, Number(unitsProduced) || 0);
+    const scrap = Math.min(units, Math.max(0, Number(scrapCount) || 0));
+    const rate = Number(ratePerHour) || 0;
+    const clamp01 = (x) => Math.min(1, Math.max(0, x));
+    const a = planned > 0 ? clamp01(runMs / planned) : null;
+    const theoretical = rate > 0 ? rate * (runMs / HOUR_MS) : 0;
+    const p = rate > 0 && theoretical > 0 ? clamp01(units / theoretical) : null;
+    const q = units > 0 ? clamp01((units - scrap) / units) : null;
+    const factors = [a, p, q].filter((f) => f != null);
+    const oee = factors.length ? factors.reduce((x, y) => x * y, 1) : null;
+    const partial = a == null || p == null || q == null;
+    return { a, p, q, oee, partial };
+}
+const pct = (f) => (f == null ? "—" : `${(f * 100).toFixed(1)}%`);
+const oeeAccent = (f) => (f == null ? "" : f > 0.85 ? "text-emerald-500" : f > 0.6 ? "text-amber-500" : "text-red-500");
+function buildShiftReport({ operator, machine, myStops, myShift, clearedBefore }) {
+    const downtimeMs = myStops.reduce((a, s) => a + s.duration, 0);
+    const byReason = {};
+    myStops.forEach((s) => { byReason[s.reason] = (byReason[s.reason] || 0) + s.duration; });
+    const topReasons = Object.entries(byReason).sort((a, b) => b[1] - a[1]);
+    const longest = myStops.reduce((best, s) => (!best || s.duration > best.duration ? s : best), null);
+    return {
+        operator: operator.trim() || "Unnamed", machine,
+        windowStart: clearedBefore || null, windowEnd: Date.now(),
+        stopCount: myStops.length, downtimeMs, topReasons, longest,
+        machines: myShift.rows, hasSessions: myShift.hasSessions,
+        oee: myShift.overall,
+        notes: myStops.filter((s) => s.notes).map((s) => ({ reason: s.reason, notes: s.notes })),
+    };
+}
+function formatReportText(r) {
+    var _a;
+    const lines = [];
+    lines.push("STOPTRACK SHIFT HANDOVER");
+    lines.push(`Operator: ${r.operator}${r.machines.length <= 1 ? ` · Machine: ${((_a = r.machines[0]) === null || _a === void 0 ? void 0 : _a.machine) || r.machine}` : ""}`);
+    lines.push(`Shift: ${r.windowStart ? fmtTime(r.windowStart) : "start"} → ${fmtTime(r.windowEnd)}`);
+    lines.push("");
+    lines.push(`Stops: ${r.stopCount} · Downtime: ${fmtDur(r.downtimeMs)}`);
+    lines.push(`OEE${r.oee.partial ? " (partial)" : ""}: ${pct(r.oee.oee)}  [A ${pct(r.oee.a)} · P ${pct(r.oee.p)} · Q ${pct(r.oee.q)}]`);
+    if (r.machines.length) {
+        lines.push("");
+        lines.push("Machines worked:");
+        r.machines.forEach((m) => {
+            const bits = [];
+            if (r.hasSessions)
+                bits.push(fmtDur(m.mannedMs));
+            bits.push(`${m.stops} stop${m.stops === 1 ? "" : "s"}`);
+            if (m.downtimeMs)
+                bits.push(`${fmtDur(m.downtimeMs)} down`);
+            if (m.units || m.scrap)
+                bits.push(`${m.units} units / ${m.scrap} scrap`);
+            lines.push(`  - ${m.machine}: ${bits.join(" · ")}`);
+        });
+    }
+    if (r.topReasons.length) {
+        lines.push("");
+        lines.push("Top stop reasons:");
+        r.topReasons.slice(0, 5).forEach(([reason, ms]) => lines.push(`  - ${reason}: ${fmtDur(ms)}`));
+    }
+    if (r.longest)
+        lines.push(`Longest stop: ${r.longest.reason} · ${fmtDur(r.longest.duration)} (${fmtTime(r.longest.start)})`);
+    if (r.notes.length) {
+        lines.push("");
+        lines.push("Notes:");
+        r.notes.slice(0, 8).forEach((n) => lines.push(`  - [${n.reason}] ${n.notes}`));
+    }
+    return lines.join("\n");
+}
+function downloadFile(content, filename, type) {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+const stampOf = (s) => { var _a, _b, _c, _d; return (_d = (_c = (_b = (_a = s.updatedAt) !== null && _a !== void 0 ? _a : s.loggedAt) !== null && _b !== void 0 ? _b : s.end) !== null && _c !== void 0 ? _c : s.start) !== null && _d !== void 0 ? _d : 0; };
+async function sha256Hex(str) {
+    const K = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+    const rr = (x, n) => (x >>> n) | (x << (32 - n));
+    const bytes = [];
+    for (let i = 0; i < str.length; i++) {
+        let c = str.charCodeAt(i);
+        if (c < 0x80)
+            bytes.push(c);
+        else if (c < 0x800)
+            bytes.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+        else if (c < 0xd800 || c >= 0xe000)
+            bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+        else {
+            i++;
+            c = 0x10000 + (((c & 0x3ff) << 10) | (str.charCodeAt(i) & 0x3ff));
+            bytes.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 0x3f), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+        }
+    }
+    const l = bytes.length;
+    bytes.push(0x80);
+    while (bytes.length % 64 !== 56)
+        bytes.push(0);
+    const bitLen = l * 8;
+    for (let i = 7; i >= 0; i--)
+        bytes.push((bitLen / Math.pow(2, i * 8)) & 0xff);
+    let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a, h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+    const w = new Array(64);
+    for (let i = 0; i < bytes.length; i += 64) {
+        for (let j = 0; j < 16; j++)
+            w[j] = (bytes[i + j * 4] << 24) | (bytes[i + j * 4 + 1] << 16) | (bytes[i + j * 4 + 2] << 8) | (bytes[i + j * 4 + 3]);
+        for (let j = 16; j < 64; j++) {
+            const s0 = rr(w[j - 15], 7) ^ rr(w[j - 15], 18) ^ (w[j - 15] >>> 3);
+            const s1 = rr(w[j - 2], 17) ^ rr(w[j - 2], 19) ^ (w[j - 2] >>> 10);
+            w[j] = (w[j - 16] + s0 + w[j - 7] + s1) | 0;
+        }
+        let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+        for (let j = 0; j < 64; j++) {
+            const S1 = rr(e, 6) ^ rr(e, 11) ^ rr(e, 25);
+            const ch = (e & f) ^ (~e & g);
+            const t1 = (h + S1 + ch + K[j] + w[j]) | 0;
+            const S0 = rr(a, 2) ^ rr(a, 13) ^ rr(a, 22);
+            const maj = (a & b) ^ (a & c) ^ (b & c);
+            const t2 = (S0 + maj) | 0;
+            h = g;
+            g = f;
+            f = e;
+            e = (d + t1) | 0;
+            d = c;
+            c = b;
+            b = a;
+            a = (t1 + t2) | 0;
+        }
+        h0 = (h0 + a) | 0;
+        h1 = (h1 + b) | 0;
+        h2 = (h2 + c) | 0;
+        h3 = (h3 + d) | 0;
+        h4 = (h4 + e) | 0;
+        h5 = (h5 + f) | 0;
+        h6 = (h6 + g) | 0;
+        h7 = (h7 + h) | 0;
+    }
+    const toHex = (x) => (x >>> 0).toString(16).padStart(8, "0");
+    return toHex(h0) + toHex(h1) + toHex(h2) + toHex(h3) + toHex(h4) + toHex(h5) + toHex(h6) + toHex(h7);
+}
+function pickBackend() {
+    if (typeof window !== "undefined" && window.storage && typeof window.storage.set === "function") {
+        return { kind: "window.storage", persistent: true, shared: true, impl: window.storage };
+    }
+    const ls = (() => {
+        try {
+            if (typeof localStorage === "undefined")
+                return null;
+            const probe = "__stoptrack_probe__";
+            localStorage.setItem(probe, "1");
+            localStorage.removeItem(probe);
+            return localStorage;
+        }
+        catch (_a) {
+            return null;
+        }
+    })();
+    if (ls) {
+        return {
+            kind: "localStorage", persistent: true, shared: false,
+            impl: {
+                async get(key) { const v = ls.getItem(key); return v == null ? null : { key, value: v }; },
+                async set(key, value) { ls.setItem(key, value); return { key, value }; },
+                async delete(key) { ls.removeItem(key); return { key }; },
+                async list(prefix) { const keys = []; for (let i = 0; i < ls.length; i++) {
+                    const k = ls.key(i);
+                    if (k && k.startsWith(prefix))
+                        keys.push(k);
+                } return { keys }; },
+            },
+        };
+    }
+    const mem = new Map();
+    return {
+        kind: "memory", persistent: false, shared: false,
+        impl: {
+            async get(key) { return mem.has(key) ? { key, value: mem.get(key) } : null; },
+            async set(key, value) { mem.set(key, value); return { key, value }; },
+            async delete(key) { mem.delete(key); return { key }; },
+            async list(prefix) { return { keys: [...mem.keys()].filter((k) => k.startsWith(prefix)) }; },
+        },
+    };
+}
+const BACKEND = pickBackend();
+const STORE = BACKEND.impl;
+const SHARED = BACKEND.shared;
+const STORAGE_INFO = { kind: BACKEND.kind, persistent: BACKEND.persistent, shared: BACKEND.shared };
+let syncEnabled = false;
+async function fetchJSON(url, { token, method = "GET", body, timeoutMs = 8000 } = {}) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+        const res = await fetch(url, {
+            method,
+            headers: Object.assign({ "Content-Type": "application/json" }, (token ? { Authorization: `Bearer ${token}` } : {})),
+            body: body != null ? JSON.stringify(body) : undefined,
+            signal: ctrl.signal,
+        });
+        if (!res.ok)
+            return { ok: false, status: res.status, error: `HTTP ${res.status}` };
+        const data = await res.json().catch(() => ({}));
+        return { ok: true, status: res.status, data };
+    }
+    catch (e) {
+        return { ok: false, error: (e === null || e === void 0 ? void 0 : e.name) === "AbortError" ? "Request timed out" : ((e === null || e === void 0 ? void 0 : e.message) || "Network error") };
+    }
+    finally {
+        clearTimeout(timer);
+    }
+}
+const api = {
+    async loadStops() {
+        try {
+            const res = await STORE.list("stop:", SHARED);
+            const keys = (res === null || res === void 0 ? void 0 : res.keys) || [];
+            if (!keys.length)
+                return { ok: true, stops: [] };
+            const items = await Promise.all(keys.map(async (k) => {
+                try {
+                    const r = await STORE.get(k, SHARED);
+                    return r ? Object.assign({ key: k }, JSON.parse(r.value)) : null;
+                }
+                catch (_a) {
+                    return null;
+                }
+            }));
+            const now = Date.now();
+            const survivors = [];
+            for (const s of items.filter(Boolean)) {
+                const gcAt = (s.discarded && s.discardedAt) || (s.deleted && s.deletedAt);
+                if (gcAt && now - gcAt > RETENTION_MS) {
+                    try {
+                        await STORE.delete(s.key, SHARED);
+                    }
+                    catch (_a) { }
+                }
+                else
+                    survivors.push(s);
+            }
+            survivors.sort((a, b) => b.start - a.start);
+            return { ok: true, stops: survivors };
+        }
+        catch (_b) {
+            return { ok: false, stops: [] };
+        }
+    },
+    async saveStop(record) {
+        const key = `stop:${record.id}`;
+        try {
+            try {
+                await STORE.set(key, JSON.stringify(record), SHARED);
+            }
+            catch (_a) {
+                await STORE.set(key, JSON.stringify(record));
+            }
+            const check = await STORE.get(key, SHARED).catch(() => STORE.get(key));
+            if (!check || !check.value)
+                return { ok: false, error: "The stop didn't save. Check storage and try again." };
+            await this._enqueue(key);
+            return { ok: true, record };
+        }
+        catch (e) {
+            return { ok: false, error: (e === null || e === void 0 ? void 0 : e.message) || "The stop didn't save. Try again." };
+        }
+    },
+    async updateStop(record) {
+        const key = record.key || `stop:${record.id}`;
+        try {
+            await STORE.set(key, JSON.stringify(record), SHARED);
+            await this._enqueue(key);
+            return { ok: true };
+        }
+        catch (_a) {
+            return { ok: false };
+        }
+    },
+    async deleteStop(record) {
+        const key = record.key || `stop:${record.id}`;
+        const now = Date.now();
+        const tomb = { id: record.id, key, deleted: true, updatedAt: now, deletedAt: now };
+        try {
+            try {
+                await STORE.set(key, JSON.stringify(tomb), SHARED);
+            }
+            catch (_a) {
+                await STORE.set(key, JSON.stringify(tomb));
+            }
+            await this._enqueue(key);
+            return { ok: true, tombstone: tomb };
+        }
+        catch (_b) {
+            return { ok: false };
+        }
+    },
+    async loadProduction() {
+        try {
+            const res = await STORE.list("prod:", SHARED);
+            const keys = (res === null || res === void 0 ? void 0 : res.keys) || [];
+            const items = await Promise.all(keys.map(async (k) => {
+                try {
+                    const r = await STORE.get(k, SHARED);
+                    return r ? Object.assign({ key: k }, JSON.parse(r.value)) : null;
+                }
+                catch (_a) {
+                    return null;
+                }
+            }));
+            return { ok: true, records: items.filter(Boolean) };
+        }
+        catch (_a) {
+            return { ok: false, records: [] };
+        }
+    },
+    async saveProduction(record) {
+        const key = `prod:${record.id}`;
+        try {
+            try {
+                await STORE.set(key, JSON.stringify(record), SHARED);
+            }
+            catch (_a) {
+                await STORE.set(key, JSON.stringify(record));
+            }
+            const check = await STORE.get(key, SHARED).catch(() => STORE.get(key));
+            if (!check || !check.value)
+                return { ok: false, error: "The output didn't save. Check storage and try again." };
+            await this._enqueue(key);
+            return { ok: true, record };
+        }
+        catch (e) {
+            return { ok: false, error: (e === null || e === void 0 ? void 0 : e.message) || "The output didn't save. Try again." };
+        }
+    },
+    async loadSessions() {
+        try {
+            const res = await STORE.list("sess:", SHARED);
+            const keys = (res === null || res === void 0 ? void 0 : res.keys) || [];
+            const items = await Promise.all(keys.map(async (k) => {
+                try {
+                    const r = await STORE.get(k, SHARED);
+                    return r ? Object.assign({ key: k }, JSON.parse(r.value)) : null;
+                }
+                catch (_a) {
+                    return null;
+                }
+            }));
+            const now = Date.now();
+            const survivors = [];
+            for (const s of items.filter(Boolean)) {
+                if (s.end && now - s.end > RETENTION_MS) {
+                    try {
+                        await STORE.delete(s.key, SHARED);
+                    }
+                    catch (_a) { }
+                }
+                else
+                    survivors.push(s);
+            }
+            return { ok: true, records: survivors };
+        }
+        catch (_b) {
+            return { ok: false, records: [] };
+        }
+    },
+    async saveSession(record) {
+        const key = `sess:${record.id}`;
+        try {
+            try {
+                await STORE.set(key, JSON.stringify(record), SHARED);
+            }
+            catch (_a) {
+                await STORE.set(key, JSON.stringify(record));
+            }
+            await this._enqueue(key);
+            return { ok: true, record };
+        }
+        catch (_b) {
+            return { ok: false };
+        }
+    },
+    async getRecordByKey(key) {
+        try {
+            const r = await STORE.get(key, SHARED).catch(() => STORE.get(key));
+            return r ? Object.assign({ key }, JSON.parse(r.value)) : null;
+        }
+        catch (_a) {
+            return null;
+        }
+    },
+    async putLocal(record) {
+        const key = record.key || `stop:${record.id}`;
+        try {
+            await STORE.set(key, JSON.stringify(record), SHARED).catch(() => STORE.set(key, JSON.stringify(record)));
+            return { ok: true };
+        }
+        catch (_a) {
+            return { ok: false };
+        }
+    },
+    async loadConfig() {
+        try {
+            const r = await STORE.get("config:lists", SHARED);
+            return r ? JSON.parse(r.value) : null;
+        }
+        catch (_a) {
+            return null;
+        }
+    },
+    async saveConfig(cfg) {
+        try {
+            await STORE.set("config:lists", JSON.stringify(cfg), SHARED);
+            return { ok: true };
+        }
+        catch (_a) {
+            return { ok: false };
+        }
+    },
+    async loadPrefs() {
+        try {
+            const r = await STORE.get("config:prefs", false);
+            return r ? JSON.parse(r.value) : null;
+        }
+        catch (_a) {
+            return null;
+        }
+    },
+    async savePrefs(prefs) {
+        try {
+            await STORE.set("config:prefs", JSON.stringify(prefs), false);
+        }
+        catch (_a) { }
+    },
+    async saveInProgress(data) {
+        try {
+            await STORE.set("inprogress:current", JSON.stringify(data), false);
+        }
+        catch (_a) { }
+    },
+    async loadInProgress() {
+        try {
+            const r = await STORE.get("inprogress:current", false);
+            return r ? JSON.parse(r.value) : null;
+        }
+        catch (_a) {
+            return null;
+        }
+    },
+    async clearInProgress() {
+        try {
+            await STORE.delete("inprogress:current", false);
+        }
+        catch (_a) { }
+    },
+    async loadSyncConfig() {
+        try {
+            const r = await STORE.get("config:sync", false);
+            return r ? JSON.parse(r.value) : null;
+        }
+        catch (_a) {
+            return null;
+        }
+    },
+    async saveSyncConfig(cfg) {
+        try {
+            await STORE.set("config:sync", JSON.stringify(cfg), false);
+        }
+        catch (_a) { }
+        syncEnabled = !!(cfg && cfg.enabled && cfg.url);
+    },
+    setSyncEnabled(v) { syncEnabled = !!v; },
+    async getOutbox() {
+        try {
+            const r = await STORE.get("sync:outbox", false);
+            const a = r ? JSON.parse(r.value) : [];
+            return Array.isArray(a) ? a : [];
+        }
+        catch (_a) {
+            return [];
+        }
+    },
+    async setOutbox(ids) {
+        try {
+            await STORE.set("sync:outbox", JSON.stringify([...new Set(ids)]), false);
+        }
+        catch (_a) { }
+    },
+    async _enqueue(key) {
+        if (!syncEnabled)
+            return;
+        try {
+            const keys = await this.getOutbox();
+            if (!keys.includes(key))
+                await this.setOutbox([...keys, key]);
+        }
+        catch (_a) { }
+    },
+    async seedOutboxWithAll() {
+        try {
+            const stops = await STORE.list("stop:", SHARED);
+            const prods = await STORE.list("prod:", SHARED).catch(() => ({ keys: [] }));
+            const sess = await STORE.list("sess:", SHARED).catch(() => ({ keys: [] }));
+            await this.setOutbox([...((stops === null || stops === void 0 ? void 0 : stops.keys) || []), ...((prods === null || prods === void 0 ? void 0 : prods.keys) || []), ...((sess === null || sess === void 0 ? void 0 : sess.keys) || [])]);
+        }
+        catch (_a) { }
+    },
+    async getCurrentSessionId() {
+        try {
+            const r = await STORE.get("sync:currentSession", false);
+            return r ? r.value : null;
+        }
+        catch (_a) {
+            return null;
+        }
+    },
+    async setCurrentSessionId(id) {
+        try {
+            if (id)
+                await STORE.set("sync:currentSession", id, false);
+            else
+                await STORE.delete("sync:currentSession", false);
+        }
+        catch (_a) { }
+    },
+    async getCursor(name = "") {
+        const k = name ? `sync:cursor:${name}` : "sync:cursor";
+        try {
+            const r = await STORE.get(k, false);
+            return r ? Number(r.value) || 0 : 0;
+        }
+        catch (_a) {
+            return 0;
+        }
+    },
+    async setCursor(ts, name = "") {
+        const k = name ? `sync:cursor:${name}` : "sync:cursor";
+        try {
+            await STORE.set(k, String(ts || 0), false);
+        }
+        catch (_a) { }
+    },
+    async remoteHealth(cfg) {
+        if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
+            return { ok: false, error: "No server URL" };
+        return fetchJSON(`${cfg.url.replace(/\/$/, "")}/health`, { token: cfg.token, timeoutMs: 5000 });
+    },
+    async remotePush(records, cfg) {
+        var _a;
+        if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
+            return { ok: false, error: "No server URL" };
+        const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/stops`, { token: cfg.token, method: "POST", body: { stops: records } });
+        return res.ok ? { ok: true, serverTime: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.serverTime) || Date.now() } : res;
+    },
+    async remotePull(since, cfg) {
+        var _a, _b;
+        if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
+            return { ok: false, error: "No server URL" };
+        const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/stops?since=${since || 0}`, { token: cfg.token });
+        return res.ok ? { ok: true, stops: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.stops) || [], serverTime: ((_b = res.data) === null || _b === void 0 ? void 0 : _b.serverTime) || Date.now() } : res;
+    },
+    async remotePushProduction(records, cfg) {
+        var _a;
+        if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
+            return { ok: false, error: "No server URL" };
+        const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/production`, { token: cfg.token, method: "POST", body: { records } });
+        return res.ok ? { ok: true, serverTime: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.serverTime) || Date.now() } : res;
+    },
+    async remotePullProduction(since, cfg) {
+        var _a, _b;
+        if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
+            return { ok: false, error: "No server URL" };
+        const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/production?since=${since || 0}`, { token: cfg.token });
+        return res.ok ? { ok: true, records: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.records) || [], serverTime: ((_b = res.data) === null || _b === void 0 ? void 0 : _b.serverTime) || Date.now() } : res;
+    },
+    async remotePushSessions(records, cfg) {
+        var _a;
+        if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
+            return { ok: false, error: "No server URL" };
+        const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/sessions`, { token: cfg.token, method: "POST", body: { records } });
+        return res.ok ? { ok: true, serverTime: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.serverTime) || Date.now() } : res;
+    },
+    async remotePullSessions(since, cfg) {
+        var _a, _b;
+        if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
+            return { ok: false, error: "No server URL" };
+        const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/sessions?since=${since || 0}`, { token: cfg.token });
+        return res.ok ? { ok: true, records: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.records) || [], serverTime: ((_b = res.data) === null || _b === void 0 ? void 0 : _b.serverTime) || Date.now() } : res;
+    },
+    async sendReport(payload, cfg) {
+        if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
+            return { ok: false, error: "No server URL" };
+        const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/report`, { token: cfg.token, method: "POST", body: payload, timeoutMs: 15000 });
+        if (res.ok)
+            return { ok: true };
+        return { ok: false, error: res.status === 501 ? "Email isn't set up on the server" : (res.error || "Send failed") };
+    },
+    async remoteGetConfig(cfg) {
+        var _a, _b;
+        if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
+            return { ok: false, error: "No server URL" };
+        const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/config`, { token: cfg.token });
+        return res.ok ? { ok: true, config: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.config) || null, updatedAt: ((_b = res.data) === null || _b === void 0 ? void 0 : _b.updatedAt) || 0 } : res;
+    },
+    async remotePutConfig(config, cfg) {
+        if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
+            return { ok: false, error: "No server URL" };
+        return fetchJSON(`${cfg.url.replace(/\/$/, "")}/config`, { token: cfg.token, method: "PUT", body: { config, updatedAt: (config === null || config === void 0 ? void 0 : config.updatedAt) || Date.now() } });
+    },
+};
+function useTheme(dark) {
+    return useMemo(() => dark
+        ? { app: "bg-slate-950 text-slate-100", card: "bg-slate-900 border border-slate-800", sub: "text-slate-400", input: "bg-slate-800 border-slate-700 text-slate-100 placeholder-slate-500", chip: "bg-slate-800", rowHover: "hover:bg-slate-800/60", thead: "bg-slate-800/60 text-slate-400", border: "border-slate-800", muted: "bg-slate-800/60", accentBtn: "bg-slate-700 hover:bg-slate-600 text-white" }
+        : { app: "bg-slate-100 text-slate-800", card: "bg-white shadow-sm", sub: "text-slate-500", input: "bg-white border-slate-300 text-slate-800 placeholder-slate-400", chip: "bg-slate-100", rowHover: "hover:bg-slate-50", thead: "bg-slate-50 text-slate-500", border: "border-slate-100", muted: "bg-slate-100", accentBtn: "bg-slate-700 hover:bg-slate-800 text-white" }, [dark]);
+}
+const emptyTimer = { running: false, paused: false, startTs: null, accumulated: 0, segStart: null };
+function useTimer({ operator, machine }) {
+    const [state, setState] = useState(emptyTimer);
+    const [now, setNow] = useState(Date.now());
+    const stateRef = useRef(state);
+    stateRef.current = state;
+    const machineRef = useRef(machine);
+    machineRef.current = machine;
+    const elapsed = state.paused
+        ? state.accumulated
+        : state.running
+            ? state.accumulated + (now - state.segStart)
+            : state.accumulated;
+    useEffect(() => {
+        if (!state.running || state.paused)
+            return;
+        const iv = setInterval(() => setNow(Date.now()), 200);
+        return () => clearInterval(iv);
+    }, [state.running, state.paused]);
+    const persist = useCallback((s, extra = {}) => {
+        if (!s.running && !s.paused)
+            return;
+        api.saveInProgress(Object.assign(Object.assign(Object.assign({ operator, machine }, s), { savedAt: Date.now() }), extra));
+    }, [operator, machine]);
+    useEffect(() => { persist(state); }, [state, persist]);
+    useEffect(() => {
+        const handler = () => {
+            if (document.visibilityState === "hidden") {
+                const s = stateRef.current;
+                if (s.running || s.paused)
+                    api.saveInProgress(Object.assign(Object.assign({ operator, machine }, s), { savedAt: Date.now() }));
+            }
+        };
+        document.addEventListener("visibilitychange", handler);
+        window.addEventListener("pagehide", handler);
+        return () => {
+            document.removeEventListener("visibilitychange", handler);
+            window.removeEventListener("pagehide", handler);
+        };
+    }, [operator, machine]);
+    const start = useCallback(() => {
+        const t = Date.now();
+        setState({ running: true, paused: false, startTs: t, accumulated: 0, segStart: t, machine: machineRef.current });
+    }, []);
+    const pause = useCallback(() => {
+        setState((s) => {
+            if (!s.running || s.paused)
+                return s;
+            const banked = s.accumulated + (Date.now() - s.segStart);
+            return Object.assign(Object.assign({}, s), { paused: true, accumulated: banked, segStart: null });
+        });
+    }, []);
+    const resume = useCallback(() => {
+        setState((s) => (s.paused ? Object.assign(Object.assign({}, s), { paused: false, segStart: Date.now() }) : s));
+    }, []);
+    const stop = useCallback(() => {
+        const s = stateRef.current;
+        const end = Date.now();
+        const duration = s.paused ? s.accumulated : s.accumulated + (end - s.segStart);
+        setState(emptyTimer);
+        api.clearInProgress();
+        return { start: s.startTs, end, duration, machine: s.machine };
+    }, []);
+    const reset = useCallback(() => { setState(emptyTimer); api.clearInProgress(); }, []);
+    const restore = useCallback((d) => {
+        if (d.paused || !d.segStart) {
+            setState({ running: true, paused: true, startTs: d.startTs, accumulated: d.accumulated || 0, segStart: null, machine: d.machine });
+        }
+        else {
+            setState({ running: true, paused: false, startTs: d.startTs, accumulated: d.accumulated || 0, segStart: Date.now(), machine: d.machine });
+        }
+    }, []);
+    return { state, elapsed, start, pause, resume, stop, reset, restore };
+}
+const SYNC_INTERVAL_MS = 25000;
+function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, localConfig, onRemoteConfig }) {
+    const [status, setStatus] = useState({
+        online: typeof navigator === "undefined" ? true : navigator.onLine,
+        lastSync: null, pending: 0, syncing: false, error: null,
+    });
+    const cfgRef = useRef(cfg);
+    cfgRef.current = cfg;
+    const onStopsRef = useRef(onRemoteStops);
+    onStopsRef.current = onRemoteStops;
+    const onProdRef = useRef(onRemoteProduction);
+    onProdRef.current = onRemoteProduction;
+    const onSessRef = useRef(onRemoteSessions);
+    onSessRef.current = onRemoteSessions;
+    const localCfgRef = useRef(localConfig);
+    localCfgRef.current = localConfig;
+    const onCfgRef = useRef(onRemoteConfig);
+    onCfgRef.current = onRemoteConfig;
+    const runningRef = useRef(false);
+    const enabled = !!(cfg && cfg.enabled && cfg.url);
+    const flush = useCallback(async () => {
+        var _a, _b, _c, _d;
+        const c = cfgRef.current;
+        if (!c || !c.enabled || !c.url)
+            return;
+        if (typeof navigator !== "undefined" && !navigator.onLine) {
+            setStatus((s) => (Object.assign(Object.assign({}, s), { online: false })));
+            return;
+        }
+        if (runningRef.current)
+            return;
+        runningRef.current = true;
+        setStatus((s) => (Object.assign(Object.assign({}, s), { syncing: true, online: true })));
+        try {
+            const keys = (await api.getOutbox()).map((k) => (k.includes(":") ? k : `stop:${k}`));
+            if (keys.length) {
+                const records = (await Promise.all(keys.map((k) => api.getRecordByKey(k)))).filter(Boolean);
+                const stopRows = records.filter((r) => r.key.startsWith("stop:"));
+                const prodRows = records.filter((r) => r.key.startsWith("prod:"));
+                const sessRows = records.filter((r) => r.key.startsWith("sess:"));
+                if (stopRows.length) {
+                    const res = await api.remotePush(stopRows, c);
+                    if (!res.ok) {
+                        setStatus((s) => (Object.assign(Object.assign({}, s), { syncing: false, error: res.error || "Push failed", pending: keys.length })));
+                        runningRef.current = false;
+                        return;
+                    }
+                }
+                if (prodRows.length) {
+                    const res = await api.remotePushProduction(prodRows, c);
+                    if (!res.ok) {
+                        setStatus((s) => (Object.assign(Object.assign({}, s), { syncing: false, error: res.error || "Push failed", pending: keys.length })));
+                        runningRef.current = false;
+                        return;
+                    }
+                }
+                if (sessRows.length) {
+                    const res = await api.remotePushSessions(sessRows, c);
+                    if (!res.ok) {
+                        setStatus((s) => (Object.assign(Object.assign({}, s), { syncing: false, error: res.error || "Push failed", pending: keys.length })));
+                        runningRef.current = false;
+                        return;
+                    }
+                }
+                await api.setOutbox([]);
+            }
+            const localCfg = localCfgRef.current;
+            const remoteCfg = await api.remoteGetConfig(c);
+            if (remoteCfg.ok && remoteCfg.config && (remoteCfg.updatedAt || 0) > ((localCfg === null || localCfg === void 0 ? void 0 : localCfg.updatedAt) || 0)) {
+                (_a = onCfgRef.current) === null || _a === void 0 ? void 0 : _a.call(onCfgRef, remoteCfg.config);
+            }
+            else if (localCfg && (localCfg.updatedAt || 0) > (remoteCfg.ok ? (remoteCfg.updatedAt || 0) : 0)) {
+                await api.remotePutConfig(localCfg, c);
+            }
+            const since = await api.getCursor();
+            const pull = await api.remotePull(since, c);
+            if (pull.ok) {
+                if (pull.stops.length)
+                    await ((_b = onStopsRef.current) === null || _b === void 0 ? void 0 : _b.call(onStopsRef, pull.stops));
+                await api.setCursor(pull.serverTime);
+            }
+            const prodSince = await api.getCursor("prod");
+            const prodPull = await api.remotePullProduction(prodSince, c);
+            if (prodPull.ok) {
+                if (prodPull.records.length)
+                    await ((_c = onProdRef.current) === null || _c === void 0 ? void 0 : _c.call(onProdRef, prodPull.records));
+                await api.setCursor(prodPull.serverTime, "prod");
+            }
+            const sessSince = await api.getCursor("sess");
+            const sessPull = await api.remotePullSessions(sessSince, c);
+            if (sessPull.ok) {
+                if (sessPull.records.length)
+                    await ((_d = onSessRef.current) === null || _d === void 0 ? void 0 : _d.call(onSessRef, sessPull.records));
+                await api.setCursor(sessPull.serverTime, "sess");
+            }
+            const pending = (await api.getOutbox()).length;
+            const pullErr = !pull.ok ? (pull.error || "Pull failed") : !prodPull.ok ? (prodPull.error || "Pull failed") : !sessPull.ok ? (sessPull.error || "Pull failed") : null;
+            setStatus({ online: true, lastSync: Date.now(), pending, syncing: false, error: pullErr });
+        }
+        catch (e) {
+            setStatus((s) => (Object.assign(Object.assign({}, s), { syncing: false, error: (e === null || e === void 0 ? void 0 : e.message) || "Sync error" })));
+        }
+        finally {
+            runningRef.current = false;
+        }
+    }, []);
+    useEffect(() => {
+        if (!enabled) {
+            setStatus((s) => (Object.assign(Object.assign({}, s), { error: null })));
+            return;
+        }
+        flush();
+        const iv = setInterval(flush, SYNC_INTERVAL_MS);
+        const onOnline = () => { setStatus((s) => (Object.assign(Object.assign({}, s), { online: true }))); flush(); };
+        const onOffline = () => setStatus((s) => (Object.assign(Object.assign({}, s), { online: false })));
+        window.addEventListener("online", onOnline);
+        window.addEventListener("offline", onOffline);
+        return () => { clearInterval(iv); window.removeEventListener("online", onOnline); window.removeEventListener("offline", onOffline); };
+    }, [enabled, flush]);
+    const refreshPending = useCallback(async () => {
+        const pending = (await api.getOutbox()).length;
+        setStatus((s) => (s.pending === pending ? s : Object.assign(Object.assign({}, s), { pending })));
+    }, []);
+    return { status, flush, refreshPending, enabled };
+}
+function App() {
+    const [view, setView] = useState("operator");
+    const [dark, setDark] = useState(false);
+    const [machines, setMachines] = useState(DEFAULT_MACHINES);
+    const [reasons, setReasons] = useState(DEFAULT_REASONS);
+    const [quickStops, setQuickStops] = useState(DEFAULT_QUICK_STOPS);
+    const [shift, setShift] = useState({ start: "06:00", end: "14:00" });
+    const [lastReason, setLastReason] = useState(null);
+    const [clearedBefore, setClearedBefore] = useState(0);
+    const [showAll, setShowAll] = useState(false);
+    const [stops, setStops] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [operator, setOperator] = useState("");
+    const [machine, setMachine] = useState(DEFAULT_MACHINES[0]);
+    const [setupLocked, setSetupLocked] = useState(false);
+    const timer = useTimer({ operator, machine });
+    const [pendingStop, setPendingStop] = useState(null);
+    const [reason, setReason] = useState(DEFAULT_REASONS[0]);
+    const [notes, setNotes] = useState("");
+    const [saving, setSaving] = useState(false);
+    const [saveError, setSaveError] = useState("");
+    const [manualOpen, setManualOpen] = useState(false);
+    const [recovered, setRecovered] = useState(null);
+    const [newShiftOpen, setNewShiftOpen] = useState(false);
+    const [supervisorPinHash, setSupervisorPinHash] = useState(null);
+    const [supervisorUnlocked, setSupervisorUnlocked] = useState(false);
+    const [configUpdatedAt, setConfigUpdatedAt] = useState(0);
+    const [syncCfg, setSyncCfg] = useState(null);
+    const [rates, setRates] = useState({});
+    const [handoverEmails, setHandoverEmails] = useState([]);
+    const [production, setProduction] = useState([]);
+    const [sessions, setSessions] = useState([]);
+    const [handoverOpen, setHandoverOpen] = useState(false);
+    const t = useTheme(dark);
+    const stopsRef = useRef(stops);
+    stopsRef.current = stops;
+    const productionRef = useRef(production);
+    productionRef.current = production;
+    const sessionsRef = useRef(sessions);
+    sessionsRef.current = sessions;
+    const operatorRef = useRef(operator);
+    operatorRef.current = operator;
+    const machineRef = useRef(machine);
+    machineRef.current = machine;
+    const openSessRef = useRef(null);
+    const closeSession = useCallback(async (endTs) => {
+        const s = openSessRef.current;
+        if (!s)
+            return;
+        openSessRef.current = null;
+        const now = Date.now();
+        const closed = Object.assign(Object.assign({}, s), { end: endTs !== null && endTs !== void 0 ? endTs : now, updatedAt: now });
+        await api.saveSession(closed);
+        await api.setCurrentSessionId(null);
+        setSessions((prev) => prev.map((x) => (x.id === closed.id ? Object.assign(Object.assign({}, closed), { key: `sess:${closed.id}` }) : x)));
+    }, []);
+    const openSession = useCallback(async (mach, opName) => {
+        const name = (opName !== null && opName !== void 0 ? opName : operatorRef.current).trim();
+        if (!name || !mach)
+            return;
+        const now = Date.now();
+        const rec = {
+            id: `${now}-${Math.floor(Math.random() * 1e6)}`, kind: "session",
+            operator: name, machine: mach, start: now, end: null, loggedAt: now, updatedAt: now,
+        };
+        openSessRef.current = rec;
+        await api.saveSession(rec);
+        await api.setCurrentSessionId(rec.id);
+        setSessions((prev) => [...prev, Object.assign(Object.assign({}, rec), { key: `sess:${rec.id}` })]);
+    }, []);
+    const switchMachine = useCallback((next) => {
+        if (next === machineRef.current)
+            return;
+        closeSession();
+        openSession(next);
+        setMachine(next);
+    }, [closeSession, openSession]);
+    useEffect(() => {
+        const iv = setInterval(() => {
+            const s = openSessRef.current;
+            if (!s)
+                return;
+            s.updatedAt = Date.now();
+            api.saveSession(s);
+        }, 5 * 60 * 1000);
+        return () => clearInterval(iv);
+    }, []);
+    useEffect(() => {
+        (async () => {
+            var _a, _b, _c;
+            const cfg = await api.loadConfig();
+            if (cfg) {
+                if ((_a = cfg.machines) === null || _a === void 0 ? void 0 : _a.length) {
+                    setMachines(cfg.machines);
+                    setMachine(cfg.machines[0]);
+                }
+                if ((_b = cfg.reasons) === null || _b === void 0 ? void 0 : _b.length) {
+                    setReasons(cfg.reasons);
+                    setReason(cfg.reasons[0]);
+                }
+                if (cfg.quickStops)
+                    setQuickStops(cfg.quickStops);
+                if (cfg.shift)
+                    setShift(cfg.shift);
+                if (cfg.supervisorPinHash)
+                    setSupervisorPinHash(cfg.supervisorPinHash);
+                if (cfg.rates)
+                    setRates(cfg.rates);
+                if (cfg.handoverEmails)
+                    setHandoverEmails(cfg.handoverEmails);
+                if (cfg.updatedAt)
+                    setConfigUpdatedAt(cfg.updatedAt);
+            }
+            const sc = await api.loadSyncConfig();
+            if (sc) {
+                setSyncCfg(sc);
+                api.setSyncEnabled(!!(sc.enabled && sc.url));
+            }
+            const prefs = await api.loadPrefs();
+            if (prefs) {
+                if (typeof prefs.dark === "boolean")
+                    setDark(prefs.dark);
+                if (prefs.lastReason)
+                    setLastReason(prefs.lastReason);
+                if (prefs.clearedBefore)
+                    setClearedBefore(prefs.clearedBefore);
+                if (prefs.setupLocked) {
+                    setSetupLocked(true);
+                    if (prefs.operator)
+                        setOperator(prefs.operator);
+                    if (prefs.machine)
+                        setMachine(prefs.machine);
+                }
+            }
+            const result = await api.loadStops();
+            setStops(result.stops);
+            const prod = await api.loadProduction();
+            setProduction(prod.records);
+            const sess = await api.loadSessions();
+            const curId = await api.getCurrentSessionId();
+            const nowTs = Date.now();
+            const STALE_MS = 15 * 60 * 1000;
+            const records = [];
+            for (const s of sess.records) {
+                if (!s.end && (s.id === curId || nowTs - (s.updatedAt || s.start) > STALE_MS)) {
+                    const closed = Object.assign(Object.assign({}, s), { end: s.updatedAt || s.start, updatedAt: nowTs });
+                    await api.saveSession(closed);
+                    records.push(Object.assign(Object.assign({}, closed), { key: s.key }));
+                }
+                else
+                    records.push(s);
+            }
+            await api.setCurrentSessionId(null);
+            setSessions(records);
+            setLoading(false);
+            if (prefs && prefs.setupLocked && prefs.operator) {
+                openSession(prefs.machine || ((_c = cfg === null || cfg === void 0 ? void 0 : cfg.machines) === null || _c === void 0 ? void 0 : _c[0]) || DEFAULT_MACHINES[0], prefs.operator);
+            }
+            const ip = await api.loadInProgress();
+            if (ip && ip.startTs)
+                setRecovered(ip);
+        })();
+    }, []);
+    const refreshStops = useCallback(async () => {
+        const result = await api.loadStops();
+        setStops(result.stops);
+    }, []);
+    const syncOn = !!(syncCfg && syncCfg.enabled && syncCfg.url);
+    useEffect(() => {
+        if (view !== "supervisor" || syncOn)
+            return;
+        const iv = setInterval(refreshStops, 5000);
+        return () => clearInterval(iv);
+    }, [view, refreshStops, syncOn]);
+    const applyRemoteStops = useCallback(async (incoming) => {
+        const map = new Map(stopsRef.current.map((s) => [s.id, s]));
+        const writes = [];
+        for (const r of incoming) {
+            const local = map.get(r.id);
+            if (!local || stampOf(r) > stampOf(local)) {
+                const rec = Object.assign(Object.assign({}, r), { key: `stop:${r.id}` });
+                map.set(r.id, rec);
+                writes.push(rec);
+            }
+        }
+        if (!writes.length)
+            return;
+        await Promise.all(writes.map((w) => api.putLocal(w)));
+        setStops([...map.values()].sort((a, b) => b.start - a.start));
+    }, []);
+    const applyRemoteProduction = useCallback(async (incoming) => {
+        const map = new Map(productionRef.current.map((p) => [p.id, p]));
+        const writes = [];
+        for (const r of incoming) {
+            const local = map.get(r.id);
+            if (!local || stampOf(r) > stampOf(local)) {
+                const rec = Object.assign(Object.assign({}, r), { key: `prod:${r.id}` });
+                map.set(r.id, rec);
+                writes.push(rec);
+            }
+        }
+        if (!writes.length)
+            return;
+        await Promise.all(writes.map((w) => api.putLocal(w)));
+        setProduction([...map.values()]);
+    }, []);
+    const applyRemoteSessions = useCallback(async (incoming) => {
+        const map = new Map(sessionsRef.current.map((s) => [s.id, s]));
+        const writes = [];
+        for (const r of incoming) {
+            const local = map.get(r.id);
+            if (!local || stampOf(r) > stampOf(local)) {
+                const rec = Object.assign(Object.assign({}, r), { key: `sess:${r.id}` });
+                map.set(r.id, rec);
+                writes.push(rec);
+            }
+        }
+        if (!writes.length)
+            return;
+        await Promise.all(writes.map((w) => api.putLocal(w)));
+        setSessions([...map.values()]);
+    }, []);
+    const applyRemoteConfig = useCallback((cfg) => {
+        var _a, _b, _c;
+        if ((_a = cfg.machines) === null || _a === void 0 ? void 0 : _a.length)
+            setMachines(cfg.machines);
+        if ((_b = cfg.reasons) === null || _b === void 0 ? void 0 : _b.length)
+            setReasons(cfg.reasons);
+        if (cfg.quickStops)
+            setQuickStops(cfg.quickStops);
+        if (cfg.shift)
+            setShift(cfg.shift);
+        setSupervisorPinHash((_c = cfg.supervisorPinHash) !== null && _c !== void 0 ? _c : null);
+        if (cfg.rates)
+            setRates(cfg.rates);
+        if (cfg.handoverEmails)
+            setHandoverEmails(cfg.handoverEmails);
+        setConfigUpdatedAt(cfg.updatedAt || Date.now());
+        api.saveConfig(cfg);
+    }, []);
+    const localConfig = useMemo(() => ({ machines, reasons, quickStops, shift, supervisorPinHash, rates, handoverEmails, updatedAt: configUpdatedAt }), [machines, reasons, quickStops, shift, supervisorPinHash, rates, handoverEmails, configUpdatedAt]);
+    const sync = useSync({ cfg: syncCfg, onRemoteStops: applyRemoteStops, onRemoteProduction: applyRemoteProduction, onRemoteSessions: applyRemoteSessions, localConfig, onRemoteConfig: applyRemoteConfig });
+    const updateSyncConfig = useCallback(async (next) => {
+        await api.saveSyncConfig(next);
+        if (next.enabled && next.url) {
+            const cursor = await api.getCursor();
+            if (!cursor)
+                await api.seedOutboxWithAll();
+        }
+        setSyncCfg(next);
+    }, []);
+    useEffect(() => { if (machines.length && !machines.includes(machine))
+        setMachine(machines[0]); }, [machines, machine]);
+    useEffect(() => { if (reasons.length && !reasons.includes(reason))
+        setReason(reasons[0]); }, [reasons, reason]);
+    const persistConfig = useCallback((patch) => {
+        const updatedAt = Date.now();
+        const next = Object.assign(Object.assign({ machines, reasons, quickStops, shift, supervisorPinHash, rates, handoverEmails }, patch), { updatedAt });
+        setConfigUpdatedAt(updatedAt);
+        api.saveConfig(next);
+        if (syncCfg && syncCfg.enabled && syncCfg.url)
+            api.remotePutConfig(next, syncCfg);
+        return next;
+    }, [machines, reasons, quickStops, shift, supervisorPinHash, rates, handoverEmails, syncCfg]);
+    const persistPrefs = useCallback((patch) => {
+        api.savePrefs(Object.assign({ dark, lastReason, clearedBefore, operator, machine, setupLocked }, patch));
+    }, [dark, lastReason, clearedBefore, operator, machine, setupLocked]);
+    const updateMachines = (next) => { setMachines(next); persistConfig({ machines: next }); };
+    const updateReasons = (next) => { setReasons(next); persistConfig({ reasons: next }); };
+    const updateQuickStops = (next) => { setQuickStops(next); persistConfig({ quickStops: next }); };
+    const updateShift = (next) => { setShift(next); persistConfig({ shift: next }); };
+    const updateRates = (next) => { setRates(next); persistConfig({ rates: next }); };
+    const updateHandoverEmails = (next) => { setHandoverEmails(next); persistConfig({ handoverEmails: next }); };
+    const toggleDark = () => { const n = !dark; setDark(n); persistPrefs({ dark: n }); };
+    const updatePin = useCallback(async (pin, currentPin) => {
+        if (supervisorPinHash) {
+            const curHash = await sha256Hex(currentPin || "");
+            if (curHash !== supervisorPinHash)
+                return false;
+        }
+        const hash = pin ? await sha256Hex(pin) : null;
+        setSupervisorPinHash(hash);
+        persistConfig({ supervisorPinHash: hash });
+        return true;
+    }, [supervisorPinHash, persistConfig]);
+    const handleStop = () => {
+        const finished = timer.stop();
+        setPendingStop(finished);
+        setReason(lastReason && reasons.includes(lastReason) ? lastReason : reasons[0]);
+        setNotes("");
+        setSaveError("");
+    };
+    const handleSave = async () => {
+        if (!pendingStop)
+            return;
+        setSaving(true);
+        setSaveError("");
+        const id = `${pendingStop.start}-${Math.floor(Math.random() * 1e6)}`;
+        const record = {
+            id,
+            machine: pendingStop.machine || machine,
+            operator: operator.trim() || "Unnamed",
+            start: pendingStop.start, end: pendingStop.end, duration: pendingStop.duration,
+            reason, notes: notes.trim(), discarded: false,
+            loggedAt: Date.now(),
+            updatedAt: Date.now(),
+        };
+        const res = await api.saveStop(record);
+        if (res.ok) {
+            setStops((prev) => [record, ...prev]);
+            setLastReason(reason);
+            persistPrefs({ lastReason: reason });
+            setPendingStop(null);
+            sync.flush();
+        }
+        else {
+            setSaveError(res.error || "The stop didn't save. Try again.");
+        }
+        setSaving(false);
+    };
+    const handleDiscardPending = () => { setPendingStop(null); setSaveError(""); };
+    const applyQuickStop = (q) => {
+        if (reasons.includes(q.reason))
+            setReason(q.reason);
+        if (q.notes)
+            setNotes(q.notes);
+    };
+    const lockSetup = () => {
+        setSetupLocked(true);
+        persistPrefs({ setupLocked: true, operator, machine });
+        const open = openSessRef.current;
+        if (!open)
+            openSession(machine, operator);
+        else if (open.operator !== operator.trim()) {
+            closeSession();
+            openSession(machine, operator);
+        }
+    };
+    const unlockSetup = () => { setSetupLocked(false); persistPrefs({ setupLocked: false }); };
+    const handleManualSave = async ({ durationMs, reason: mReason, notes: mNotes, machine: mMachine }) => {
+        setSaving(true);
+        setSaveError("");
+        const end = Date.now();
+        const start = end - durationMs;
+        const id = `${start}-${Math.floor(Math.random() * 1e6)}`;
+        const record = {
+            id,
+            machine: mMachine || machine,
+            operator: operator.trim() || "Unnamed",
+            start, end, duration: durationMs,
+            reason: mReason, notes: (mNotes || "").trim(), manual: true, discarded: false,
+            loggedAt: end,
+            updatedAt: end,
+        };
+        const res = await api.saveStop(record);
+        if (res.ok) {
+            setStops((prev) => [record, ...prev]);
+            setLastReason(mReason);
+            persistPrefs({ lastReason: mReason });
+            setManualOpen(false);
+            sync.flush();
+        }
+        else {
+            setSaveError(res.error || "The stop didn't save. Try again.");
+        }
+        setSaving(false);
+        return res.ok;
+    };
+    const handleSaveProduction = async ({ unitsProduced, scrapCount }) => {
+        const now = Date.now();
+        const op = operator.trim() || "Unnamed";
+        const id = `${machineSlug(machine)}|${clearedBefore}|${op}`;
+        const record = {
+            id, kind: "production", machine, operator: op,
+            shiftStart: clearedBefore,
+            unitsProduced: Math.max(0, Math.floor(Number(unitsProduced) || 0)),
+            scrapCount: Math.max(0, Math.floor(Number(scrapCount) || 0)),
+            loggedAt: now, updatedAt: now,
+        };
+        const res = await api.saveProduction(record);
+        if (res.ok) {
+            setProduction((prev) => {
+                const rest = prev.filter((p) => p.id !== id);
+                return [...rest, Object.assign(Object.assign({}, record), { key: `prod:${id}` })];
+            });
+            sync.flush();
+        }
+        return res;
+    };
+    const myProduction = useMemo(() => {
+        const op = operator.trim() || "Unnamed";
+        return production.find((p) => p.id === `${machineSlug(machine)}|${clearedBefore}|${op}`) || null;
+    }, [production, machine, clearedBefore, operator]);
+    const recoverResume = () => {
+        const d = recovered;
+        const mach = machines.includes(d.machine) ? d.machine : machines[0];
+        setOperator(d.operator || "");
+        setMachine(mach);
+        timer.restore(d);
+        setRecovered(null);
+        if (!openSessRef.current)
+            openSession(mach, d.operator || "");
+    };
+    const recoverFinalize = () => {
+        const d = recovered;
+        const banked = Math.max(0, d.accumulated || 0);
+        const liveSeg = (d.paused || !d.segStart) ? 0 : Math.max(0, (d.savedAt || d.segStart) - d.segStart);
+        const dur = banked + liveSeg;
+        setOperator(d.operator || "");
+        setMachine(machines.includes(d.machine) ? d.machine : machines[0]);
+        setPendingStop({ start: d.startTs, end: d.savedAt, duration: dur, machine: d.machine });
+        setReason(lastReason && reasons.includes(lastReason) ? lastReason : reasons[0]);
+        setNotes("");
+        setRecovered(null);
+        api.clearInProgress();
+    };
+    const recoverDiscard = () => { setRecovered(null); api.clearInProgress(); };
+    const discardStop = async (stop, explanation) => {
+        const now = Date.now();
+        const updated = Object.assign(Object.assign({}, stop), { discarded: true, discardReason: explanation, discardedAt: now, updatedAt: now });
+        const res = await api.updateStop(updated);
+        if (res.ok) {
+            setStops((prev) => prev.map((s) => (s.id === stop.id ? updated : s)));
+            sync.flush();
+        }
+        return res.ok;
+    };
+    const deleteStop = async (stop) => {
+        const res = await api.deleteStop(stop);
+        if (res.ok) {
+            setStops((prev) => prev.map((s) => (s.id === stop.id ? Object.assign(Object.assign({}, s), res.tombstone) : s)));
+            sync.flush();
+        }
+        return res.ok;
+    };
+    const startNewShift = () => {
+        const cutoff = Date.now();
+        setClearedBefore(cutoff);
+        setShowAll(false);
+        persistPrefs({ clearedBefore: cutoff });
+        setNewShiftOpen(false);
+        if (openSessRef.current) {
+            closeSession(cutoff);
+            openSession(machine);
+        }
+    };
+    const toggleShowAll = () => setShowAll((v) => !v);
+    const myStops = useMemo(() => stops.filter((s) => {
+        var _a, _b;
+        const stamp = (_b = (_a = s.loggedAt) !== null && _a !== void 0 ? _a : s.end) !== null && _b !== void 0 ? _b : s.start;
+        return (!operator.trim() || s.operator === operator.trim()) && !s.discarded && !s.deleted &&
+            (showAll || stamp > clearedBefore);
+    }), [stops, operator, clearedBefore, showAll]);
+    const [slowTick, setSlowTick] = useState(0);
+    useEffect(() => {
+        const iv = setInterval(() => setSlowTick((n) => n + 1), 30000);
+        return () => clearInterval(iv);
+    }, []);
+    const myShift = useMemo(() => {
+        var _a;
+        const op = operator.trim() || "Unnamed";
+        const now = Date.now();
+        const winStart = clearedBefore || 0;
+        const bag = {};
+        const entry = (m) => (bag[m] = bag[m] || { machine: m, mannedMs: 0, downtimeMs: 0, stops: 0, units: 0, scrap: 0 });
+        for (const s of sessions) {
+            if (s.operator !== op)
+                continue;
+            const end = Math.min((_a = s.end) !== null && _a !== void 0 ? _a : now, now);
+            const start = Math.max(s.start, winStart);
+            if (end > start)
+                entry(s.machine).mannedMs += end - start;
+        }
+        for (const s of myStops) {
+            const e = entry(s.machine);
+            e.downtimeMs += s.duration;
+            e.stops += 1;
+        }
+        for (const p of production) {
+            if (p.operator !== op || p.shiftStart !== clearedBefore)
+                continue;
+            const e = entry(p.machine);
+            e.units += p.unitsProduced || 0;
+            e.scrap += p.scrapCount || 0;
+        }
+        const rows = Object.values(bag);
+        const hasSessions = rows.some((r) => r.mannedMs > 0);
+        let overall;
+        if (hasSessions) {
+            let planned = 0, down = 0, units = 0, scrap = 0, theoretical = 0;
+            for (const r of rows) {
+                const plannedM = r.mannedMs;
+                const downM = Math.min(r.downtimeMs, plannedM || r.downtimeMs);
+                planned += plannedM;
+                down += downM;
+                units += r.units;
+                scrap += r.scrap;
+                const rate = rates === null || rates === void 0 ? void 0 : rates[r.machine];
+                if (rate && plannedM > 0)
+                    theoretical += rate * (Math.max(0, plannedM - downM) / HOUR_MS);
+                r.oee = computeOEE({ plannedMs: plannedM, downtimeMs: r.downtimeMs, unitsProduced: r.units, scrapCount: r.scrap, ratePerHour: rate });
+            }
+            overall = computeOEE({ plannedMs: planned, downtimeMs: down, unitsProduced: units, scrapCount: scrap, ratePerHour: 0 });
+            if (theoretical > 0) {
+                overall.p = Math.min(1, Math.max(0, units / theoretical));
+                const fs = [overall.a, overall.p, overall.q].filter((f) => f != null);
+                overall.oee = fs.length ? fs.reduce((x, y) => x * y, 1) : null;
+                overall.partial = overall.a == null || overall.p == null || overall.q == null;
+            }
+        }
+        else {
+            const downtimeMs = myStops.reduce((a, s) => a + s.duration, 0);
+            overall = computeOEE({
+                plannedMs: shiftLengthMs(shift), downtimeMs,
+                unitsProduced: myProduction === null || myProduction === void 0 ? void 0 : myProduction.unitsProduced, scrapCount: myProduction === null || myProduction === void 0 ? void 0 : myProduction.scrapCount,
+                ratePerHour: rates === null || rates === void 0 ? void 0 : rates[machine],
+            });
+        }
+        rows.sort((a, b) => b.mannedMs - a.mannedMs);
+        return { rows, overall, hasSessions };
+    }, [sessions, myStops, production, rates, shift, clearedBefore, operator, machine, myProduction, slowTick]);
+    return (React.createElement("div", { className: `min-h-screen ${t.app} transition-colors` },
+        React.createElement("header", { className: "bg-slate-900 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-10" },
+            React.createElement("div", { className: "flex items-center gap-2" },
+                React.createElement("div", { className: "bg-emerald-500/20 rounded-lg p-1.5" },
+                    React.createElement(Factory, { size: 20, className: "text-emerald-400" })),
+                React.createElement("div", null,
+                    React.createElement("h1", { className: "font-bold text-lg leading-none" }, "StopTrack"),
+                    React.createElement("span", { className: "text-[10px] text-slate-400 uppercase tracking-wide" }, "ASLA downtime"))),
+            React.createElement("div", { className: "flex items-center gap-2" },
+                React.createElement("button", { onClick: toggleDark, className: "p-2 text-slate-300 hover:text-white", title: "Toggle theme", "aria-label": "Toggle theme" }, dark ? React.createElement(Sun, { size: 18 }) : React.createElement(Moon, { size: 18 })),
+                React.createElement("div", { className: "flex bg-slate-700 rounded-lg p-1 text-sm" },
+                    React.createElement("button", { onClick: () => { setView("operator"); setSupervisorUnlocked(false); }, className: `px-3 py-1.5 rounded-md transition ${view === "operator" ? "bg-emerald-500 text-white font-semibold" : "text-slate-300"}` }, "Operator"),
+                    React.createElement("button", { onClick: () => setView("supervisor"), className: `px-3 py-1.5 rounded-md flex items-center gap-1 transition ${view === "supervisor" ? "bg-emerald-500 text-white font-semibold" : "text-slate-300"}` },
+                        supervisorPinHash && React.createElement(Lock, { size: 12 }),
+                        " Supervisor")))),
+        React.createElement("main", { className: "max-w-3xl mx-auto p-4 pb-24" }, view === "operator" ? (React.createElement(OperatorView, { t: t, operator: operator, setOperator: setOperator, machine: machine, setMachine: switchMachine, timer: timer, onStop: handleStop, pendingStop: pendingStop, reason: reason, setReason: setReason, notes: notes, setNotes: setNotes, onSave: handleSave, onDiscardPending: handleDiscardPending, saving: saving, saveError: saveError, myStops: myStops, machines: machines, reasons: reasons, quickStops: quickStops, applyQuickStop: applyQuickStop, lastReason: lastReason, shift: shift, clearedBefore: clearedBefore, onNewShift: () => setNewShiftOpen(true), showAll: showAll, onToggleShowAll: toggleShowAll, setupLocked: setupLocked, onLockSetup: lockSetup, onUnlockSetup: unlockSetup, onOpenManual: () => { setSaveError(""); setManualOpen(true); }, syncStatus: sync.status, syncOn: syncOn, rates: rates, myProduction: myProduction, onSaveProduction: handleSaveProduction, myShift: myShift, onOpenHandover: () => setHandoverOpen(true) })) : (supervisorPinHash && !supervisorUnlocked) ? (React.createElement(PinGate, { t: t, pinHash: supervisorPinHash, onUnlock: () => setSupervisorUnlocked(true) })) : (React.createElement(SupervisorView, { t: t, stops: stops, loading: loading, onRefresh: refreshStops, machines: machines, reasons: reasons, quickStops: quickStops, shift: shift, updateMachines: updateMachines, updateReasons: updateReasons, updateQuickStops: updateQuickStops, updateShift: updateShift, discardStop: discardStop, deleteStop: deleteStop, hasPin: !!supervisorPinHash, updatePin: updatePin, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: sync.status, onSyncNow: sync.flush, rates: rates, updateRates: updateRates, production: production, sessions: sessions, handoverEmails: handoverEmails, updateHandoverEmails: updateHandoverEmails }))),
+        recovered && (React.createElement("div", { className: "fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30" },
+            React.createElement("div", { className: `${dark ? "bg-slate-900" : "bg-white"} rounded-xl shadow-xl p-5 max-w-sm w-full space-y-3` },
+                React.createElement("div", { className: "flex items-center gap-2 font-bold" },
+                    React.createElement(RotateCcw, { size: 18, className: "text-amber-500" }),
+                    " Unfinished stop found"),
+                React.createElement("p", { className: `text-sm ${t.sub}` },
+                    "A stop on ",
+                    React.createElement("b", null, recovered.machine || "a machine"),
+                    " started ",
+                    fmtTime(recovered.startTs),
+                    " was still running when the app closed."),
+                React.createElement("div", { className: "flex flex-col gap-2" },
+                    React.createElement("button", { onClick: recoverResume, className: "bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 rounded-lg" }, "Resume timing"),
+                    React.createElement("button", { onClick: recoverFinalize, className: "bg-slate-700 hover:bg-slate-800 text-white font-bold py-3 rounded-lg" }, "Finalize & document now"),
+                    React.createElement("button", { onClick: recoverDiscard, className: `${t.sub} hover:text-red-500 font-semibold py-1` }, "Discard it"))))),
+        newShiftOpen && (React.createElement("div", { className: "fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30", onClick: () => setNewShiftOpen(false) },
+            React.createElement("div", { className: `${dark ? "bg-slate-900" : "bg-white"} rounded-xl shadow-xl p-5 max-w-sm w-full space-y-3`, onClick: (e) => e.stopPropagation() },
+                React.createElement("div", { className: "flex items-center gap-2 font-bold" },
+                    React.createElement(Sparkles, { size: 18, className: "text-emerald-500" }),
+                    " Start a new shift?"),
+                React.createElement("p", { className: `text-sm ${t.sub}` }, "This will hide all current stops from view for the new shift. Data remains saved and can still be viewed by the supervisor and exported."),
+                React.createElement("div", { className: "flex gap-2" },
+                    React.createElement("button", { onClick: startNewShift, className: "flex-1 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 rounded-lg" }, "Start new shift"),
+                    React.createElement("button", { onClick: () => setNewShiftOpen(false), className: `px-4 ${t.sub} font-semibold` }, "Cancel"))))),
+        manualOpen && (React.createElement(ManualStopModal, { t: t, dark: dark, machine: machine, machines: machines, reasons: reasons, quickStops: quickStops, lastReason: lastReason, saving: saving, saveError: saveError, onSave: handleManualSave, onClose: () => setManualOpen(false) })),
+        handoverOpen && (React.createElement(ShiftHandoverModal, { t: t, dark: dark, report: buildShiftReport({ operator, machine, myStops, myShift, clearedBefore }), handoverEmails: handoverEmails, syncCfg: syncCfg, onClose: () => setHandoverOpen(false) }))));
+}
+function OperatorView(props) {
+    const { t, operator, setOperator, machine, setMachine, timer, onStop, pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError, myStops, machines, reasons, quickStops, applyQuickStop, lastReason, shift, clearedBefore, onNewShift, showAll, onToggleShowAll, setupLocked, onLockSetup, onUnlockSetup, onOpenManual, syncStatus, syncOn, rates, myProduction, onSaveProduction, myShift, onOpenHandover, } = props;
+    const { state, elapsed, start, pause, resume } = timer;
+    const { running, paused } = state;
+    const downtimeMs = useMemo(() => myStops.reduce((a, s) => a + s.duration, 0), [myStops]);
+    const lastHourCount = useMemo(() => {
+        const cutoff = Date.now() - 60 * 60 * 1000;
+        return myStops.filter((s) => s.end > cutoff).length;
+    }, [myStops]);
+    const oee = myShift.overall;
+    const byReason = useMemo(() => {
+        var _a;
+        const map = {};
+        myStops.forEach((s) => { map[s.reason] = (map[s.reason] || 0) + s.duration; });
+        const list = Object.entries(map).sort((a, b) => b[1] - a[1]);
+        return { list, max: ((_a = list[0]) === null || _a === void 0 ? void 0 : _a[1]) || 1 };
+    }, [myStops]);
+    const canLock = operator.trim().length > 0;
+    return (React.createElement("div", { className: "space-y-4" },
+        React.createElement("div", { className: "grid grid-cols-2 sm:grid-cols-4 gap-3" },
+            React.createElement(StatCard, { t: t, label: "Stops", value: myStops.length, icon: React.createElement(List, { size: 16 }) }),
+            React.createElement(StatCard, { t: t, label: "Downtime", value: fmtDur(downtimeMs), icon: React.createElement(Clock, { size: 16 }) }),
+            React.createElement(StatCard, { t: t, label: "Last Hour", value: lastHourCount, icon: React.createElement(AlertCircle, { size: 16 }) }),
+            React.createElement(StatCard, { t: t, label: oee.partial ? "OEE (partial)" : "OEE", value: pct(oee.oee), icon: React.createElement(TrendingUp, { size: 16 }), accent: oeeAccent(oee.oee) })),
+        React.createElement("div", { className: `text-[11px] ${t.sub} text-center -mt-2` },
+            "Availability ",
+            pct(oee.a),
+            " \u00B7 Performance ",
+            pct(oee.p),
+            " \u00B7 Quality ",
+            pct(oee.q),
+            oee.p == null && " — set a machine rate in Supervisor → Settings",
+            oee.p != null && oee.q == null && " — enter shift output below"),
+        myShift.hasSessions && myShift.rows.length > 0 && (React.createElement("div", { className: "flex flex-wrap gap-1.5 justify-center -mt-1" }, myShift.rows.map((r) => (React.createElement("span", { key: r.machine, className: `${t.chip} rounded-full px-3 py-1 text-[11px]` },
+            React.createElement("span", { className: "font-semibold" }, r.machine),
+            " · ",
+            fmtDur(r.mannedMs),
+            r.stops > 0 && React.createElement(React.Fragment, null,
+                " \u00B7 ",
+                r.stops,
+                " stop",
+                r.stops === 1 ? "" : "s",
+                " \u00B7 ",
+                React.createElement("span", { className: "text-red-500 font-mono" }, fmtDur(r.downtimeMs)))))))),
+        React.createElement("div", { className: `${t.card} rounded-xl p-4 space-y-3` },
+            React.createElement("label", { className: "flex flex-col gap-1" },
+                React.createElement("span", { className: `text-xs font-semibold ${t.sub} flex items-center gap-1` },
+                    React.createElement(User, { size: 13 }),
+                    " OPERATOR"),
+                React.createElement("input", { value: operator, maxLength: 40, disabled: setupLocked, onChange: (e) => setOperator(e.target.value), placeholder: "Your name", className: `border rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-400 disabled:opacity-70 disabled:cursor-not-allowed ${t.input}` })),
+            React.createElement("div", { className: "flex flex-col gap-1" },
+                React.createElement("span", { className: `text-xs font-semibold ${t.sub} flex items-center gap-1` },
+                    React.createElement(Factory, { size: 13 }),
+                    " MACHINE \u2014 tap to switch"),
+                machines.length <= 8 ? (React.createElement("div", { className: "flex flex-wrap gap-1.5" }, machines.map((m) => {
+                    const activeChip = m === machine;
+                    const timingHere = (running || paused) && state.machine === m;
+                    return (React.createElement("button", { key: m, onClick: () => setMachine(m), className: `relative px-3 py-2.5 rounded-lg text-sm font-semibold transition active:scale-95 ${activeChip ? "bg-emerald-500 text-white shadow" : t.chip}` },
+                        m,
+                        timingHere && React.createElement("span", { className: "absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse", title: "Stop being timed here" })));
+                }))) : (React.createElement("select", { value: machine, onChange: (e) => setMachine(e.target.value), className: `border rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }, machines.map((m) => React.createElement("option", { key: m }, m))))),
+            !setupLocked ? (React.createElement("button", { onClick: onLockSetup, disabled: !canLock, className: `w-full flex items-center justify-center gap-2 font-bold py-2.5 rounded-lg transition ${canLock ? "bg-slate-800 hover:bg-slate-900 text-white" : `${t.muted} ${t.sub} cursor-not-allowed`}` },
+                React.createElement(Lock, { size: 16 }),
+                " Lock name")) : (React.createElement("button", { onClick: onUnlockSetup, className: "w-full flex items-center justify-center gap-2 font-bold py-2.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white transition" },
+                React.createElement(Unlock, { size: 16 }),
+                " Unlock name")),
+            setupLocked && React.createElement("p", { className: `text-[11px] ${t.sub} text-center` }, "Name is locked and survives a refresh. Switching machines stays one tap \u2014 it never needs unlocking.")),
+        (!STORAGE_INFO.persistent || (!STORAGE_INFO.shared && !syncOn)) && (React.createElement("div", { className: `text-xs rounded-lg px-3 py-2 flex items-center gap-2 ${STORAGE_INFO.persistent ? "bg-amber-500/10 text-amber-600" : "bg-red-500/10 text-red-600"}` },
+            React.createElement(AlertCircle, { size: 14 }),
+            STORAGE_INFO.persistent
+                ? "Stops are saved on this device only — turn on Server sync (Supervisor → Settings) to share with the supervisor."
+                : "Storage is unavailable, so stops are kept only until you close this tab. Export before leaving.")),
+        syncOn && React.createElement(SyncStatusBadge, { t: t, status: syncStatus }),
+        React.createElement("div", { className: `${t.card} rounded-xl p-6 flex flex-col items-center` },
+            React.createElement("div", { className: `text-xs font-semibold tracking-wide ${t.sub} mb-1` }, paused ? `PAUSED — ${state.machine || machine}` : running ? `${(state.machine || machine).toUpperCase()} STOPPED — TIMING` : "READY"),
+            React.createElement("div", { className: `text-6xl font-mono font-bold mb-5 tabular-nums ${paused ? "text-amber-500" : running ? "text-red-500" : t.sub}` }, fmtClock(elapsed)),
+            !running ? (React.createElement("button", { onClick: start, disabled: !!pendingStop, className: "flex items-center gap-2 bg-red-500 hover:bg-red-600 disabled:opacity-40 text-white font-bold text-lg px-12 py-5 rounded-full shadow-lg transition active:scale-95" },
+                React.createElement(Play, { size: 24, fill: "white" }),
+                " Start Stop")) : (React.createElement("div", { className: "flex gap-3" },
+                !paused ? (React.createElement("button", { onClick: pause, className: "flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-white font-bold px-7 py-5 rounded-full shadow-lg transition active:scale-95" },
+                    React.createElement(Pause, { size: 20, fill: "white" }),
+                    " Pause")) : (React.createElement("button", { onClick: resume, className: "flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white font-bold px-7 py-5 rounded-full shadow-lg transition active:scale-95" },
+                    React.createElement(Play, { size: 20, fill: "white" }),
+                    " Resume")),
+                React.createElement("button", { onClick: onStop, className: "flex items-center gap-2 bg-slate-800 hover:bg-slate-900 text-white font-bold px-7 py-5 rounded-full shadow-lg transition active:scale-95" },
+                    React.createElement(Square, { size: 20, fill: "white" }),
+                    " End Stop"))),
+            React.createElement("p", { className: `text-xs ${t.sub} mt-3 text-center max-w-xs` }, "Tap \u201CStart Stop\u201D when the machine stops. Pause for short interruptions; \u201CEnd Stop\u201D when it runs again."),
+            !running && !pendingStop && (React.createElement("button", { onClick: onOpenManual, className: `mt-4 flex items-center gap-2 text-sm font-semibold ${t.chip} px-4 py-2.5 rounded-full active:scale-95 transition` },
+                React.createElement(PencilLine, { size: 16 }),
+                " Report a stop manually"))),
+        pendingStop && (React.createElement("div", { className: `${t.card} rounded-xl border-2 border-emerald-400 p-4 space-y-3` },
+            React.createElement("div", { className: "flex items-center gap-2 text-emerald-500 font-bold" },
+                React.createElement(AlertCircle, { size: 18 }),
+                " Document this stop"),
+            React.createElement("div", { className: `grid grid-cols-2 gap-2 text-sm ${t.muted} rounded-lg p-3` },
+                React.createElement("div", null,
+                    React.createElement("span", { className: `${t.sub} text-xs` }, "DURATION"),
+                    React.createElement("div", { className: "font-mono font-bold text-lg" }, fmtDur(pendingStop.duration))),
+                React.createElement("div", null,
+                    React.createElement("span", { className: `${t.sub} text-xs` }, "MACHINE"),
+                    React.createElement("div", { className: "font-semibold" }, pendingStop.machine || machine)),
+                React.createElement("div", null,
+                    React.createElement("span", { className: `${t.sub} text-xs` }, "START"),
+                    React.createElement("div", null, fmtTime(pendingStop.start))),
+                React.createElement("div", null,
+                    React.createElement("span", { className: `${t.sub} text-xs` }, "END"),
+                    React.createElement("div", null, fmtTime(pendingStop.end)))),
+            React.createElement("div", { className: "flex flex-wrap gap-2" },
+                lastReason && reasons.includes(lastReason) && (React.createElement("button", { onClick: () => setReason(lastReason), className: "flex items-center gap-1 text-xs bg-emerald-100 text-emerald-700 rounded-full px-3 py-1.5 font-semibold hover:bg-emerald-200" },
+                    React.createElement(RotateCcw, { size: 12 }),
+                    " Last: ",
+                    lastReason)),
+                quickStops.map((q, i) => (React.createElement("button", { key: i, onClick: () => applyQuickStop(q), className: `flex items-center gap-1 text-xs ${t.chip} rounded-full px-3 py-1.5 font-semibold hover:opacity-80` },
+                    React.createElement(Zap, { size: 12, className: "text-amber-500" }),
+                    " ",
+                    q.label)))),
+            React.createElement("label", { className: "flex flex-col gap-1" },
+                React.createElement("span", { className: `text-xs font-semibold ${t.sub}` }, "REASON"),
+                React.createElement("select", { value: reason, onChange: (e) => setReason(e.target.value), className: `border rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }, reasons.map((r) => React.createElement("option", { key: r }, r)))),
+            React.createElement("label", { className: "flex flex-col gap-1" },
+                React.createElement("span", { className: `text-xs font-semibold ${t.sub}` }, "NOTES (optional)"),
+                React.createElement("textarea", { value: notes, onChange: (e) => setNotes(e.target.value), rows: 2, placeholder: "Add detail\u2026", className: `border rounded-lg px-3 py-2.5 resize-none focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` })),
+            React.createElement("div", { className: "flex gap-2" },
+                React.createElement("button", { onClick: onSave, disabled: saving, className: "flex-1 flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white font-bold py-3.5 rounded-lg transition" },
+                    saving ? React.createElement(RefreshCw, { size: 18, className: "animate-spin" }) : React.createElement(CheckCircle, { size: 18 }),
+                    " Save stop"),
+                React.createElement("button", { onClick: onDiscardPending, disabled: saving, className: `px-4 ${t.sub} hover:text-red-500 font-semibold` }, "Discard")),
+            saveError && React.createElement("div", { className: "flex items-center gap-2 text-sm text-red-500 bg-red-500/10 rounded-lg px-3 py-2" },
+                React.createElement(AlertCircle, { size: 15 }),
+                " ",
+                saveError))),
+        React.createElement(ShiftOutputCard, { t: t, myProduction: myProduction, onSaveProduction: onSaveProduction, machine: machine, otherEntries: myShift.rows.filter((r) => (r.units > 0 || r.scrap > 0) && r.machine !== machine), onJump: setMachine }),
+        React.createElement("div", { className: `${t.card} rounded-xl p-4` },
+            React.createElement("div", { className: "flex items-center justify-between gap-3 flex-wrap" },
+                React.createElement("div", null,
+                    React.createElement("div", { className: `text-xs font-semibold ${t.sub}` }, "THIS SHIFT"),
+                    React.createElement("div", { className: "font-bold text-lg leading-tight" },
+                        myStops.length,
+                        " stop",
+                        myStops.length === 1 ? "" : "s",
+                        " \u00B7 ",
+                        React.createElement("span", { className: "font-mono text-red-500" }, fmtDur(downtimeMs)))),
+                React.createElement("div", { className: "flex gap-2" },
+                    React.createElement("button", { onClick: onOpenHandover, className: `flex items-center gap-2 ${t.accentBtn} font-bold px-4 py-3 rounded-xl shadow active:scale-95 transition` },
+                        React.createElement(PencilLine, { size: 18 }),
+                        " Handover"),
+                    React.createElement("button", { onClick: onNewShift, disabled: !!pendingStop, className: "flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-white font-bold px-5 py-3 rounded-xl shadow active:scale-95 transition" },
+                        React.createElement(Sparkles, { size: 18 }),
+                        " New Shift"))),
+            clearedBefore > 0 && (React.createElement("div", { className: `text-xs ${t.sub} ${t.muted} rounded-lg px-3 py-2 mt-3 flex items-center justify-between gap-2` },
+                React.createElement("span", { className: "flex items-center gap-1" },
+                    React.createElement(Archive, { size: 13 }),
+                    showAll
+                        ? "Showing all stops, including earlier shifts."
+                        : `New shift started ${fmtTime(clearedBefore)}. Earlier stops are hidden but saved.`),
+                React.createElement("button", { onClick: onToggleShowAll, className: "text-emerald-500 font-semibold hover:underline whitespace-nowrap" }, showAll ? "Hide earlier" : "Show all")))),
+        React.createElement("div", { className: `${t.card} rounded-xl p-4` },
+            React.createElement("div", { className: "flex items-center gap-2 font-bold mb-3" },
+                React.createElement(List, { size: 18 }),
+                " Recent stops ",
+                operator.trim() && React.createElement("span", { className: `text-xs font-normal ${t.sub}` },
+                    "(",
+                    operator.trim(),
+                    ")")),
+            myStops.length === 0 ? React.createElement("p", { className: `${t.sub} text-sm text-center py-4` }, "No stops logged yet. Start the timer when the machine stops.") : (React.createElement("div", { className: "space-y-2" }, myStops.slice(0, 8).map((s) => (React.createElement("div", { key: s.id, className: `flex items-center justify-between border ${t.border} rounded-lg px-3 py-2.5 text-sm` },
+                React.createElement("div", null,
+                    React.createElement("div", { className: "font-semibold" }, s.machine),
+                    React.createElement("div", { className: `${t.sub} text-xs` },
+                        fmtTime(s.start),
+                        " \u00B7 ",
+                        s.reason)),
+                React.createElement("div", { className: "font-mono font-bold text-red-500" }, fmtDur(s.duration)))))))),
+        React.createElement("div", { className: `${t.card} rounded-xl p-4` },
+            React.createElement("h3", { className: "font-bold mb-3 flex items-center gap-2" },
+                React.createElement(BarChart3, { size: 18 }),
+                " Downtime by reason"),
+            byReason.list.length === 0 ? React.createElement("p", { className: `${t.sub} text-sm text-center py-4` }, "No downtime logged this shift.") : (React.createElement("div", { className: "space-y-2" }, byReason.list.map(([r, d]) => (React.createElement("div", { key: r },
+                React.createElement("div", { className: "flex justify-between text-xs mb-1" },
+                    React.createElement("span", { className: "font-medium" }, r),
+                    React.createElement("span", { className: `font-mono ${t.sub}` }, fmtDur(d))),
+                React.createElement("div", { className: `h-2 ${t.muted} rounded-full overflow-hidden` },
+                    React.createElement("div", { className: "h-full bg-emerald-500 rounded-full", style: { width: `${(d / byReason.max) * 100}%` } }))))))))));
+}
+function ManualStopModal({ t, dark, machine, machines, reasons, quickStops, lastReason, saving, saveError, onSave, onClose }) {
+    const [mins, setMins] = useState("");
+    const [secs, setSecs] = useState("");
+    const [mMachine, setMMachine] = useState(machine);
+    const [reason, setReason] = useState(lastReason && reasons.includes(lastReason) ? lastReason : reasons[0]);
+    const [notes, setNotes] = useState("");
+    const [localErr, setLocalErr] = useState("");
+    const durationMs = (Math.max(0, parseInt(mins || "0", 10)) * 60 + Math.max(0, parseInt(secs || "0", 10))) * 1000;
+    const submit = async () => {
+        if (durationMs <= 0) {
+            setLocalErr("Enter a duration greater than zero.");
+            return;
+        }
+        setLocalErr("");
+        await onSave({ durationMs, reason, notes, machine: mMachine });
+    };
+    return (React.createElement("div", { className: "fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30", onClick: onClose },
+        React.createElement("div", { className: `${dark ? "bg-slate-900" : "bg-white"} rounded-xl shadow-xl p-5 max-w-sm w-full space-y-3 max-h-[90vh] overflow-y-auto`, onClick: (e) => e.stopPropagation() },
+            React.createElement("div", { className: "flex items-center gap-2 font-bold" },
+                React.createElement(PencilLine, { size: 18, className: "text-emerald-500" }),
+                " Report a stop manually"),
+            React.createElement("p", { className: `text-sm ${t.sub}` }, "For a stop that already happened. Enter how long it lasted."),
+            React.createElement("label", { className: "flex flex-col gap-1" },
+                React.createElement("span", { className: `text-xs font-semibold ${t.sub}` }, "MACHINE"),
+                React.createElement("select", { value: mMachine, onChange: (e) => setMMachine(e.target.value), className: `border rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }, (machines || [machine]).map((m) => React.createElement("option", { key: m }, m)))),
+            React.createElement("div", null,
+                React.createElement("span", { className: `text-xs font-semibold ${t.sub}` }, "DURATION"),
+                React.createElement("div", { className: "flex items-center gap-2 mt-1" },
+                    React.createElement("div", { className: "flex-1 flex items-center gap-1" },
+                        React.createElement("input", { type: "number", inputMode: "numeric", min: "0", value: mins, onChange: (e) => setMins(e.target.value), placeholder: "0", className: `w-full text-center text-2xl font-mono font-bold border rounded-lg py-2 focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
+                        React.createElement("span", { className: `text-sm ${t.sub}` }, "min")),
+                    React.createElement("div", { className: "flex-1 flex items-center gap-1" },
+                        React.createElement("input", { type: "number", inputMode: "numeric", min: "0", max: "59", value: secs, onChange: (e) => setSecs(e.target.value), placeholder: "0", className: `w-full text-center text-2xl font-mono font-bold border rounded-lg py-2 focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
+                        React.createElement("span", { className: `text-sm ${t.sub}` }, "sec"))),
+                React.createElement("div", { className: "flex flex-wrap gap-2 mt-2" }, [5, 10, 15, 30].map((m) => (React.createElement("button", { key: m, onClick: () => { setMins(String(m)); setSecs(""); }, className: `text-xs ${t.chip} rounded-full px-3 py-1.5 font-semibold active:scale-95` },
+                    m,
+                    " min"))))),
+            React.createElement("div", { className: "flex flex-wrap gap-2" },
+                lastReason && reasons.includes(lastReason) && (React.createElement("button", { onClick: () => setReason(lastReason), className: "flex items-center gap-1 text-xs bg-emerald-100 text-emerald-700 rounded-full px-3 py-1.5 font-semibold hover:bg-emerald-200" },
+                    React.createElement(RotateCcw, { size: 12 }),
+                    " Last: ",
+                    lastReason)),
+                quickStops.map((q, i) => (React.createElement("button", { key: i, onClick: () => { if (reasons.includes(q.reason))
+                        setReason(q.reason); if (q.notes)
+                        setNotes(q.notes); }, className: `flex items-center gap-1 text-xs ${t.chip} rounded-full px-3 py-1.5 font-semibold hover:opacity-80` },
+                    React.createElement(Zap, { size: 12, className: "text-amber-500" }),
+                    " ",
+                    q.label)))),
+            React.createElement("label", { className: "flex flex-col gap-1" },
+                React.createElement("span", { className: `text-xs font-semibold ${t.sub}` }, "REASON"),
+                React.createElement("select", { value: reason, onChange: (e) => setReason(e.target.value), className: `border rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }, reasons.map((r) => React.createElement("option", { key: r }, r)))),
+            React.createElement("label", { className: "flex flex-col gap-1" },
+                React.createElement("span", { className: `text-xs font-semibold ${t.sub}` }, "NOTES (optional)"),
+                React.createElement("textarea", { value: notes, onChange: (e) => setNotes(e.target.value), rows: 2, placeholder: "Add detail\u2026", className: `border rounded-lg px-3 py-2.5 resize-none focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` })),
+            (localErr || saveError) && React.createElement("div", { className: "flex items-center gap-2 text-sm text-red-500 bg-red-500/10 rounded-lg px-3 py-2" },
+                React.createElement(AlertCircle, { size: 15 }),
+                " ",
+                localErr || saveError),
+            React.createElement("div", { className: "flex gap-2" },
+                React.createElement("button", { onClick: submit, disabled: saving, className: "flex-1 flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white font-bold py-3.5 rounded-lg transition" },
+                    saving ? React.createElement(RefreshCw, { size: 18, className: "animate-spin" }) : React.createElement(CheckCircle, { size: 18 }),
+                    " Save stop"),
+                React.createElement("button", { onClick: onClose, disabled: saving, className: `px-4 ${t.sub} hover:text-red-500 font-semibold` }, "Cancel")))));
+}
+function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quickStops, shift, updateMachines, updateReasons, updateQuickStops, updateShift, discardStop, deleteStop, hasPin, updatePin, syncCfg, updateSyncConfig, syncStatus, onSyncNow, rates, updateRates, production, sessions, handoverEmails, updateHandoverEmails }) {
+    const [tab, setTab] = useState("log");
+    const [filterMachine, setFilterMachine] = useState("All");
+    const [query, setQuery] = useState("");
+    const [range, setRange] = useState("all");
+    const [customFrom, setCustomFrom] = useState("");
+    const [customTo, setCustomTo] = useState("");
+    const [discardTarget, setDiscardTarget] = useState(null);
+    const [discardText, setDiscardText] = useState("");
+    const [deleteTarget, setDeleteTarget] = useState(null);
+    const rangeBounds = useMemo(() => {
+        const now = Date.now();
+        if (range === "7")
+            return [now - 7 * DAY, now];
+        if (range === "30")
+            return [now - 30 * DAY, now];
+        if (range === "custom") {
+            const from = customFrom ? new Date(customFrom).getTime() : 0;
+            const to = customTo ? new Date(customTo).getTime() + DAY : now;
+            return [from, to];
+        }
+        return [0, Infinity];
+    }, [range, customFrom, customTo]);
+    const logFiltered = useMemo(() => stops.filter((s) => {
+        if (s.deleted)
+            return false;
+        if (filterMachine !== "All" && s.machine !== filterMachine)
+            return false;
+        if (s.start < rangeBounds[0] || s.start > rangeBounds[1])
+            return false;
+        if (query.trim()) {
+            const q = query.toLowerCase();
+            if (!`${s.machine} ${s.reason} ${s.operator} ${s.notes || ""}`.toLowerCase().includes(q))
+                return false;
+        }
+        return true;
+    }), [stops, filterMachine, rangeBounds, query]);
+    const active = useMemo(() => logFiltered.filter((s) => !s.discarded), [logFiltered]);
+    const stats = useMemo(() => {
+        var _a;
+        const totalDowntime = active.reduce((a, s) => a + s.duration, 0);
+        const byReason = {}, byMachine = {};
+        active.forEach((s) => {
+            byReason[s.reason] = (byReason[s.reason] || 0) + s.duration;
+            byMachine[s.machine] = (byMachine[s.machine] || 0) + s.duration;
+        });
+        const topReasons = Object.entries(byReason).sort((a, b) => b[1] - a[1]);
+        const topMachines = Object.entries(byMachine).sort((a, b) => b[1] - a[1]);
+        return { totalDowntime, topReasons, topMachines, maxReason: ((_a = topReasons[0]) === null || _a === void 0 ? void 0 : _a[1]) || 1 };
+    }, [active]);
+    const trend = useMemo(() => {
+        const now = Date.now();
+        const days = [];
+        for (let i = 6; i >= 0; i--) {
+            const dStart = new Date(now - i * DAY);
+            dStart.setHours(0, 0, 0, 0);
+            const dEnd = dStart.getTime() + DAY;
+            const total = stops
+                .filter((s) => !s.discarded && !s.deleted && (filterMachine === "All" || s.machine === filterMachine) && s.start >= dStart.getTime() && s.start < dEnd)
+                .reduce((a, s) => a + s.duration, 0);
+            days.push({ label: dayKey(dStart.getTime()), ms: total });
+        }
+        return days;
+    }, [stops, filterMachine]);
+    const maxTrend = Math.max(1, ...trend.map((d) => d.ms));
+    const uptime = useMemo(() => {
+        const shiftMs = shiftLengthMs(shift);
+        if (!shiftMs)
+            return null;
+        const dayset = new Set(active.map((s) => new Date(s.start).toDateString()));
+        const days = Math.max(1, dayset.size);
+        const planned = shiftMs * days;
+        const up = Math.max(0, planned - stats.totalDowntime);
+        return Math.min(100, Math.max(0, (up / planned) * 100));
+    }, [active, shift, stats.totalDowntime]);
+    const liveCount = useMemo(() => {
+        const cutoff = Date.now() - 60 * 60 * 1000;
+        return active.filter((s) => s.end > cutoff).length;
+    }, [active]);
+    const machineOEE = useMemo(() => {
+        const shiftMs = shiftLengthMs(shift);
+        const nowTs = Date.now();
+        const prodInRange = production.filter((p) => {
+            var _a, _b;
+            const ts = (_b = (_a = p.loggedAt) !== null && _a !== void 0 ? _a : p.shiftStart) !== null && _b !== void 0 ? _b : 0;
+            return ts >= rangeBounds[0] && ts <= rangeBounds[1];
+        });
+        const mannedByMachine = {};
+        (sessions || []).forEach((s) => {
+            var _a;
+            const end = Math.min((_a = s.end) !== null && _a !== void 0 ? _a : nowTs, rangeBounds[1] === Infinity ? nowTs : rangeBounds[1]);
+            const start = Math.max(s.start, rangeBounds[0]);
+            if (end > start)
+                mannedByMachine[s.machine] = (mannedByMachine[s.machine] || 0) + (end - start);
+        });
+        const downByMachine = {};
+        active.forEach((s) => { downByMachine[s.machine] = (downByMachine[s.machine] || 0) + s.duration; });
+        const rows = [];
+        let sum = { planned: 0, down: 0, units: 0, scrap: 0, theoretical: 0 };
+        for (const m of machines) {
+            const prod = prodInRange.filter((p) => p.machine === m);
+            const units = prod.reduce((a, p) => a + (p.unitsProduced || 0), 0);
+            const scrap = prod.reduce((a, p) => a + (p.scrapCount || 0), 0);
+            const down = downByMachine[m] || 0;
+            const manned = mannedByMachine[m] || 0;
+            if (!units && !down && !manned)
+                continue;
+            const days = new Set([
+                ...active.filter((s) => s.machine === m).map((s) => new Date(s.start).toDateString()),
+                ...prod.map((p) => { var _a; return new Date((_a = p.loggedAt) !== null && _a !== void 0 ? _a : p.shiftStart).toDateString(); }),
+            ]).size || 1;
+            const plannedMs = shiftMs * days;
+            const oee = computeOEE({ plannedMs, downtimeMs: down, unitsProduced: units, scrapCount: scrap, ratePerHour: rates === null || rates === void 0 ? void 0 : rates[m] });
+            rows.push(Object.assign({ machine: m, units, scrap, mannedMs: manned, plannedMs }, oee));
+            sum.planned += plannedMs;
+            sum.down += down;
+            sum.units += units;
+            sum.scrap += scrap;
+            if (rates === null || rates === void 0 ? void 0 : rates[m])
+                sum.theoretical += (rates[m] || 0) * (Math.max(0, plannedMs - down) / HOUR_MS);
+        }
+        const overall = computeOEE({
+            plannedMs: sum.planned, downtimeMs: sum.down,
+            unitsProduced: sum.units, scrapCount: sum.scrap,
+            ratePerHour: 0,
+        });
+        if (sum.theoretical > 0) {
+            overall.p = Math.min(1, Math.max(0, sum.units / sum.theoretical));
+            const fs = [overall.a, overall.p, overall.q].filter((f) => f != null);
+            overall.oee = fs.length ? fs.reduce((x, y) => x * y, 1) : null;
+            overall.partial = overall.a == null || overall.p == null || overall.q == null;
+        }
+        rows.sort((a, b) => { var _a, _b; return ((_a = a.oee) !== null && _a !== void 0 ? _a : 2) - ((_b = b.oee) !== null && _b !== void 0 ? _b : 2); });
+        return { rows, overall };
+    }, [active, production, sessions, machines, rates, shift, rangeBounds]);
+    const byOperator = useMemo(() => {
+        var _a;
+        const map = {};
+        active.forEach((s) => {
+            const op = s.operator || "Unnamed";
+            const e = (map[op] = map[op] || { down: 0, stops: 0 });
+            e.down += s.duration;
+            e.stops += 1;
+        });
+        const list = Object.entries(map).sort((a, b) => b[1].down - a[1].down);
+        return { list, max: ((_a = list[0]) === null || _a === void 0 ? void 0 : _a[1].down) || 1 };
+    }, [active]);
+    const confirmDiscard = async () => {
+        if (!discardText.trim())
+            return;
+        const ok = await discardStop(discardTarget, discardText.trim());
+        if (ok) {
+            setDiscardTarget(null);
+            setDiscardText("");
+        }
+    };
+    const confirmDelete = async () => {
+        if (!deleteTarget)
+            return;
+        const ok = await deleteStop(deleteTarget);
+        if (ok)
+            setDeleteTarget(null);
+    };
+    const exportCSV = () => {
+        const rows = [["Machine", "Reason", "Operator", "Start", "End", "Duration (s)", "Entry", "Notes", "Discarded", "Discard Reason"]];
+        logFiltered.forEach((s) => rows.push([s.machine, s.reason, s.operator, new Date(s.start).toISOString(), new Date(s.end).toISOString(), Math.round(s.duration / 1000), s.manual ? "manual" : "timed", s.notes || "", s.discarded ? "yes" : "no", s.discardReason || ""]));
+        const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+        downloadFile(csv, `stoptrack_export_${Date.now()}.csv`, "text/csv");
+    };
+    const exportJSON = () => {
+        downloadFile(JSON.stringify(logFiltered.map((_a) => {
+            var { key } = _a, rest = __rest(_a, ["key"]);
+            return rest;
+        }), null, 2), `stoptrack_export_${Date.now()}.json`, "application/json");
+    };
+    return (React.createElement("div", { className: "space-y-4" },
+        !hasPin && (React.createElement("div", { className: "text-xs rounded-lg px-3 py-2 flex items-center gap-2 bg-amber-500/10 text-amber-600" },
+            React.createElement(Lock, { size: 14 }),
+            " No supervisor PIN set \u2014 any operator can open this view. Set one under Settings to restrict it.")),
+        React.createElement("div", { className: "grid grid-cols-2 sm:grid-cols-4 gap-3" },
+            React.createElement(StatCard, { t: t, label: "Stops", value: active.length, icon: React.createElement(List, { size: 16 }) }),
+            React.createElement(StatCard, { t: t, label: "Downtime", value: fmtDur(stats.totalDowntime), icon: React.createElement(Clock, { size: 16 }) }),
+            React.createElement(StatCard, { t: t, label: "Last Hour", value: liveCount, icon: React.createElement(AlertCircle, { size: 16 }) }),
+            React.createElement(StatCard, { t: t, label: "Uptime", value: uptime == null ? "—" : `${uptime.toFixed(1)}%`, icon: React.createElement(TrendingUp, { size: 16 }), accent: uptime == null ? "" : uptime > 90 ? "text-emerald-500" : uptime > 75 ? "text-amber-500" : "text-red-500" })),
+        React.createElement("div", { className: `${t.card} rounded-xl p-3 space-y-3` },
+            React.createElement("div", { className: "flex items-center gap-2 flex-wrap" },
+                React.createElement("div", { className: `flex items-center gap-2 border rounded-lg px-2 ${t.input} flex-1 min-w-[160px]` },
+                    React.createElement(Search, { size: 15, className: t.sub }),
+                    React.createElement("input", { value: query, onChange: (e) => setQuery(e.target.value), placeholder: "Search machine, reason, operator, notes\u2026", className: "bg-transparent py-2 text-sm flex-1 focus:outline-none" }),
+                    query && React.createElement("button", { onClick: () => setQuery(""), "aria-label": "Clear search" },
+                        React.createElement(X, { size: 14, className: t.sub }))),
+                React.createElement("select", { value: filterMachine, onChange: (e) => setFilterMachine(e.target.value), className: `border rounded-lg px-3 py-2 text-sm ${t.input}` },
+                    React.createElement("option", null, "All"),
+                    machines.map((m) => React.createElement("option", { key: m }, m)))),
+            React.createElement("div", { className: "flex items-center gap-2 flex-wrap" },
+                React.createElement("div", { className: `flex ${t.muted} rounded-lg p-1 text-xs` }, [["all", "All time"], ["7", "7 days"], ["30", "30 days"], ["custom", "Custom"]].map(([v, l]) => (React.createElement("button", { key: v, onClick: () => setRange(v), className: `px-2.5 py-1 rounded-md ${range === v ? "bg-emerald-500 text-white" : t.sub}` }, l)))),
+                range === "custom" && (React.createElement("div", { className: "flex items-center gap-1 text-xs" },
+                    React.createElement("input", { type: "date", value: customFrom, onChange: (e) => setCustomFrom(e.target.value), className: `border rounded-lg px-2 py-1 ${t.input}` }),
+                    React.createElement("span", { className: t.sub }, "\u2192"),
+                    React.createElement("input", { type: "date", value: customTo, onChange: (e) => setCustomTo(e.target.value), className: `border rounded-lg px-2 py-1 ${t.input}` })))),
+            React.createElement("div", { className: "flex items-center gap-2 flex-wrap" },
+                React.createElement("div", { className: `flex ${t.muted} rounded-lg p-1 text-sm` },
+                    React.createElement(TabBtn, { t: t, active: tab === "log", onClick: () => setTab("log"), icon: React.createElement(List, { size: 14 }) }, "Log"),
+                    React.createElement(TabBtn, { t: t, active: tab === "analytics", onClick: () => setTab("analytics"), icon: React.createElement(BarChart3, { size: 14 }) }, "Analytics"),
+                    React.createElement(TabBtn, { t: t, active: tab === "manage", onClick: () => setTab("manage"), icon: React.createElement(Settings, { size: 14 }) }, "Settings")),
+                React.createElement("div", { className: "ml-auto flex items-center gap-2" },
+                    React.createElement("button", { onClick: exportCSV, className: `flex items-center gap-1 text-xs ${t.accentBtn} px-2.5 py-1.5 rounded-lg` },
+                        React.createElement(Download, { size: 13 }),
+                        " CSV"),
+                    React.createElement("button", { onClick: exportJSON, className: `flex items-center gap-1 text-xs ${t.accentBtn} px-2.5 py-1.5 rounded-lg` },
+                        React.createElement(Download, { size: 13 }),
+                        " JSON"),
+                    React.createElement("button", { onClick: onRefresh, className: "flex items-center gap-1 text-sm text-emerald-500 font-semibold", "aria-label": "Refresh" },
+                        React.createElement(RefreshCw, { size: 14, className: loading ? "animate-spin" : "" })))),
+            React.createElement("p", { className: `text-[11px] ${t.sub}` }, "Export includes every record in the current filter \u2014 discarded stops too. Nothing here is ever permanently deleted by operators.")),
+        tab === "log" && (React.createElement("div", { className: `${t.card} rounded-xl overflow-hidden` }, loading ? React.createElement("p", { className: `${t.sub} text-center py-8 text-sm` }, "Loading\u2026") : logFiltered.length === 0 ? React.createElement("p", { className: `${t.sub} text-center py-8 text-sm` }, "No stops match your filters.") : (React.createElement("div", { className: "overflow-x-auto" },
+            React.createElement("table", { className: "w-full text-sm" },
+                React.createElement("thead", { className: `${t.thead} text-xs uppercase` },
+                    React.createElement("tr", null,
+                        React.createElement("th", { className: "text-left px-3 py-2" }, "Machine"),
+                        React.createElement("th", { className: "text-left px-3 py-2" }, "Reason"),
+                        React.createElement("th", { className: "text-left px-3 py-2" }, "Operator"),
+                        React.createElement("th", { className: "text-left px-3 py-2" }, "Start"),
+                        React.createElement("th", { className: "text-right px-3 py-2" }, "Duration"),
+                        React.createElement("th", { className: "px-3 py-2" }))),
+                React.createElement("tbody", null, logFiltered.map((s) => (React.createElement("tr", { key: s.id, className: `border-t ${t.border} ${s.discarded ? "opacity-50" : t.rowHover}` },
+                    React.createElement("td", { className: `px-3 py-2 font-semibold ${s.discarded ? "line-through" : ""}` }, s.machine),
+                    React.createElement("td", { className: "px-3 py-2" },
+                        React.createElement("span", { className: s.discarded ? "line-through" : "" }, s.reason),
+                        s.manual && React.createElement("span", { className: "ml-1 text-[10px] uppercase tracking-wide bg-slate-400/20 text-slate-400 rounded px-1.5 py-0.5 align-middle" }, "manual"),
+                        s.notes && React.createElement("div", { className: `text-xs ${t.sub}` }, s.notes),
+                        s.discarded && React.createElement("div", { className: "text-xs text-amber-500 mt-0.5" },
+                            "Discarded: ",
+                            s.discardReason)),
+                    React.createElement("td", { className: `px-3 py-2 ${t.sub}` }, s.operator),
+                    React.createElement("td", { className: `px-3 py-2 ${t.sub} text-xs whitespace-nowrap` }, fmtTime(s.start)),
+                    React.createElement("td", { className: `px-3 py-2 text-right font-mono font-bold whitespace-nowrap ${s.discarded ? `${t.sub} line-through` : "text-red-500"}` }, fmtDur(s.duration)),
+                    React.createElement("td", { className: "px-3 py-2 text-right" }, s.discarded
+                        ? React.createElement("button", { onClick: () => setDeleteTarget(s), title: "Delete permanently", className: "text-slate-400 hover:text-red-600" },
+                            React.createElement(X, { size: 16 }))
+                        : React.createElement("button", { onClick: () => { setDiscardTarget(s); setDiscardText(""); }, title: "Discard from analytics", className: "text-slate-400 hover:text-red-500" },
+                            React.createElement(Trash2, { size: 15 })))))))))))),
+        tab === "analytics" && (React.createElement("div", { className: "space-y-4" },
+            React.createElement("div", { className: `${t.card} rounded-xl p-4` },
+                React.createElement("h3", { className: "font-bold mb-1 flex items-center gap-2" },
+                    React.createElement(TrendingUp, { size: 16 }),
+                    " OEE ",
+                    machineOEE.overall.partial && React.createElement("span", { className: `text-xs font-normal ${t.sub}` }, "(partial)")),
+                React.createElement("p", { className: `text-xs ${t.sub} mb-3` }, "Availability \u00D7 Performance \u00D7 Quality, from logged downtime and shift output over the selected range."),
+                React.createElement("div", { className: "flex items-end gap-4 mb-4" },
+                    React.createElement("div", { className: `text-4xl font-bold ${oeeAccent(machineOEE.overall.oee)}` }, pct(machineOEE.overall.oee)),
+                    React.createElement("div", { className: `text-xs ${t.sub} pb-1` },
+                        "A ",
+                        pct(machineOEE.overall.a),
+                        " \u00B7 P ",
+                        pct(machineOEE.overall.p),
+                        " \u00B7 Q ",
+                        pct(machineOEE.overall.q))),
+                machineOEE.rows.length === 0 ? React.createElement("p", { className: `${t.sub} text-sm` }, "No downtime or shift output reported in this range.") : (React.createElement("div", { className: "space-y-2" }, machineOEE.rows.map((r) => {
+                    var _a;
+                    return (React.createElement("div", { key: r.machine },
+                        React.createElement("div", { className: "flex justify-between text-xs mb-1" },
+                            React.createElement("span", { className: "font-medium" },
+                                r.machine,
+                                r.partial ? " *" : ""),
+                            React.createElement("span", { className: `font-mono font-bold ${oeeAccent(r.oee)}` }, pct(r.oee))),
+                        React.createElement("div", { className: `h-2 ${t.muted} rounded-full overflow-hidden` },
+                            React.createElement("div", { className: `h-full rounded-full ${r.oee == null ? "bg-slate-400" : r.oee > 0.85 ? "bg-emerald-500" : r.oee > 0.6 ? "bg-amber-500" : "bg-red-500"}`, style: { width: `${((_a = r.oee) !== null && _a !== void 0 ? _a : 0) * 100}%` } })),
+                        React.createElement("div", { className: `text-[10px] ${t.sub} mt-0.5` },
+                            "A ",
+                            pct(r.a),
+                            " \u00B7 P ",
+                            pct(r.p),
+                            " \u00B7 Q ",
+                            pct(r.q),
+                            " \u00B7 ",
+                            r.units,
+                            " units / ",
+                            r.scrap,
+                            " scrap",
+                            r.mannedMs > 0 && React.createElement(React.Fragment, null,
+                                " \u00B7 manned ",
+                                fmtDur(r.mannedMs),
+                                " of ",
+                                fmtDur(r.plannedMs)))));
+                }))),
+                machineOEE.rows.some((r) => r.partial) && React.createElement("p", { className: `text-[10px] ${t.sub} mt-2` }, "* partial \u2014 missing a machine rate (Settings) or shift output, so only the known factors are multiplied.")),
+            React.createElement("div", { className: `${t.card} rounded-xl p-4` },
+                React.createElement("h3", { className: "font-bold mb-3 flex items-center gap-2" },
+                    React.createElement(TrendingUp, { size: 16 }),
+                    " Downtime trend \u2014 last 7 days"),
+                React.createElement("div", { className: "flex items-end gap-2 h-36" }, trend.map((d, i) => (React.createElement("div", { key: i, className: "flex-1 flex flex-col items-center gap-1 h-full justify-end" },
+                    React.createElement("span", { className: `text-[10px] ${t.sub} font-mono` }, d.ms > 0 ? fmtDur(d.ms) : ""),
+                    React.createElement("div", { className: "w-full bg-emerald-500 rounded-t transition-all", style: { height: `${(d.ms / maxTrend) * 100}%`, minHeight: d.ms > 0 ? "4px" : "0" } }),
+                    React.createElement("span", { className: `text-[10px] ${t.sub}` }, d.label)))))),
+            React.createElement("div", { className: `${t.card} rounded-xl p-4` },
+                React.createElement("h3", { className: "font-bold mb-3 flex items-center gap-2" },
+                    React.createElement(AlertCircle, { size: 16 }),
+                    " Top 3 problem machines"),
+                stats.topMachines.length === 0 ? React.createElement("p", { className: `${t.sub} text-sm` }, "No data.") : (React.createElement("div", { className: "space-y-2" }, stats.topMachines.slice(0, 3).map(([m, d], i) => (React.createElement("div", { key: m, className: `flex items-center gap-3 ${t.muted} rounded-lg p-3` },
+                    React.createElement("div", { className: `w-7 h-7 rounded-full flex items-center justify-center font-bold text-white ${i === 0 ? "bg-red-500" : i === 1 ? "bg-amber-500" : "bg-slate-400"}` }, i + 1),
+                    React.createElement("div", { className: "flex-1" },
+                        React.createElement("div", { className: "font-semibold" }, m),
+                        React.createElement("div", { className: `text-xs ${t.sub}` },
+                            active.filter((s) => s.machine === m).length,
+                            " stops")),
+                    React.createElement("div", { className: "font-mono font-bold text-red-500" }, fmtDur(d)))))))),
+            React.createElement("div", { className: `${t.card} rounded-xl p-4` },
+                React.createElement("h3", { className: "font-bold mb-3 flex items-center gap-2" },
+                    React.createElement(BarChart3, { size: 16 }),
+                    " Downtime by reason"),
+                stats.topReasons.length === 0 ? React.createElement("p", { className: `${t.sub} text-sm` }, "No data.") : (React.createElement("div", { className: "space-y-2" }, stats.topReasons.map(([r, d]) => (React.createElement("div", { key: r },
+                    React.createElement("div", { className: "flex justify-between text-xs mb-1" },
+                        React.createElement("span", { className: "font-medium" }, r),
+                        React.createElement("span", { className: `font-mono ${t.sub}` }, fmtDur(d))),
+                    React.createElement("div", { className: `h-2 ${t.muted} rounded-full overflow-hidden` },
+                        React.createElement("div", { className: "h-full bg-emerald-500 rounded-full", style: { width: `${(d / stats.maxReason) * 100}%` } })))))))),
+            React.createElement("div", { className: `${t.card} rounded-xl p-4` },
+                React.createElement("h3", { className: "font-bold mb-3 flex items-center gap-2" },
+                    React.createElement(User, { size: 16 }),
+                    " Downtime by operator"),
+                byOperator.list.length === 0 ? React.createElement("p", { className: `${t.sub} text-sm` }, "No data.") : (React.createElement("div", { className: "space-y-2" }, byOperator.list.map(([op, e]) => (React.createElement("div", { key: op },
+                    React.createElement("div", { className: "flex justify-between text-xs mb-1" },
+                        React.createElement("span", { className: "font-medium" },
+                            op,
+                            " ",
+                            React.createElement("span", { className: t.sub },
+                                "\u00B7 ",
+                                e.stops,
+                                " stop",
+                                e.stops === 1 ? "" : "s")),
+                        React.createElement("span", { className: `font-mono ${t.sub}` }, fmtDur(e.down))),
+                    React.createElement("div", { className: `h-2 ${t.muted} rounded-full overflow-hidden` },
+                        React.createElement("div", { className: "h-full bg-emerald-500 rounded-full", style: { width: `${(e.down / byOperator.max) * 100}%` } })))))))),
+            React.createElement("p", { className: `text-center text-xs ${t.sub}` },
+                "Analytics exclude discarded stops. Uptime % assumes a ",
+                shift.start,
+                "\u2013",
+                shift.end,
+                " shift."))),
+        tab === "manage" && (React.createElement("div", { className: "space-y-4" },
+            React.createElement("div", { className: `${t.card} rounded-xl p-4` },
+                React.createElement("h3", { className: "font-bold mb-3 flex items-center gap-2" },
+                    React.createElement(Clock, { size: 16 }),
+                    " Shift times"),
+                React.createElement("p", { className: `text-xs ${t.sub} mb-3` }, "Used to calculate uptime % and operator pace."),
+                React.createElement("div", { className: "flex items-center gap-3 flex-wrap" },
+                    React.createElement("label", { className: "flex flex-col gap-1 text-xs" },
+                        React.createElement("span", { className: t.sub }, "START"),
+                        React.createElement("input", { type: "time", value: shift.start, onChange: (e) => updateShift(Object.assign(Object.assign({}, shift), { start: e.target.value })), className: `border rounded-lg px-3 py-2 ${t.input}` })),
+                    React.createElement("label", { className: "flex flex-col gap-1 text-xs" },
+                        React.createElement("span", { className: t.sub }, "END"),
+                        React.createElement("input", { type: "time", value: shift.end, onChange: (e) => updateShift(Object.assign(Object.assign({}, shift), { end: e.target.value })), className: `border rounded-lg px-3 py-2 ${t.input}` })),
+                    React.createElement("span", { className: `text-sm ${t.sub} self-end pb-2` },
+                        "= ",
+                        fmtDur(shiftLengthMs(shift)),
+                        " / shift"))),
+            React.createElement(ListManager, { t: t, title: "Machines", icon: React.createElement(Factory, { size: 16 }), items: machines, onChange: updateMachines, placeholder: "e.g. ASLA - Outfeed" }),
+            React.createElement(ListManager, { t: t, title: "Stop reasons", icon: React.createElement(AlertCircle, { size: 16 }), items: reasons, onChange: updateReasons, placeholder: "e.g. Sensor calibration" }),
+            React.createElement(QuickStopManager, { t: t, quickStops: quickStops, reasons: reasons, onChange: updateQuickStops }),
+            React.createElement(RatesManager, { t: t, machines: machines, rates: rates, onChange: updateRates }),
+            React.createElement(HandoverEmailsManager, { t: t, emails: handoverEmails, onChange: updateHandoverEmails }),
+            React.createElement(PinManager, { t: t, hasPin: hasPin, updatePin: updatePin }),
+            React.createElement(ServerSyncManager, { t: t, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: syncStatus, onSyncNow: onSyncNow }),
+            React.createElement("p", { className: `text-center text-xs ${t.sub}` }, "Machines, reasons & quick stops sync to all operators in real time."))),
+        discardTarget && (React.createElement("div", { className: "fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-20", onClick: () => setDiscardTarget(null) },
+            React.createElement("div", { className: `${t.card} rounded-xl p-5 max-w-sm w-full space-y-3`, onClick: (e) => e.stopPropagation() },
+                React.createElement("div", { className: "flex items-center gap-2 font-bold" },
+                    React.createElement(Trash2, { size: 18, className: "text-red-500" }),
+                    " Discard stop"),
+                React.createElement("div", { className: `text-sm ${t.muted} rounded-lg p-3` },
+                    React.createElement("div", { className: "font-semibold" }, discardTarget.machine),
+                    React.createElement("div", { className: `${t.sub} text-xs` },
+                        discardTarget.reason,
+                        " \u00B7 ",
+                        fmtDur(discardTarget.duration),
+                        " \u00B7 ",
+                        fmtTime(discardTarget.start))),
+                React.createElement("p", { className: `text-xs ${t.sub}` }, "Removes it from analytics but keeps it on record and in exports (auto-deleted after 60 days). Explanation required."),
+                React.createElement("textarea", { value: discardText, onChange: (e) => setDiscardText(e.target.value), rows: 3, placeholder: "Reason for discarding (required)\u2026", className: `w-full border rounded-lg px-3 py-2 resize-none text-sm focus:outline-none focus:ring-2 focus:ring-red-400 ${t.input}` }),
+                React.createElement("div", { className: "flex gap-2" },
+                    React.createElement("button", { onClick: confirmDiscard, disabled: !discardText.trim(), className: "flex-1 bg-red-500 hover:bg-red-600 disabled:opacity-40 text-white font-bold py-2.5 rounded-lg" }, "Discard stop"),
+                    React.createElement("button", { onClick: () => setDiscardTarget(null), className: `px-4 ${t.sub} font-semibold` }, "Cancel"))))),
+        deleteTarget && (React.createElement("div", { className: "fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-20", onClick: () => setDeleteTarget(null) },
+            React.createElement("div", { className: `${t.card} rounded-xl p-5 max-w-sm w-full space-y-3`, onClick: (e) => e.stopPropagation() },
+                React.createElement("div", { className: "flex items-center gap-2 font-bold text-red-600" },
+                    React.createElement(X, { size: 18 }),
+                    " Delete permanently"),
+                React.createElement("div", { className: `text-sm ${t.muted} rounded-lg p-3` },
+                    React.createElement("div", { className: "font-semibold" }, deleteTarget.machine),
+                    React.createElement("div", { className: `${t.sub} text-xs` },
+                        deleteTarget.reason,
+                        " \u00B7 ",
+                        fmtDur(deleteTarget.duration),
+                        " \u00B7 ",
+                        fmtTime(deleteTarget.start))),
+                React.createElement("p", { className: `text-xs ${t.sub}` }, "This erases the record from storage for good. It won't appear in future exports. This can't be undone."),
+                React.createElement("div", { className: "flex gap-2" },
+                    React.createElement("button", { onClick: confirmDelete, className: "flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-2.5 rounded-lg" }, "Delete forever"),
+                    React.createElement("button", { onClick: () => setDeleteTarget(null), className: `px-4 ${t.sub} font-semibold` }, "Cancel")))))));
+}
+function TabBtn({ t, active, onClick, icon, children }) {
+    return React.createElement("button", { onClick: onClick, className: `px-3 py-1.5 rounded-md flex items-center gap-1 ${active ? `${t.card} shadow font-semibold` : t.sub}` },
+        icon,
+        " ",
+        children);
+}
+function StatCard({ t, label, value, icon, accent }) {
+    return React.createElement("div", { className: `${t.card} rounded-xl p-3 text-center` },
+        React.createElement("div", { className: `flex items-center justify-center gap-1 ${t.sub} text-xs mb-1` },
+            icon,
+            " ",
+            label),
+        React.createElement("div", { className: `font-bold text-lg leading-tight ${accent || ""}` }, value));
+}
+function ListManager({ t, title, icon, items, onChange, placeholder }) {
+    const [input, setInput] = useState("");
+    const add = () => { const v = input.trim().slice(0, 60); if (!v || items.includes(v))
+        return; onChange([...items, v]); setInput(""); };
+    const remove = (item) => onChange(items.filter((i) => i !== item));
+    return (React.createElement("div", { className: `${t.card} rounded-xl p-4` },
+        React.createElement("h3", { className: "font-bold mb-3 flex items-center gap-2" },
+            icon,
+            " ",
+            title),
+        React.createElement("div", { className: "flex gap-2 mb-3" },
+            React.createElement("input", { value: input, onChange: (e) => setInput(e.target.value), onKeyDown: (e) => e.key === "Enter" && add(), placeholder: placeholder, className: `flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
+            React.createElement("button", { onClick: add, className: "flex items-center gap-1 bg-emerald-500 hover:bg-emerald-600 text-white font-semibold px-4 rounded-lg text-sm" },
+                React.createElement(Plus, { size: 16 }),
+                " Add")),
+        React.createElement("div", { className: "flex flex-wrap gap-2" }, items.map((item) => (React.createElement("span", { key: item, className: `flex items-center gap-1 ${t.chip} rounded-full pl-3 pr-1 py-1 text-sm` },
+            item,
+            React.createElement("button", { onClick: () => remove(item), disabled: items.length <= 1, className: "text-slate-400 hover:text-red-500 disabled:opacity-30 p-0.5", "aria-label": `Remove ${item}` },
+                React.createElement(X, { size: 14 }))))))));
+}
+function QuickStopManager({ t, quickStops, reasons, onChange }) {
+    const [label, setLabel] = useState("");
+    const [reason, setReason] = useState(reasons[0] || "");
+    const [notes, setNotes] = useState("");
+    const add = () => { const l = label.trim().slice(0, 40); if (!l)
+        return; onChange([...quickStops, { label: l, reason, notes: notes.trim().slice(0, 200) }]); setLabel(""); setNotes(""); };
+    const remove = (i) => onChange(quickStops.filter((_, idx) => idx !== i));
+    return (React.createElement("div", { className: `${t.card} rounded-xl p-4` },
+        React.createElement("h3", { className: "font-bold mb-3 flex items-center gap-2" },
+            React.createElement(Zap, { size: 16 }),
+            " Quick stops"),
+        React.createElement("p", { className: `text-xs ${t.sub} mb-3` }, "One-tap buttons operators see when documenting a stop."),
+        React.createElement("div", { className: "space-y-2 mb-3" },
+            React.createElement("input", { value: label, onChange: (e) => setLabel(e.target.value), placeholder: "Button label (e.g. Teflon change)", className: `w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
+            React.createElement("div", { className: "flex gap-2 flex-wrap" },
+                React.createElement("select", { value: reason, onChange: (e) => setReason(e.target.value), className: `border rounded-lg px-3 py-2 text-sm ${t.input}` }, reasons.map((r) => React.createElement("option", { key: r }, r))),
+                React.createElement("input", { value: notes, onChange: (e) => setNotes(e.target.value), placeholder: "Default notes (optional)", className: `flex-1 min-w-[140px] border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
+                React.createElement("button", { onClick: add, className: "bg-emerald-500 hover:bg-emerald-600 text-white font-semibold px-4 rounded-lg text-sm" },
+                    React.createElement(Plus, { size: 16 })))),
+        React.createElement("div", { className: "flex flex-wrap gap-2" }, quickStops.length === 0 ? React.createElement("span", { className: `text-xs ${t.sub}` }, "No quick stops yet.") : quickStops.map((q, i) => (React.createElement("span", { key: i, className: `flex items-center gap-1 ${t.chip} rounded-lg px-3 py-1.5 text-sm` },
+            React.createElement(Zap, { size: 13, className: "text-amber-500" }),
+            React.createElement("span", { className: "font-semibold" }, q.label),
+            React.createElement("span", { className: `text-xs ${t.sub}` },
+                "\u00B7 ",
+                q.reason),
+            React.createElement("button", { onClick: () => remove(i), className: "text-slate-400 hover:text-red-500 p-0.5 ml-1", "aria-label": `Remove ${q.label}` },
+                React.createElement(X, { size: 14 }))))))));
+}
+function PinGate({ t, pinHash, onUnlock }) {
+    const [pin, setPin] = useState("");
+    const [error, setError] = useState(false);
+    const submit = async (e) => {
+        if (e && e.preventDefault)
+            e.preventDefault();
+        const h = await sha256Hex(pin);
+        if (h && h === pinHash)
+            onUnlock();
+        else {
+            setError(true);
+            setPin("");
+        }
+    };
+    return (React.createElement("div", { className: "flex justify-center pt-8" },
+        React.createElement("form", { onSubmit: submit, className: `${t.card} rounded-xl p-6 max-w-xs w-full space-y-4 text-center` },
+            React.createElement("div", { className: "flex flex-col items-center gap-2" },
+                React.createElement("div", { className: "bg-emerald-500/15 rounded-full p-3" },
+                    React.createElement(Lock, { size: 22, className: "text-emerald-500" })),
+                React.createElement("h2", { className: "font-bold text-lg" }, "Supervisor locked"),
+                React.createElement("p", { className: `text-xs ${t.sub}` }, "Enter the supervisor PIN to view the log, analytics and settings.")),
+            React.createElement("input", { autoFocus: true, type: "password", inputMode: "numeric", value: pin, onChange: (e) => { setPin(e.target.value); setError(false); }, placeholder: "PIN", className: `w-full text-center text-2xl tracking-widest border rounded-lg px-3 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
+            error && React.createElement("p", { className: "text-xs text-red-500" }, "Incorrect PIN. Try again."),
+            React.createElement("button", { type: "submit", disabled: !pin, className: "w-full bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-white font-bold py-3 rounded-lg" }, "Unlock"))));
+}
+function PinManager({ t, hasPin, updatePin }) {
+    const [current, setCurrent] = useState("");
+    const [next, setNext] = useState("");
+    const [confirm, setConfirm] = useState("");
+    const [msg, setMsg] = useState(null);
+    const save = async () => {
+        setMsg(null);
+        if (next && next !== confirm) {
+            setMsg({ err: true, text: "New PIN and confirmation don't match." });
+            return;
+        }
+        if (next && !/^\d{4,}$/.test(next)) {
+            setMsg({ err: true, text: "Use at least 4 digits." });
+            return;
+        }
+        const ok = await updatePin(next || null, current);
+        if (!ok) {
+            setMsg({ err: true, text: "Current PIN is incorrect." });
+            return;
+        }
+        setCurrent("");
+        setNext("");
+        setConfirm("");
+        setMsg({ err: false, text: next ? "PIN saved." : "PIN cleared — the supervisor view is now open." });
+    };
+    const clear = async () => {
+        setMsg(null);
+        const ok = await updatePin(null, current);
+        if (!ok) {
+            setMsg({ err: true, text: "Current PIN is incorrect." });
+            return;
+        }
+        setCurrent("");
+        setNext("");
+        setConfirm("");
+        setMsg({ err: false, text: "PIN cleared — the supervisor view is now open." });
+    };
+    return (React.createElement("div", { className: `${t.card} rounded-xl p-4` },
+        React.createElement("h3", { className: "font-bold mb-1 flex items-center gap-2" },
+            React.createElement(Lock, { size: 16 }),
+            " Supervisor PIN"),
+        React.createElement("p", { className: `text-xs ${t.sub} mb-3` }, hasPin ? "A PIN is required to open the supervisor view. Change or remove it below." : "Set a PIN so operators can't open the supervisor view. Basic deterrent, not strong security."),
+        React.createElement("div", { className: "space-y-2" },
+            hasPin && (React.createElement("input", { type: "password", inputMode: "numeric", value: current, onChange: (e) => setCurrent(e.target.value), placeholder: "Current PIN", className: `w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` })),
+            React.createElement("input", { type: "password", inputMode: "numeric", value: next, onChange: (e) => setNext(e.target.value), placeholder: hasPin ? "New PIN" : "PIN (4+ digits)", className: `w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
+            React.createElement("input", { type: "password", inputMode: "numeric", value: confirm, onChange: (e) => setConfirm(e.target.value), placeholder: "Confirm new PIN", className: `w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` })),
+        msg && React.createElement("p", { className: `text-xs mt-2 ${msg.err ? "text-red-500" : "text-emerald-600"}` }, msg.text),
+        React.createElement("div", { className: "flex gap-2 mt-3" },
+            React.createElement("button", { onClick: save, disabled: !next, className: "flex items-center gap-1 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-white font-semibold px-4 py-2 rounded-lg text-sm" },
+                React.createElement(CheckCircle, { size: 15 }),
+                " ",
+                hasPin ? "Change PIN" : "Set PIN"),
+            hasPin && React.createElement("button", { onClick: clear, disabled: !current, className: "flex items-center gap-1 bg-slate-500 hover:bg-slate-600 disabled:opacity-40 text-white font-semibold px-4 py-2 rounded-lg text-sm" },
+                React.createElement(Unlock, { size: 15 }),
+                " Remove PIN"))));
+}
+function ServerSyncManager({ t, syncCfg, updateSyncConfig, syncStatus, onSyncNow }) {
+    const [url, setUrl] = useState((syncCfg === null || syncCfg === void 0 ? void 0 : syncCfg.url) || "");
+    const [token, setToken] = useState((syncCfg === null || syncCfg === void 0 ? void 0 : syncCfg.token) || "");
+    const [enabled, setEnabled] = useState(!!(syncCfg === null || syncCfg === void 0 ? void 0 : syncCfg.enabled));
+    const [test, setTest] = useState(null);
+    useEffect(() => { setUrl((syncCfg === null || syncCfg === void 0 ? void 0 : syncCfg.url) || ""); setToken((syncCfg === null || syncCfg === void 0 ? void 0 : syncCfg.token) || ""); setEnabled(!!(syncCfg === null || syncCfg === void 0 ? void 0 : syncCfg.enabled)); }, [syncCfg]);
+    const cleanUrl = () => url.trim().replace(/\/$/, "");
+    const save = () => updateSyncConfig({ url: cleanUrl(), token: token.trim(), enabled });
+    const testConn = async () => {
+        setTest("testing");
+        const res = await api.remoteHealth({ url: cleanUrl(), token: token.trim() });
+        setTest(res.ok ? "ok" : (res.error || "Connection failed"));
+    };
+    return (React.createElement("div", { className: `${t.card} rounded-xl p-4` },
+        React.createElement("h3", { className: "font-bold mb-1 flex items-center gap-2" },
+            React.createElement(RefreshCw, { size: 16 }),
+            " Server sync"),
+        React.createElement("p", { className: `text-xs ${t.sub} mb-3` }, "Optional. Push stops to a shared server so every device \u2014 and this supervisor view \u2014 sees the same data. Stays fully offline until enabled; changes queue locally and upload when online."),
+        React.createElement("div", { className: "space-y-2" },
+            React.createElement("label", { className: "flex flex-col gap-1 text-xs" },
+                React.createElement("span", { className: t.sub }, "SERVER URL"),
+                React.createElement("input", { value: url, onChange: (e) => setUrl(e.target.value), placeholder: "https://factory-server.local:4000", className: `w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` })),
+            React.createElement("label", { className: "flex flex-col gap-1 text-xs" },
+                React.createElement("span", { className: t.sub }, "FACTORY TOKEN"),
+                React.createElement("input", { type: "password", value: token, onChange: (e) => setToken(e.target.value), placeholder: "Shared secret", className: `w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` })),
+            React.createElement("label", { className: "flex items-center gap-2 text-sm py-1" },
+                React.createElement("input", { type: "checkbox", checked: enabled, onChange: (e) => setEnabled(e.target.checked), className: "w-4 h-4 accent-emerald-500" }),
+                "Enable background sync on this device")),
+        React.createElement("div", { className: "flex flex-wrap gap-2 mt-3" },
+            React.createElement("button", { onClick: save, className: "flex items-center gap-1 bg-emerald-500 hover:bg-emerald-600 text-white font-semibold px-4 py-2 rounded-lg text-sm" },
+                React.createElement(CheckCircle, { size: 15 }),
+                " Save"),
+            React.createElement("button", { onClick: testConn, disabled: !url.trim(), className: `flex items-center gap-1 ${t.accentBtn} disabled:opacity-40 font-semibold px-4 py-2 rounded-lg text-sm` },
+                React.createElement(RefreshCw, { size: 15 }),
+                " Test connection"),
+            (syncCfg === null || syncCfg === void 0 ? void 0 : syncCfg.enabled) && React.createElement("button", { onClick: onSyncNow, className: `flex items-center gap-1 ${t.chip} font-semibold px-4 py-2 rounded-lg text-sm` },
+                React.createElement(RefreshCw, { size: 15 }),
+                " Sync now")),
+        test && (React.createElement("p", { className: `text-xs mt-2 flex items-center gap-1 ${test === "ok" ? "text-emerald-600" : test === "testing" ? t.sub : "text-red-500"}` }, test === "testing" ? React.createElement(React.Fragment, null,
+            React.createElement(RefreshCw, { size: 13, className: "animate-spin" }),
+            " Testing\u2026") : test === "ok" ? React.createElement(React.Fragment, null,
+            React.createElement(CheckCircle, { size: 13 }),
+            " Server reachable") : React.createElement(React.Fragment, null,
+            React.createElement(AlertCircle, { size: 13 }),
+            " ",
+            test))),
+        (syncCfg === null || syncCfg === void 0 ? void 0 : syncCfg.enabled) && React.createElement("div", { className: "mt-3" },
+            React.createElement(SyncStatusBadge, { t: t, status: syncStatus }))));
+}
+function SyncStatusBadge({ t, status }) {
+    const { online, syncing, lastSync, pending, error } = status || {};
+    const plural = (n) => `${n} change${n === 1 ? "" : "s"}`;
+    let tone, icon, text;
+    if (!online) {
+        tone = "bg-amber-500/10 text-amber-600";
+        icon = React.createElement(AlertCircle, { size: 14 });
+        text = pending ? `Offline — ${plural(pending)} waiting to sync` : "Offline — will sync when back online";
+    }
+    else if (syncing) {
+        tone = `bg-slate-500/10 ${t.sub}`;
+        icon = React.createElement(RefreshCw, { size: 14, className: "animate-spin" });
+        text = "Syncing…";
+    }
+    else if (error) {
+        tone = "bg-red-500/10 text-red-600";
+        icon = React.createElement(AlertCircle, { size: 14 });
+        text = `Sync issue: ${error}`;
+    }
+    else {
+        tone = "bg-emerald-500/10 text-emerald-600";
+        icon = React.createElement(CheckCircle, { size: 14 });
+        text = pending ? `${plural(pending)} pending` : `Synced · ${relTime(lastSync)}`;
+    }
+    return React.createElement("div", { className: `text-xs rounded-lg px-3 py-2 flex items-center gap-2 ${tone}` },
+        icon,
+        text);
+}
+function ShiftOutputCard({ t, myProduction, onSaveProduction, machine, otherEntries, onJump }) {
+    const [units, setUnits] = useState("");
+    const [scrap, setScrap] = useState("");
+    const [savedAt, setSavedAt] = useState(null);
+    const [error, setError] = useState("");
+    useEffect(() => {
+        setUnits(myProduction ? String(myProduction.unitsProduced) : "");
+        setScrap(myProduction ? String(myProduction.scrapCount) : "");
+    }, [myProduction]);
+    const save = async () => {
+        setError("");
+        const res = await onSaveProduction({ unitsProduced: units, scrapCount: scrap });
+        if (res.ok)
+            setSavedAt(Date.now());
+        else
+            setError(res.error || "Couldn't save. Try again.");
+    };
+    const dirty = units !== (myProduction ? String(myProduction.unitsProduced) : "") ||
+        scrap !== (myProduction ? String(myProduction.scrapCount) : "");
+    return (React.createElement("div", { className: `${t.card} rounded-xl p-4` },
+        React.createElement("h3", { className: "font-bold mb-1 flex items-center gap-2" },
+            React.createElement(Factory, { size: 16 }),
+            " Shift output"),
+        React.createElement("p", { className: `text-xs ${t.sub} mb-3` },
+            "Units and scrap for this shift on ",
+            machine,
+            ". Used for the OEE score \u2014 update it whenever, it overwrites the previous entry."),
+        React.createElement("div", { className: "flex gap-3 items-end flex-wrap" },
+            React.createElement("label", { className: "flex flex-col gap-1 flex-1 min-w-[110px]" },
+                React.createElement("span", { className: `text-xs font-semibold ${t.sub}` }, "UNITS PRODUCED"),
+                React.createElement("input", { type: "number", inputMode: "numeric", min: "0", value: units, onChange: (e) => setUnits(e.target.value), placeholder: "0", className: `border rounded-lg px-3 py-2.5 text-lg font-mono focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` })),
+            React.createElement("label", { className: "flex flex-col gap-1 flex-1 min-w-[110px]" },
+                React.createElement("span", { className: `text-xs font-semibold ${t.sub}` }, "SCRAP / REJECT"),
+                React.createElement("input", { type: "number", inputMode: "numeric", min: "0", value: scrap, onChange: (e) => setScrap(e.target.value), placeholder: "0", className: `border rounded-lg px-3 py-2.5 text-lg font-mono focus:outline-none focus:ring-2 focus:ring-amber-400 ${t.input}` })),
+            React.createElement("button", { onClick: save, disabled: units === "" || !dirty, className: "flex items-center gap-1 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-white font-bold px-5 py-3 rounded-lg" },
+                React.createElement(CheckCircle, { size: 16 }),
+                " Save")),
+        error && React.createElement("p", { className: "text-xs text-red-500 mt-2 flex items-center gap-1" },
+            React.createElement(AlertCircle, { size: 13 }),
+            " ",
+            error),
+        !error && savedAt && !dirty && React.createElement("p", { className: "text-xs text-emerald-600 mt-2 flex items-center gap-1" },
+            React.createElement(CheckCircle, { size: 13 }),
+            " Saved ",
+            relTime(savedAt)),
+        (otherEntries || []).length > 0 && (React.createElement("p", { className: `text-xs ${t.sub} mt-2` },
+            "This shift:",
+            " ",
+            otherEntries.map((r, i) => (React.createElement("span", { key: r.machine },
+                i > 0 && " · ",
+                React.createElement("button", { onClick: () => onJump === null || onJump === void 0 ? void 0 : onJump(r.machine), className: "underline decoration-dotted hover:text-emerald-500" },
+                    r.machine,
+                    " ",
+                    r.units,
+                    "u/",
+                    r.scrap,
+                    "s"))))))));
+}
+function RatesManager({ t, machines, rates, onChange }) {
+    const setRate = (m, v) => {
+        const next = Object.assign({}, (rates || {}));
+        const n = Math.max(0, Number(v) || 0);
+        if (n > 0)
+            next[m] = n;
+        else
+            delete next[m];
+        onChange(next);
+    };
+    return (React.createElement("div", { className: `${t.card} rounded-xl p-4` },
+        React.createElement("h3", { className: "font-bold mb-1 flex items-center gap-2" },
+            React.createElement(TrendingUp, { size: 16 }),
+            " Machine output rates"),
+        React.createElement("p", { className: `text-xs ${t.sub} mb-3` }, "Rated output in units/hour per machine \u2014 the theoretical maximum used for the OEE Performance factor. Leave blank to skip Performance for that machine."),
+        React.createElement("div", { className: "space-y-2" }, machines.map((m) => {
+            var _a;
+            return (React.createElement("label", { key: m, className: "flex items-center gap-2 text-sm" },
+                React.createElement("span", { className: "flex-1 font-medium" }, m),
+                React.createElement("input", { type: "number", inputMode: "numeric", min: "0", value: (_a = rates === null || rates === void 0 ? void 0 : rates[m]) !== null && _a !== void 0 ? _a : "", onChange: (e) => setRate(m, e.target.value), placeholder: "\u2014", className: `w-28 border rounded-lg px-3 py-2 text-sm font-mono text-right focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
+                React.createElement("span", { className: `text-xs ${t.sub} w-16` }, "units/h")));
+        }))));
+}
+function HandoverEmailsManager({ t, emails, onChange }) {
+    const [input, setInput] = useState((emails || []).join(", "));
+    useEffect(() => { setInput((emails || []).join(", ")); }, [emails]);
+    const save = () => {
+        const list = input.split(/[,;\s]+/).map((e) => e.trim()).filter((e) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e));
+        onChange(list);
+        setInput(list.join(", "));
+    };
+    return (React.createElement("div", { className: `${t.card} rounded-xl p-4` },
+        React.createElement("h3", { className: "font-bold mb-1 flex items-center gap-2" },
+            React.createElement(PencilLine, { size: 16 }),
+            " Handover email recipients"),
+        React.createElement("p", { className: `text-xs ${t.sub} mb-3` }, "Who receives the shift handover report when an operator taps \u201CEmail report\u201D. Requires the sync server with SMTP configured. Comma-separated."),
+        React.createElement("div", { className: "flex gap-2" },
+            React.createElement("input", { value: input, onChange: (e) => setInput(e.target.value), placeholder: "supervisor@factory.com, lead@factory.com", className: `flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
+            React.createElement("button", { onClick: save, className: "flex items-center gap-1 bg-emerald-500 hover:bg-emerald-600 text-white font-semibold px-4 rounded-lg text-sm" },
+                React.createElement(CheckCircle, { size: 15 }),
+                " Save")),
+        (emails || []).length > 0 && React.createElement("p", { className: `text-xs ${t.sub} mt-2` },
+            emails.length,
+            " recipient",
+            emails.length === 1 ? "" : "s",
+            " saved.")));
+}
+function ShiftHandoverModal({ t, dark, report, handoverEmails, syncCfg, onClose }) {
+    const [copied, setCopied] = useState(false);
+    const [mailState, setMailState] = useState(null);
+    const text = formatReportText(report);
+    const canEmail = !!(syncCfg && syncCfg.enabled && syncCfg.url) && (handoverEmails || []).length > 0;
+    const copy = async () => {
+        try {
+            await navigator.clipboard.writeText(text);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2500);
+        }
+        catch (_a) {
+            try {
+                const ta = document.createElement("textarea");
+                ta.value = text;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand("copy");
+                document.body.removeChild(ta);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2500);
+            }
+            catch (_b) { }
+        }
+    };
+    const email = async () => {
+        setMailState("sending");
+        const res = await api.sendReport({
+            to: handoverEmails,
+            subject: `StopTrack handover — ${report.machine} — ${report.operator}`,
+            text,
+        }, syncCfg);
+        setMailState(res.ok ? "sent" : (res.error || "Send failed"));
+    };
+    return (React.createElement("div", { className: "fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30", onClick: onClose },
+        React.createElement("div", { className: `${dark ? "bg-slate-900" : "bg-white"} rounded-xl shadow-xl p-5 max-w-md w-full space-y-3 max-h-[85vh] overflow-auto`, onClick: (e) => e.stopPropagation() },
+            React.createElement("div", { className: "flex items-center justify-between" },
+                React.createElement("div", { className: "flex items-center gap-2 font-bold" },
+                    React.createElement(PencilLine, { size: 18, className: "text-emerald-500" }),
+                    " Shift handover"),
+                React.createElement("button", { onClick: onClose, "aria-label": "Close", className: `${t.sub} hover:text-red-500 p-1` },
+                    React.createElement(X, { size: 18 }))),
+            React.createElement("pre", { className: `${t.muted} rounded-lg p-3 text-xs whitespace-pre-wrap font-mono leading-relaxed` }, text),
+            React.createElement("div", { className: "flex flex-col gap-2" },
+                React.createElement("button", { onClick: copy, className: "flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 rounded-lg" }, copied ? React.createElement(React.Fragment, null,
+                    React.createElement(CheckCircle, { size: 17 }),
+                    " Copied") : React.createElement(React.Fragment, null,
+                    React.createElement(PencilLine, { size: 17 }),
+                    " Copy summary")),
+                React.createElement("button", { onClick: email, disabled: !canEmail || mailState === "sending" || mailState === "sent", className: `flex items-center justify-center gap-2 ${t.accentBtn} disabled:opacity-40 font-bold py-3 rounded-lg` }, mailState === "sending" ? React.createElement(React.Fragment, null,
+                    React.createElement(RefreshCw, { size: 17, className: "animate-spin" }),
+                    " Sending\u2026")
+                    : mailState === "sent" ? React.createElement(React.Fragment, null,
+                        React.createElement(CheckCircle, { size: 17 }),
+                        " Sent")
+                        : React.createElement(React.Fragment, null,
+                            React.createElement(RefreshCw, { size: 17 }),
+                            " Email report",
+                            (handoverEmails || []).length ? ` (${handoverEmails.length})` : "")),
+                !canEmail && React.createElement("p", { className: `text-[11px] ${t.sub} text-center` }, "Email needs Server sync enabled and recipients set in Supervisor \u2192 Settings. Copy works offline."),
+                mailState && mailState !== "sending" && mailState !== "sent" && React.createElement("p", { className: "text-xs text-red-500 text-center flex items-center justify-center gap-1" },
+                    React.createElement(AlertCircle, { size: 13 }),
+                    " ",
+                    mailState)))));
+}
+
+(function () {
+  try {
+    if (typeof React === "undefined" || typeof ReactDOM === "undefined") {
+      showError("React isn't available yet.", "The CDN scripts may still be loading or are blocked.");
+      return;
+    }
+    ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+  } catch (e) {
+    showError("The app crashed while starting.", String(e && e.stack || e));
+  }
+})();
+  </script>
+</body>
+</html>

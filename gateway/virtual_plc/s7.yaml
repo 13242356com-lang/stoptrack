@@ -1,0 +1,29 @@
+# Gateway config for the virtual S7 PLC (virtual_plc/snap7_server.py).
+# Run the server first, then:
+#   python -m plc_gateway --config virtual_plc/s7.yaml --i-have-authorization --run-for 15
+
+poll_interval_ms: 200
+min_stop_ms: 1000
+
+sink:
+  type: console
+
+machines:
+  - name: "ASLA 1 - Laser"
+    protocol: s7
+    s7:
+      host: "127.0.0.1"
+      rack: 0
+      slot: 1
+      port: 1102          # matches snap7_server.py default (non-privileged); real S7 = 102
+    tags:
+      running:    { address: "DB1.DBX0.0", type: bool }
+      faultCode:  { address: "DB1.DBW2",   type: int  }
+      cycleCount: { address: "DB1.DBD4",   type: int  }
+    rules:
+      - { when: "running edge false", emit: stop_started }
+      - { when: "running edge true",  emit: stop_ended, enrich: { reason_from: faultCode } }
+    faultMap:
+      4: "Teflon change"
+      7: "Foil / infeed jam"
+      2: "Laser cleaning"

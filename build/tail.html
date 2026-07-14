@@ -1,0 +1,14 @@
+(function () {
+  try {
+    if (typeof React === "undefined" || typeof ReactDOM === "undefined") {
+      showError("React isn't available yet.", "The CDN scripts may still be loading or are blocked.");
+      return;
+    }
+    ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+  } catch (e) {
+    showError("The app crashed while starting.", String(e && e.stack || e));
+  }
+})();
+  </script>
+</body>
+</html>

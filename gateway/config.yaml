@@ -1,0 +1,35 @@
+# StopTrack PLC gateway — demo config (simulator only, Phase 1).
+# Adding a machine = adding an entry here. No code changes.
+
+poll_interval_ms: 200          # how often to read tags
+min_stop_ms: 1000              # micro-pause debounce: stops shorter than this are ignored
+
+sink:                          # one mapping or a list — console + file can run together
+  type: console                # console | file (needs path:) | websocket (Phase 4)
+  # - type: file
+  #   path: events.jsonl
+
+machines:
+  - name: "ASLA 1 - Laser"
+    protocol: sim              # sim | s7 (Phase 3) | opcua (Phase 3) | modbus (later)
+    sim:
+      jitter_ms: 3             # small read jitter so polling isn't instant-perfect
+      timeline:                # scripted shift for the acceptance demo:
+        - { at_ms: 3000,  set: { running: false, faultCode: 4 } }   # stop w/ Teflon fault
+        - { at_ms: 10000, set: { running: true } }                  # back up ~7s later (fault still latched)
+        - { at_ms: 10600, set: { faultCode: 0 } }                   # fault register clears a beat later
+    tags:
+      running:    { address: "DB1.DBX0.0", type: bool }
+      faultCode:  { address: "DB1.DBW2",   type: int  }
+      cycleCount: { address: "DB1.DBD4",   type: int  }
+    rules:
+      - when: running edge false          # true -> false
+        emit: stop_started
+      - when: running edge true           # false -> true
+        emit: stop_ended
+        enrich:
+          reason_from: faultCode          # value-lookup at the moment the stop ends
+    faultMap:
+      4: "Teflon change"
+      7: "Foil / infeed jam"
+      2: "Laser cleaning"

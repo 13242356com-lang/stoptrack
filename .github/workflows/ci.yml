@@ -1,0 +1,40 @@
+name: CI
+
+# Validate the build and tests on every push / PR. This does NOT deploy —
+# Cloudflare Pages rebuilds and serves the app on push to main.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: Build app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+      # build/build.mjs runs the JSX / ?? / ?. gate checks and fails on regressions.
+      - name: Build index.html
+        run: npm run build
+      # Confirm the committed index.html matches a fresh build (no stale artifact).
+      - name: Check committed index.html is up to date
+        run: git diff --exit-code index.html
+
+  gateway-tests:
+    name: Gateway tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install gateway deps
+        run: pip install -r gateway/requirements.txt
+      - name: Run pytest
+        working-directory: gateway
+        run: python -m pytest tests -q

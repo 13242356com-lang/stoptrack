@@ -1,0 +1,15 @@
+# Core — the simulator + console/file pipeline needs only pyyaml (and even
+# that is optional: a .json config runs dependency-free).
+pyyaml>=6
+
+# Tests
+pytest>=8
+
+# Phase 3 — real protocol adapters + the virtual-PLC harness. Imported lazily,
+# so the sim pipeline still runs if these aren't installed.
+python-snap7>=3        # Siemens S7 adapter + snap7 virtual PLC
+asyncua>=1.0           # OPC UA adapter + OPC UA virtual PLC
+
+# Later phases:
+# pymodbus>=3           # Modbus adapter
+# websockets>=12        # Phase 4 — WebSocket sink to StopTrack
