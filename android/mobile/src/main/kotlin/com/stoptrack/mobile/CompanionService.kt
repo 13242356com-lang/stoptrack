@@ -84,9 +84,11 @@ class CompanionService : LifecycleService() {
     }
 
     private fun startInForeground(text: String) {
-        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE else 0
-        ServiceCompat.startForeground(this, NOTIF_ID, buildNotification(text), type)
+        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0
+        // Never let a foreground-start refusal crash the app; the UI must still open.
+        // Worst case the bridge runs as an ordinary service.
+        runCatching { ServiceCompat.startForeground(this, NOTIF_ID, buildNotification(text), type) }
     }
 
     private fun updateNotification() {
