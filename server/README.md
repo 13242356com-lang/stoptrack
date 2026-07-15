@@ -51,7 +51,7 @@ optional dependency) plus the `SMTP_*` env vars. Everything else runs without it
 
 On one phone, open StopTrack → **Supervisor → Settings → Server sync**:
 
-1. **Server URL** — e.g. `http://192.168.1.50:4000` (the machine running this
+1. **Server URL** — e.g. `http://<PC-IP>:4000` (the machine running this
    server, reachable from the phones).
 2. **Factory token** — the same `FACTORY_TOKEN` value.
 3. Tick **Enable background sync** and press **Save**. Use **Test connection** to

@@ -68,7 +68,7 @@ First, unlock the watch's developer tools (same for both ways):
    **7 times** until it says developer mode is on.
 2. **Settings → Developer options** → turn on **Wireless debugging**.
 3. Tap **Wireless debugging → Pair new device**. It shows a **6‑digit code** and an
-   address like `192.168.1.20:37xxx`. **Leave this screen open.**
+   address like `<watch-IP>:37xxx`. **Leave this screen open.**
 
 #### A1 — From the phone, no computer (recommended)
 1. Save `StopTrack-watch.apk` onto the phone (from Part 1).
@@ -123,7 +123,7 @@ connect the watch to it directly — this works over Wi-Fi from anywhere and
 doesn't depend on the Bluetooth phone link:
 1. On the watch, scroll down to **Server sync**.
 2. **Server URL** → type the server address (e.g. `stoptrack.yourfactory.com`,
-   or `192.168.1.50:4000` on factory Wi-Fi).
+   or `<PC-IP>:4000` on factory Wi-Fi).
 3. **Token** → the factory token.
 4. Footer shows **“Server synced”**. Stops upload straight to the server and
    supervisor changes (made from ANY browser, anywhere) reach the watch in

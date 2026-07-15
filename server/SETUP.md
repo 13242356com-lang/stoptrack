@@ -47,8 +47,8 @@ You need a PC that stays on (Windows assumed below; any OS works).
 
 **Find the PC's address for other devices on the factory Wi-Fi:** press
 `Win+R`, type `cmd`, Enter, then type `ipconfig`. Look for **IPv4 Address**,
-e.g. `192.168.1.50`. Other devices on the same Wi-Fi then use
-`http://192.168.1.50:4000`.
+e.g. `192.168.x.x`. Other devices on the same Wi-Fi then use
+`http://<PC-IP>:4000`.
 
 **Start automatically when the PC boots (recommended):** Start menu → “Task
 Scheduler” → Create Basic Task → name `StopTrack` → trigger **When the computer
@@ -84,7 +84,7 @@ and a **domain name** added to it (any cheap one, ~$10/year — e.g.
    anywhere — phone on cellular, home, holiday.
 
 > **Don't want to buy a domain?** Then skip Part B: everything still works on
-> the factory Wi-Fi via `http://<pc-ip>:4000`; you just can't reach it from
+> the factory Wi-Fi via `http://<PC-IP>:4000`; you just can't reach it from
 > home. (Other routes — port-forwarding, a rented cloud server — work too but
 > take more care; ask if you want that path.)
 
@@ -93,7 +93,7 @@ and a **domain name** added to it (any cheap one, ~$10/year — e.g.
 ## Part C — Connect everything (one-time per device)
 
 Use your **anywhere address** (`https://stoptrack.yourfactory.com`) if you set
-up Part B, otherwise the **LAN address** (`http://192.168.1.50:4000`).
+up Part B, otherwise the **LAN address** (`http://<PC-IP>:4000`).
 
 **Supervisor — any browser, anywhere:**
 1. Open the server address. StopTrack appears, with the Server URL prefilled.
@@ -111,7 +111,7 @@ up Part B, otherwise the **LAN address** (`http://192.168.1.50:4000`).
 **Watch:**
 1. Open StopTrack on the watch, scroll down to **Server sync**.
 2. Tap **Server URL** and type the address (you can skip `https://` — e.g. just
-   `stoptrack.yourfactory.com`, or `192.168.1.50:4000` on the LAN).
+   `stoptrack.yourfactory.com`, or `<PC-IP>:4000` on the LAN).
 3. Tap **Token** and enter the factory token.
 4. The footer shows **“Server synced”** when connected. Stops now upload
    directly, and supervisor changes appear on the watch within ~15 seconds.
@@ -123,7 +123,7 @@ up Part B, otherwise the **LAN address** (`http://192.168.1.50:4000`).
 - **"Failed to fetch" / it filled in `http://0.0.0.0:4000`** — `0.0.0.0` is not
   a connectable address (it's the server saying "I listen on everything"). In
   the Server URL field use **`http://localhost:4000`** on the same PC, or the
-  PC's **LAN IP** (e.g. `http://192.168.1.50:4000`) from another device. The
+  PC's **LAN IP** (e.g. `http://<PC-IP>:4000`) from another device. The
   server window now prints the exact addresses to use.
 - **Browser shows nothing at the LAN address** — is the black server window
   still open on the PC? Are both devices on the same Wi-Fi? Windows Firewall may
