@@ -14,6 +14,8 @@ on:
     paths:
       - "android/**"
       - ".github/workflows/android.yml"
+    tags:
+      - "v*"          # pushing a tag like v0.1 publishes a versioned release
   pull_request:
     paths:
       - "android/**"
@@ -62,13 +64,14 @@ jobs:
       # names, so they're a one-tap download from the repo front page — no digging
       # through Actions, no zip. Refreshes the "latest" release each build.
       - name: Rename APKs for release
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         run: |
           mkdir -p release
           cp android/mobile/build/outputs/apk/debug/mobile-debug.apk release/StopTrack-phone.apk
           cp android/wear/build/outputs/apk/debug/wear-debug.apk release/StopTrack-watch.apk
 
-      - name: Publish to Releases
+      # Rolling "latest" release, refreshed on every push to main.
+      - name: Publish latest release
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
@@ -78,7 +81,24 @@ jobs:
           body: |
             Auto-built from the latest `main`.
 
-            - **StopTrack-phone.apk** — install on the phone (the companion/bridge)
+            - **StopTrack-phone.apk** — install on the phone (the full app + watch bridge)
+            - **StopTrack-watch.apk** — install on the Samsung / Wear OS watch
+
+            Step-by-step install guide: [`android/INSTALL.md`](https://github.com/13242356com-lang/stoptrack/blob/main/android/INSTALL.md)
+          files: release/*.apk
+
+      # Immutable, versioned release, published when a tag like v0.1 is pushed.
+      - name: Publish versioned release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: StopTrack ${{ github.ref_name }}
+          prerelease: false
+          body: |
+            StopTrack ${{ github.ref_name }}.
+
+            - **StopTrack-phone.apk** — install on the phone (the full app + watch bridge)
             - **StopTrack-watch.apk** — install on the Samsung / Wear OS watch
 
             Step-by-step install guide: [`android/INSTALL.md`](https://github.com/13242356com-lang/stoptrack/blob/main/android/INSTALL.md)
