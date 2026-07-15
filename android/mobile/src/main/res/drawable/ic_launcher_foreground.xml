@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A simple stopwatch glyph on the adaptive-icon foreground layer. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- stopwatch body -->
+    <path
+        android:fillColor="#10B981"
+        android:pathData="M54,30 m-22,0 a22,22 0 1,0 44,0 a22,22 0 1,0 -44,0 Z" />
+    <!-- inner face -->
+    <path
+        android:fillColor="#0F172A"
+        android:pathData="M54,30 m-15,0 a15,15 0 1,0 30,0 a15,15 0 1,0 -30,0 Z" />
+    <!-- hand -->
+    <path
+        android:strokeColor="#10B981"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M54,30 L54,20" />
+    <!-- top stem -->
+    <path
+        android:fillColor="#10B981"
+        android:pathData="M50,6 h8 v5 h-8 z" />
+</vector>

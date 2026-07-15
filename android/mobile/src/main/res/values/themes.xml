@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose Material3 supplies the real UI colours; this base theme just
+         removes the action bar. Light variant here, dark in values-night/. -->
+    <style name="Theme.StopTrackCompanion" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar" />
+</resources>
