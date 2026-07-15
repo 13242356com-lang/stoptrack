@@ -216,6 +216,33 @@ Where `build_src.tsx` = [inline icon definitions] + [the App body from
 
 ---
 
+## The Wear OS companion (`android/`)
+
+A **native Android project** that puts the operator stop-timer on a Samsung /
+Wear OS watch. It lives **alongside** the web app and is **not** built from
+`StopTrack.tsx` — the two share only the **sync API contract** (`server/README.md`).
+Full details in `android/README.md`. Key facts for future sessions:
+
+- **Why native:** Wear OS 3+ has no browser, so `index.html` can't run on the
+  watch. A watch app must be an installed APK.
+- **Companion, server-free:** watch ⇄ phone runs over the **Wear Data Layer**
+  (no network). The phone companion stores stops on-device. The remote
+  `server/` is **optional / last-resort**, only used if forwarding is enabled.
+- **The web app is unchanged:** the phone companion runs a local HTTP server on
+  `127.0.0.1` speaking the StopTrack sync contract. Point **Supervisor → Server
+  sync** at `http://127.0.0.1:<port>` and watch stops appear in the supervisor
+  view. (Needs CORS + Private Network Access headers — handled in
+  `mobile/LocalSyncServer.kt`.)
+- **Modules:** `:shared` (record model + contract, pure Kotlin — the only piece
+  that must track the web record), `:wear` (Compose watch app; `TimerEngine` is
+  a port of `useTimer`), `:mobile` (bridge: `PhoneStore` mirrors `server.js`,
+  `LocalSyncServer`, Wear listener, optional `RemoteForwarder`).
+- **Build reality:** needs the Android SDK + Android Studio; **can't be built or
+  runtime-tested in the cloud/CI session** (no SDK, no watch). Only `:shared`
+  and the wear timer/format logic are compile-verified. Build in Android Studio;
+  verify Data Layer pairing + the loopback bridge on real hardware.
+- **Keep `:shared` in step** with the web stop record if the data model changes.
+
 ## Working style that fits this project
 
 - **Edit the smallest surface.** Change the two functions involved, not the whole
