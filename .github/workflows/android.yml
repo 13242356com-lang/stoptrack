@@ -1,0 +1,48 @@
+name: Build watch app
+
+# Bakes the two installable app files (APKs):
+#   - phone companion  (android/mobile)
+#   - watch app        (android/wear)
+# Download them afterwards from this run's "Artifacts" section.
+#
+# Runs automatically when anything under android/ changes, and can be started by
+# hand from the Actions tab with the "Run workflow" button (workflow_dispatch).
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "android/**"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build phone + watch APKs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build debug APKs
+        working-directory: android
+        run: ./gradlew :mobile:assembleDebug :wear:assembleDebug --stacktrace --no-daemon
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: stoptrack-apks
+          if-no-files-found: error
+          path: |
+            android/mobile/build/outputs/apk/debug/*.apk
+            android/wear/build/outputs/apk/debug/*.apk

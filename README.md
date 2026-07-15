@@ -17,6 +17,7 @@ aggregates downtime, OEE, and exports. The whole app ships as one self-contained
 | `build/` | The committed build: `build.mjs` + static scaffold (`head.html`, `icons.js`, `tail.html`). |
 | `server/` | Optional sync backend (zero-dep Node) so devices share data. Runs on a LAN box or cloud, not part of the web app. |
 | `gateway/` | Optional PLC gateway (Python) that auto-captures stops from a machine PLC. Simulator + S7 + OPC UA adapters. |
+| `android/` | Native **Wear OS companion**: a Samsung/Wear OS watch app for the operator stop-timer plus a phone companion that bridges the watch to the web app (offline, server-free). See [`android/README.md`](android/README.md). |
 
 ## Build
 
