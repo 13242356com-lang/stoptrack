@@ -17,3 +17,6 @@ mobile/src/main/assets/index.html
 *.jks
 *.keystore
 keystore.properties
+# Exception: the shared sideload/debug key MUST be committed so phone + watch
+# sign identically (Wear Data Layer requirement). Not a Play production key.
+!keystore/stoptrack-debug.jks

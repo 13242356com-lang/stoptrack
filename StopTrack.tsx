@@ -1003,6 +1003,19 @@ export default function App() {
           }
         } catch (e) { /* fall back to any saved config */ }
       }
+      // Served straight FROM a StopTrack sync server ("supervisor anywhere"):
+      // prefill the Server sync URL with this page's own origin so the
+      // supervisor only enters the factory token. Probes /health to confirm the
+      // origin really is a StopTrack server (a 401 also proves it — it means
+      // "server here, token needed"). Never auto-enables, never overwrites a
+      // saved config, and silently no-ops on Cloudflare Pages / file://.
+      else if (!sc && typeof window !== "undefined" && /^https?:$/.test(window.location.protocol)) {
+        const probe = await fetchJSON(`${window.location.origin}/health`, { timeoutMs: 2500 });
+        if ((probe.ok && probe.data && probe.data.ok === true) || probe.status === 401) {
+          sc = { url: window.location.origin, token: "", enabled: false };
+          await api.saveSyncConfig(sc);
+        }
+      }
       if (sc) { setSyncCfg(sc); api.setSyncEnabled(!!(sc.enabled && sc.url)); }
       const prefs = await api.loadPrefs();
       if (prefs) {

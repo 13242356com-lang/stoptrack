@@ -11,17 +11,37 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.stoptrack.wear"
+        // MUST match the :mobile applicationId — the Wear Data Layer only exchanges
+        // messages/data items between a phone app and watch app with the SAME
+        // applicationId. (Namespaces stay distinct so the R classes don't clash.)
+        applicationId = "com.stoptrack"
         // Wear OS 3 (Galaxy Watch 4 and newer) = API 30.
         minSdk = 30
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 3
+        versionName = "0.3"
+    }
+
+    // A committed, stable signing key shared with :mobile. The Wear Data Layer only
+    // connects a phone and watch app signed with the SAME certificate, and a fixed
+    // key also lets new builds install over old ones. This is a sideload/debug key,
+    // not a Play production key.
+    signingConfigs {
+        create("shared") {
+            storeFile = file("${rootDir}/keystore/stoptrack-debug.jks")
+            storePassword = "stoptrack"
+            keyAlias = "stoptrack"
+            keyPassword = "stoptrack"
+        }
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("shared")
+        }
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("shared")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }

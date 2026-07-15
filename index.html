@@ -1114,6 +1114,13 @@ function App() {
                 }
                 catch (e) { }
             }
+            else if (!sc && typeof window !== "undefined" && /^https?:$/.test(window.location.protocol)) {
+                const probe = await fetchJSON(`${window.location.origin}/health`, { timeoutMs: 2500 });
+                if ((probe.ok && probe.data && probe.data.ok === true) || probe.status === 401) {
+                    sc = { url: window.location.origin, token: "", enabled: false };
+                    await api.saveSyncConfig(sc);
+                }
+            }
             if (sc) {
                 setSyncCfg(sc);
                 api.setSyncEnabled(!!(sc.enabled && sc.url));

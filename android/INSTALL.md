@@ -117,6 +117,18 @@ developer account**, then:
 That's it. Supervisor changes you make on the phone (machines, reasons, quick
 stops) push to the watch automatically.
 
+### Recommended: connect the watch to the server (the reliable path)
+If you run the StopTrack server (see [`server/SETUP.md`](../server/SETUP.md)),
+connect the watch to it directly — this works over Wi-Fi from anywhere and
+doesn't depend on the Bluetooth phone link:
+1. On the watch, scroll down to **Server sync**.
+2. **Server URL** → type the server address (e.g. `stoptrack.yourfactory.com`,
+   or `192.168.1.50:4000` on factory Wi-Fi).
+3. **Token** → the factory token.
+4. Footer shows **“Server synced”**. Stops upload straight to the server and
+   supervisor changes (made from ANY browser, anywhere) reach the watch in
+   ~15 seconds.
+
 ---
 
 ## If something's not working

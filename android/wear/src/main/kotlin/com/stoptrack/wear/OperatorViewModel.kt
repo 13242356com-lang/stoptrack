@@ -3,9 +3,13 @@ package com.stoptrack.wear
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.stoptrack.shared.Collection
 import com.stoptrack.shared.QuickStop
+import com.stoptrack.shared.RemoteSyncClient
 import com.stoptrack.shared.StopRecord
+import com.stoptrack.shared.StopTrackJson
 import com.stoptrack.shared.WatchConfig
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -13,6 +17,14 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
 
 enum class Phase { IDLE, RUNNING, PAUSED, DOCUMENTING, SAVED }
 
@@ -27,8 +39,13 @@ data class WatchUiState(
     val phoneReachable: Boolean = false,
     val outboxCount: Int = 0,
     val lastSavedReason: String? = null,
+    /** Direct server sync: configured URL ("" = off) and last attempt result. */
+    val serverUrl: String = "",
+    val serverTokenSet: Boolean = false,
+    val serverOk: Boolean? = null,
 ) {
     val needsSetup: Boolean get() = machine.isBlank()
+    val serverConfigured: Boolean get() = serverUrl.isNotBlank()
 }
 
 /**
@@ -53,6 +70,13 @@ class OperatorViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { store.machine.collect { m -> _ui.update { it.copy(machine = m) } } }
         viewModelScope.launch { store.config.collect { c -> _ui.update { it.copy(config = c) } } }
         viewModelScope.launch { store.outbox.collect { o -> _ui.update { it.copy(outboxCount = o.size) } } }
+        viewModelScope.launch {
+            store.serverUrl.collect { u ->
+                _ui.update { it.copy(serverUrl = u, serverOk = null) }
+                if (u.isNotBlank()) serverSync() // try immediately on (re)configure
+            }
+        }
+        viewModelScope.launch { store.serverToken.collect { t -> _ui.update { it.copy(serverTokenSet = t.isNotBlank()) } } }
 
         // Recover a timer that was live when the app was last closed.
         viewModelScope.launch {
@@ -71,11 +95,13 @@ class OperatorViewModel(app: Application) : AndroidViewModel(app) {
             refreshReachable()
         }
 
-        // Heartbeat: keep the reachability flag current and retry unsent stops.
+        // Heartbeat: keep the reachability flag current and retry unsent stops —
+        // to the server (primary, reliable path) and the phone (best-effort).
         viewModelScope.launch {
             while (true) {
                 delay(HEARTBEAT_MS)
                 refreshReachable()
+                serverSync()
                 flushOutbox()
             }
         }
@@ -85,6 +111,21 @@ class OperatorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setOperator(name: String) = viewModelScope.launch { store.setOperator(name) }
     fun setMachine(machine: String) = viewModelScope.launch { store.setMachine(machine) }
+
+    /** Save the server URL, normalizing the scheme: a bare IP (factory LAN) gets
+     *  http://, anything else (tunnel domain) gets https://. */
+    fun setServerUrl(raw: String) = viewModelScope.launch {
+        val t = raw.trim().trimEnd('/')
+        val url = when {
+            t.isBlank() -> ""
+            t.contains("://") -> t
+            t.matches(Regex("^[0-9.:]+$")) || t.startsWith("localhost") -> "http://$t"
+            else -> "https://$t"
+        }
+        store.setServerUrl(url)
+    }
+
+    fun setServerToken(raw: String) = viewModelScope.launch { store.setServerToken(raw.trim()) }
 
     // --- timer lifecycle ------------------------------------------------------
 
@@ -158,7 +199,8 @@ class OperatorViewModel(app: Application) : AndroidViewModel(app) {
         )
         viewModelScope.launch {
             store.addToOutbox(record)       // durable first — never lose a stop
-            phone.sendStop(record)          // best-effort; ack later clears the outbox
+            serverSync()                    // primary: straight to the server
+            phone.sendStop(record)          // secondary: paired phone, best-effort
         }
         _ui.update { it.copy(phase = Phase.SAVED, pendingStop = null, lastSavedReason = reason) }
         // Auto-return to idle so the operator isn't stuck on the confirmation.
@@ -170,7 +212,51 @@ class OperatorViewModel(app: Application) : AndroidViewModel(app) {
 
     // --- helpers --------------------------------------------------------------
 
-    fun retrySyncNow() = viewModelScope.launch { refreshReachable(); flushOutbox(); phone.requestConfig() }
+    fun retrySyncNow() = viewModelScope.launch { refreshReachable(); serverSync(); flushOutbox(); phone.requestConfig() }
+
+    /**
+     * Direct server sync — the reliable path, validated against the reference
+     * server: push every queued stop (removed from the outbox only after the
+     * server confirms), then pull the supervisor's config (machines / reasons /
+     * quick stops) and keep it if newer. No-op until a URL is configured; any
+     * network failure just leaves the outbox intact for the next heartbeat.
+     */
+    private val serverSyncLock = Mutex()
+    private suspend fun serverSync() {
+        val url = store.serverUrl.first()
+        if (url.isBlank()) return
+        val token = store.serverToken.first()
+        serverSyncLock.withLock {
+            val ok = withContext(Dispatchers.IO) {
+                runCatching {
+                    val client = RemoteSyncClient(url, token.ifBlank { null })
+
+                    // Push queued stops; clear them only on server confirmation.
+                    val queued = store.outbox.first()
+                    if (queued.isNotEmpty()) {
+                        val records = queued.map {
+                            StopTrackJson.encodeToJsonElement(StopRecord.serializer(), it).jsonObject
+                        }
+                        if (client.push(Collection.STOPS, records)) {
+                            for (r in queued) store.removeFromOutbox(r.id)
+                        }
+                    }
+
+                    // Pull supervisor config; keep the slice the watch uses.
+                    val (cfg, at) = client.getConfig()
+                    if (cfg != null && at > store.config.first().updatedAt) {
+                        val slim = buildJsonObject {
+                            for (k in arrayOf("machines", "reasons", "quickStops")) cfg[k]?.let { put(k, it) }
+                            put("updatedAt", JsonPrimitive(at))
+                        }
+                        store.setConfigJson(StopTrackJson.encodeToString(JsonObject.serializer(), slim))
+                    }
+                    true
+                }.getOrDefault(false)
+            }
+            _ui.update { it.copy(serverOk = ok) }
+        }
+    }
 
     private fun startTicking() {
         stopTicking()

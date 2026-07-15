@@ -5,9 +5,16 @@
 
     <!-- Keep the screen awake briefly while a stop is being timed. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Direct server sync (the reliable path): the watch pushes stops to and
+         pulls supervisor config from the StopTrack server over Wi-Fi/LTE. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- usesCleartextTraffic: allows plain http to a factory-LAN server
+         (http://192.168…:4000). Anywhere-mode uses https via the tunnel. -->
     <application
         android:name=".WearApp"
+        android:usesCleartextTraffic="true"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"

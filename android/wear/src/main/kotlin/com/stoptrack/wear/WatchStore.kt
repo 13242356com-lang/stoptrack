@@ -32,10 +32,16 @@ class WatchStore(private val context: Context) {
         val CONFIG = stringPreferencesKey("config_json")
         val OUTBOX = stringPreferencesKey("outbox_json")
         val INPROGRESS = stringPreferencesKey("inprogress_json")
+        val SERVER_URL = stringPreferencesKey("server_url")
+        val SERVER_TOKEN = stringPreferencesKey("server_token")
     }
 
     val operator: Flow<String> = context.dataStore.data.map { it[Keys.OPERATOR] ?: "" }
     val machine: Flow<String> = context.dataStore.data.map { it[Keys.MACHINE] ?: "" }
+
+    // Direct server sync (the reliable path). Set once on the watch; empty = off.
+    val serverUrl: Flow<String> = context.dataStore.data.map { it[Keys.SERVER_URL] ?: "" }
+    val serverToken: Flow<String> = context.dataStore.data.map { it[Keys.SERVER_TOKEN] ?: "" }
 
     val config: Flow<WatchConfig> = context.dataStore.data.map { prefs ->
         prefs[Keys.CONFIG]?.let { runCatching { StopTrackJson.decodeFromString<WatchConfig>(it) }.getOrNull() }
@@ -56,6 +62,12 @@ class WatchStore(private val context: Context) {
 
     suspend fun setMachine(value: String) =
         context.dataStore.edit { it[Keys.MACHINE] = value }.let {}
+
+    suspend fun setServerUrl(value: String) =
+        context.dataStore.edit { it[Keys.SERVER_URL] = value }.let {}
+
+    suspend fun setServerToken(value: String) =
+        context.dataStore.edit { it[Keys.SERVER_TOKEN] = value }.let {}
 
     /** Called by the Data Layer service when the phone pushes fresh config. */
     suspend fun setConfigJson(json: String) =
