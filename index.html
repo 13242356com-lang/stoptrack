@@ -1101,7 +1101,19 @@ function App() {
                 if (cfg.updatedAt)
                     setConfigUpdatedAt(cfg.updatedAt);
             }
-            const sc = await api.loadSyncConfig();
+            let sc = await api.loadSyncConfig();
+            const native = (typeof window !== "undefined") ? window.StopTrackNative : null;
+            if (native && typeof native.syncUrl === "function") {
+                try {
+                    const url = native.syncUrl();
+                    if (url) {
+                        const token = (typeof native.token === "function" ? native.token() : "") || "";
+                        sc = { url, token, enabled: true };
+                        await api.saveSyncConfig(sc);
+                    }
+                }
+                catch (e) { }
+            }
             if (sc) {
                 setSyncCfg(sc);
                 api.setSyncEnabled(!!(sc.enabled && sc.url));

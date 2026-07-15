@@ -38,6 +38,13 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      # Node lets :mobile's prepareWebAsset task inline React + Tailwind into the
+      # bundled web app so the phone app works offline on the factory floor.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Build debug APKs
         working-directory: android
         run: ./gradlew :mobile:assembleDebug :wear:assembleDebug --stacktrace --no-daemon

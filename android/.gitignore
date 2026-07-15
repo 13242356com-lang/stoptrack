@@ -10,6 +10,9 @@ captures/
 .externalNativeBuild/
 .cxx/
 
+# Generated at build time by :mobile's prepareWebAsset task (bundled web app).
+mobile/src/main/assets/index.html
+
 # Keystores / signing — never commit secrets.
 *.jks
 *.keystore

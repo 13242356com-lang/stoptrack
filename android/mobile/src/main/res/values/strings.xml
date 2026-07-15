@@ -1,4 +1,5 @@
 <resources>
-    <string name="app_name">StopTrack Companion</string>
+    <string name="app_name">StopTrack</string>
+    <string name="bridge_settings_title">Watch bridge settings</string>
     <string name="bridge_channel_name">StopTrack bridge</string>
 </resources>

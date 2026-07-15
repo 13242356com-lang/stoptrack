@@ -75,12 +75,23 @@ class CompanionService : LifecycleService() {
 
     private fun restartServer(port: Int, token: String?) {
         runCatching { server?.stop() }
-        val srv = LocalSyncServer(store, token, port)
+        // onConfigChanged fires when the web app saves supervisor settings (PUT
+        // /config); push the new machines/reasons/quick-stops to the watch at once.
+        val srv = LocalSyncServer(
+            store = store,
+            token = token,
+            port = port,
+            onConfigChanged = { publishConfigToWatch() },
+        )
         val started = runCatching { srv.start(NanoHttpTimeoutMs, false) }.isSuccess
         server = if (started) srv else null
         serverPort = if (started) port else -1
         serverToken = token
         updateNotification()
+    }
+
+    private fun publishConfigToWatch() {
+        lifecycleScope.launch { bridge.publishConfig(store.watchConfigJson()) }
     }
 
     private fun startInForeground(text: String) {
@@ -103,16 +114,21 @@ class CompanionService : LifecycleService() {
     }
 
     private fun buildNotification(text: String): Notification {
-        val open = PendingIntent.getActivity(
+        val openApp = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        val openSettings = PendingIntent.getActivity(
+            this, 1, Intent(this, BridgeSettingsActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("StopTrack bridge")
+            .setContentTitle("StopTrack running")
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setOngoing(true)
-            .setContentIntent(open)
+            .setContentIntent(openApp)
+            .addAction(0, "Bridge settings", openSettings)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }

@@ -25,6 +25,7 @@ class LocalSyncServer(
     private val token: String?,
     port: Int,
     private val onActivity: (String) -> Unit = {},
+    private val onConfigChanged: () -> Unit = {},
 ) : NanoHTTPD("127.0.0.1", port) {
 
     override fun serve(session: IHTTPSession): Response {
@@ -55,8 +56,11 @@ class LocalSyncServer(
                     val config = body?.get("config") as? JsonObject
                     val incomingAt = (body?.get("updatedAt") as? JsonPrimitive)?.long
                         ?: (config?.get("updatedAt") as? JsonPrimitive)?.long ?: 0L
-                    store.putConfig(config, incomingAt)
-                    onActivity("config updated from web app")
+                    val changed = store.putConfig(config, incomingAt)
+                    if (changed) {
+                        onActivity("config updated from web app")
+                        onConfigChanged() // push machines/reasons/quick-stops to the watch
+                    }
                     json(Response.Status.OK, ok(serverTime))
                 }
 

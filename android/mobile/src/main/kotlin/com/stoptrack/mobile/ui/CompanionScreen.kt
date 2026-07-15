@@ -41,7 +41,7 @@ import com.stoptrack.mobile.CompanionViewModel
 fun CompanionScreen(vm: CompanionViewModel) {
     val ui by vm.ui.collectAsState()
 
-    Scaffold(topBar = { TopAppBar(title = { Text("StopTrack Companion") }) }) { pad ->
+    Scaffold(topBar = { TopAppBar(title = { Text("Watch bridge settings") }) }) { pad ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -50,18 +50,40 @@ fun CompanionScreen(vm: CompanionViewModel) {
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            Text(
+                "The StopTrack app and the watch already work together with no setup. " +
+                    "These are just the plumbing — you rarely need to change anything here.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             StatusCard(ui)
-            ConnectWebAppCard(ui)
             LocalServerCard(ui, vm)
             WatchCard(ui, vm)
             RemoteForwardCard(ui, vm)
-            Text(
-                "The watch and this phone work together with no server. The remote " +
-                    "server below is optional — only for sharing across sites.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
+    }
+}
+
+/** Fallback screen if the app can't create its WebView (very rare). */
+@Composable
+fun StartupError(error: Throwable) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text("StopTrack couldn't start", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Text(
+            "Please screenshot this and send it:",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            (error.message ?: error.javaClass.simpleName) + "\n\n" + error.stackTraceToString(),
+            style = MaterialTheme.typography.bodySmall,
+        )
     }
 }
 
@@ -73,33 +95,6 @@ private fun StatusCard(ui: CompanionUi) = SectionCard("Bridge status") {
     }
 }
 
-@Composable
-private fun ConnectWebAppCard(ui: CompanionUi) = SectionCard("Connect the web app") {
-    Text(
-        "In StopTrack (the web app) open Supervisor → Server sync and enter:",
-        style = MaterialTheme.typography.bodyMedium,
-    )
-    Spacer(Modifier.height(6.dp))
-    Text("Server URL", style = MaterialTheme.typography.labelSmall)
-    Text(
-        "http://127.0.0.1:${ui.settings.localPort}",
-        style = MaterialTheme.typography.titleMedium,
-        fontFamily = FontFamily.Monospace,
-        color = MaterialTheme.colorScheme.primary,
-    )
-    if (ui.settings.localToken.isNotBlank()) {
-        Spacer(Modifier.height(4.dp))
-        Text("Factory token", style = MaterialTheme.typography.labelSmall)
-        Text(ui.settings.localToken, fontFamily = FontFamily.Monospace)
-    }
-    Spacer(Modifier.height(4.dp))
-    Text(
-        "Then tick “Enable background sync”. Everything the watch logs appears in " +
-            "the supervisor view — no server needed.",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-}
 
 @Composable
 private fun LocalServerCard(ui: CompanionUi, vm: CompanionViewModel) = SectionCard("Local server") {
