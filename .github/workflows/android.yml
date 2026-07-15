@@ -20,6 +20,11 @@ on:
     paths:
       - "android/**"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Publish a versioned release with this tag (e.g. v0.1). Leave blank for just a build."
+        required: false
+        default: ""
 
 jobs:
   build:
@@ -64,7 +69,7 @@ jobs:
       # names, so they're a one-tap download from the repo front page — no digging
       # through Actions, no zip. Refreshes the "latest" release each build.
       - name: Rename APKs for release
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
         run: |
           mkdir -p release
           cp android/mobile/build/outputs/apk/debug/mobile-debug.apk release/StopTrack-phone.apk
@@ -87,13 +92,17 @@ jobs:
             Step-by-step install guide: [`android/INSTALL.md`](https://github.com/13242356com-lang/stoptrack/blob/main/android/INSTALL.md)
           files: release/*.apk
 
-      # Immutable, versioned release, published when a tag like v0.1 is pushed.
+      # Immutable, versioned release. Published either by pushing a tag like v0.1,
+      # or by running this workflow manually with a `release_tag` input (which the
+      # action creates the tag for). The latter is how releases are cut in
+      # environments where tag pushes are restricted.
       - name: Publish versioned release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: StopTrack ${{ github.ref_name }}
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.release_tag }}
+          name: StopTrack ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.release_tag }}
+          target_commitish: ${{ github.sha }}
           prerelease: false
           body: |
             StopTrack ${{ github.ref_name }}.
