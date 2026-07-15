@@ -3,7 +3,8 @@ name: Build watch app
 # Bakes the two installable app files (APKs):
 #   - phone companion  (android/mobile)
 #   - watch app        (android/wear)
-# Download them afterwards from this run's "Artifacts" section.
+# On main, the APKs are published to the repo's Releases page (friendly names);
+# every run also attaches them under its "Artifacts" section (raw names).
 #
 # Runs automatically when anything under android/ changes, and can be started by
 # hand from the Actions tab with the "Run workflow" button (workflow_dispatch).
@@ -22,6 +23,9 @@ jobs:
   build:
     name: Build phone + watch APKs
     runs-on: ubuntu-latest
+    # Needed so the release step can publish the APKs to the Releases page.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -46,3 +50,29 @@ jobs:
           path: |
             android/mobile/build/outputs/apk/debug/*.apk
             android/wear/build/outputs/apk/debug/*.apk
+
+      # On main, also publish the APKs to the repo's Releases page with friendly
+      # names, so they're a one-tap download from the repo front page — no digging
+      # through Actions, no zip. Refreshes the "latest" release each build.
+      - name: Rename APKs for release
+        if: github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p release
+          cp android/mobile/build/outputs/apk/debug/mobile-debug.apk release/StopTrack-phone.apk
+          cp android/wear/build/outputs/apk/debug/wear-debug.apk release/StopTrack-watch.apk
+
+      - name: Publish to Releases
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest StopTrack build (phone + watch APKs)
+          prerelease: true
+          body: |
+            Auto-built from the latest `main`.
+
+            - **StopTrack-phone.apk** — install on the phone (the companion/bridge)
+            - **StopTrack-watch.apk** — install on the Samsung / Wear OS watch
+
+            Step-by-step install guide: [`android/INSTALL.md`](https://github.com/13242356com-lang/stoptrack/blob/main/android/INSTALL.md)
+          files: release/*.apk

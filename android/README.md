@@ -49,27 +49,31 @@ the watch to the existing StopTrack web app.
 
 ---
 
-## Build
+## Get the app files (APKs)
 
-Requires **Android Studio** (Ladybug or newer) or the Android SDK + JDK 17.
+**Easiest — download the ready-made ones (no tools needed).** GitHub Actions
+builds both APKs on every push to `main` (`.github/workflows/android.yml`) and
+publishes them to the repo's **Releases** page as `StopTrack-phone.apk` and
+`StopTrack-watch.apk` — grab them from Repo → **Releases** → *Latest StopTrack
+build*. (They're also on every run under **Actions → Build watch app →
+Artifacts → stoptrack-apks** as the raw `mobile-debug.apk` / `wear-debug.apk`.)
+A plain click-by-click guide is in [`INSTALL.md`](INSTALL.md).
+
+**Or build locally** with Android Studio (Ladybug+) or the Android SDK + JDK 17:
 
 ```bash
 cd android
-# Android Studio: "Open" this folder and let it sync, then Run :wear and :mobile.
-# Command line (needs ANDROID_HOME / a local.properties with sdk.dir):
 ./gradlew :mobile:assembleDebug   # phone companion APK
 ./gradlew :wear:assembleDebug     # watch APK
 ```
 
 APKs land in `mobile/build/outputs/apk/debug/` and `wear/build/outputs/apk/debug/`.
 
-> **Not built in this repo's CI / cloud session.** These modules need the Android
-> SDK, which wasn't available where this project was authored, so they were
-> **not compiled here** — only the pure-Kotlin `:shared` and the wear
-> timer/format logic were compiled and pass. Build them in Android Studio; expect
-> to fix the usual small first-build issues (SDK versions, licences). Runtime
-> behaviour (Data Layer pairing, the loopback bridge) can only be verified on a
-> real phone + watch — see "Verify on device" below.
+> **Build status:** the full project (`:shared` + `:wear` + `:mobile`) compiles
+> cleanly in CI on the Android SDK — both APKs are produced on every push. It was
+> authored without a local SDK, so *runtime* behaviour (Data Layer pairing, the
+> loopback bridge) still needs checking on a real phone + watch — see "Verify on
+> device" below.
 
 ### Install & pair
 
