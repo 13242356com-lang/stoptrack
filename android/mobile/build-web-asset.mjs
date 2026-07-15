@@ -33,7 +33,10 @@ for (const match of tags) {
     let code = await res.text();
     // Guard against an accidental </script> inside inlined code closing our tag.
     code = code.replaceAll("</script>", "<\\/script>");
-    result = result.replace(fullTag, `<script>${code}</script>`);
+    // IMPORTANT: use split/join, NOT String.replace — a replacement string
+    // interprets `$$`, `$&`, `$1`… and React's minified code is full of `$$typeof`
+    // and `$`-sequences, which .replace() would corrupt (→ React error #31).
+    result = result.split(fullTag).join(`<script>${code}</script>`);
     inlined++;
     console.log(`inlined ${url} (${code.length} bytes)`);
   } catch (e) {
