@@ -9,6 +9,8 @@ build/app.js
 # runtime data (never commit factory data / secrets)
 # server's stops/production/sessions store
 server/stoptrack-data.json
+# auto-generated per-server auth token (secret)
+server/stoptrack-token.txt
 server/node_modules/
 # gateway FileSink output / demo events
 *.jsonl

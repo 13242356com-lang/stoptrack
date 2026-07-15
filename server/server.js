@@ -21,10 +21,36 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
+const crypto = require("crypto");
 
 const PORT = Number(process.env.PORT) || 4000;
-const TOKEN = process.env.FACTORY_TOKEN || "";
 const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, "stoptrack-data.json");
+
+// Public https address (from a Cloudflare Tunnel / reverse proxy). Optional —
+// set it once you've done SETUP.md Part B so startup prints the anywhere-URL.
+const PUBLIC_URL = (process.env.PUBLIC_URL || "").trim().replace(/\/$/, "");
+
+// --- auth token (auto-generated) --------------------------------------------
+// No manual step: this server mints its OWN unique token the first time it runs
+// and remembers it in stoptrack-token.txt, so it's stable across restarts and
+// every device keeps working. Override with FACTORY_TOKEN if you prefer to pick
+// your own. The token is printed at startup so you can copy it to devices.
+const TOKEN_FILE = process.env.TOKEN_FILE || path.join(__dirname, "stoptrack-token.txt");
+function resolveToken() {
+  if (process.env.FACTORY_TOKEN) return process.env.FACTORY_TOKEN.trim();
+  try {
+    if (fs.existsSync(TOKEN_FILE)) {
+      const saved = fs.readFileSync(TOKEN_FILE, "utf8").trim();
+      if (saved) return saved;
+    }
+  } catch { /* fall through to generate */ }
+  const fresh = crypto.randomBytes(18).toString("base64url"); // 24-char url-safe secret
+  try { fs.writeFileSync(TOKEN_FILE, fresh, { mode: 0o600 }); }
+  catch (e) { console.error("Could not save token file (using in-memory token):", e.message); }
+  return fresh;
+}
+const TOKEN = resolveToken();
 
 // The StopTrack web app to serve at "/" so a supervisor can open this server's
 // URL in any browser (phone included) and get the full app — no separate
@@ -35,12 +61,6 @@ const APP_HTML = process.env.APP_HTML
   || [path.join(__dirname, "..", "index.html"), path.join(__dirname, "index.html")]
     .find((p) => { try { return fs.existsSync(p); } catch { return false; } })
   || "";
-
-if (!TOKEN) {
-  console.warn("WARNING: FACTORY_TOKEN is not set. Set one so only your devices can sync:\n" +
-    "  FACTORY_TOKEN=some-long-random-secret node server.js\n" +
-    "Running open (no auth) for now — do NOT do this on an untrusted network.");
-}
 
 // --- persistence (single JSON file) ----------------------------------------
 // Shape: { stops: { [id]: record }, production: { [id]: record }, sessions: { [id]: record }, config: { config, updatedAt } }
@@ -262,9 +282,44 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// Connectable addresses for humans. 0.0.0.0 is the BIND address (all
+// interfaces) — you can't open it in a browser; use localhost or a LAN IP.
+function lanIPv4s() {
+  const out = [];
+  const ifaces = os.networkInterfaces();
+  for (const name of Object.keys(ifaces)) {
+    for (const ni of ifaces[name] || []) {
+      if (ni.family === "IPv4" && !ni.internal) out.push(ni.address);
+    }
+  }
+  return out;
+}
+
 server.listen(PORT, () => {
-  console.log(`StopTrack sync server listening on http://0.0.0.0:${PORT}`);
-  console.log(`Data file: ${DATA_FILE}`);
-  console.log(APP_HTML ? `Supervisor app served at "/" from: ${APP_HTML}` : `Supervisor app NOT served ("/" shows instructions) — no index.html found.`);
-  console.log(TOKEN ? "Auth: token required." : "Auth: OPEN (no token set).");
+  const line = "=".repeat(64);
+  console.log("");
+  console.log(line);
+  console.log("  StopTrack server is READY — set up each device with:");
+  console.log("");
+  if (PUBLIC_URL) {
+    console.log(`   Address (anywhere): ${PUBLIC_URL}`);
+  }
+  console.log(`   Address (this PC):  http://localhost:${PORT}`);
+  for (const ip of lanIPv4s()) {
+    console.log(`   Address (Wi-Fi):    http://${ip}:${PORT}`);
+  }
+  console.log("");
+  console.log(`   Auth token:         ${TOKEN}`);
+  console.log("");
+  console.log("  Enter the address + token on each phone, watch, and browser.");
+  if (!PUBLIC_URL) {
+    console.log("  For an https address that works ANYWHERE, set up a tunnel");
+    console.log("  (SETUP.md Part B), then set PUBLIC_URL and restart.");
+  }
+  console.log(`  (Don't use http://0.0.0.0:${PORT} — that address won't connect.)`);
+  console.log(line);
+  console.log("");
+  console.log(`Data file:  ${DATA_FILE}`);
+  console.log(`Token file: ${TOKEN_FILE}  (keep this secret)`);
+  console.log(APP_HTML ? `Supervisor app served at "/" from: ${APP_HTML}` : `Supervisor app NOT served — no index.html found next to server.js.`);
 });
