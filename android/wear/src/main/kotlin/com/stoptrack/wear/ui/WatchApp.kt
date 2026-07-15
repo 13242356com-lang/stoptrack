@@ -65,6 +65,8 @@ fun WatchApp(vm: OperatorViewModel) {
 private fun IdleScreen(ui: WatchUiState, vm: OperatorViewModel) {
     val listState = rememberScalingLazyListState()
     val setOperator = rememberTextInput(label = "Operator name") { vm.setOperator(it) }
+    val setServerUrl = rememberTextInput(label = "Server URL") { vm.setServerUrl(it) }
+    val setServerToken = rememberTextInput(label = "Factory token") { vm.setServerToken(it) }
 
     ScalingLazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -110,6 +112,27 @@ private fun IdleScreen(ui: WatchUiState, vm: OperatorViewModel) {
         }
 
         item { SyncFooter(ui, onRetry = { vm.retrySyncNow() }) }
+
+        // Server sync setup — enter once, then stops upload and supervisor
+        // changes (machines / reasons / quick stops) arrive automatically.
+        item { SectionLabel("Server sync") }
+        item {
+            Chip(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = setServerUrl,
+                colors = ChipDefaults.secondaryChipColors(),
+                label = { Text("Server URL") },
+                secondaryLabel = { Text(if (ui.serverConfigured) ui.serverUrl.removePrefix("https://").removePrefix("http://") else "Not set — tap to enter") },
+            )
+        }
+        item {
+            CompactChip(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = setServerToken,
+                colors = ChipDefaults.secondaryChipColors(),
+                label = { Text(if (ui.serverTokenSet) "Token · set" else "Token · tap to enter") },
+            )
+        }
     }
 }
 
@@ -231,10 +254,12 @@ private fun SavedScreen(ui: WatchUiState) {
         ui.lastSavedReason?.let {
             Text(it, style = MaterialTheme.typography.caption1, color = MaterialTheme.colors.onBackground)
         }
-        if (!ui.phoneReachable) {
+        val offline = if (ui.serverConfigured) ui.serverOk == false else !ui.phoneReachable
+        if (offline) {
             Spacer(Modifier.height(4.dp))
             Text(
-                "Phone offline — will send when connected",
+                if (ui.serverConfigured) "Server unreachable — will send when back online"
+                else "Phone offline — will send when connected",
                 style = MaterialTheme.typography.caption2,
                 color = MaterialTheme.colors.secondary,
                 textAlign = TextAlign.Center,
@@ -267,14 +292,21 @@ private fun SectionLabel(text: String) {
     )
 }
 
-/** One-line watch<->phone status, plus queued (unsent) stop count and a retry tap. */
+/** One-line sync status (server first, phone fallback) + queued count; tap retries. */
 @Composable
 private fun SyncFooter(ui: WatchUiState, onRetry: () -> Unit) {
-    val text = when {
-        !ui.phoneReachable && ui.outboxCount > 0 -> "Phone offline · ${ui.outboxCount} waiting"
-        !ui.phoneReachable -> "Phone offline"
-        ui.outboxCount > 0 -> "Sending ${ui.outboxCount}…"
-        else -> "Linked to phone"
+    val (text, good) = when {
+        // Server mode — the reliable path once a URL is configured.
+        ui.serverConfigured && ui.serverOk == true && ui.outboxCount == 0 -> "Server synced" to true
+        ui.serverConfigured && ui.serverOk == true -> "Sending ${ui.outboxCount}…" to true
+        ui.serverConfigured && ui.serverOk == false && ui.outboxCount > 0 -> "Server unreachable · ${ui.outboxCount} waiting" to false
+        ui.serverConfigured && ui.serverOk == false -> "Server unreachable" to false
+        ui.serverConfigured -> "Connecting to server…" to true
+        // Phone (Data Layer) fallback when no server is configured.
+        !ui.phoneReachable && ui.outboxCount > 0 -> "Phone offline · ${ui.outboxCount} waiting" to false
+        !ui.phoneReachable -> "Phone offline" to false
+        ui.outboxCount > 0 -> "Sending ${ui.outboxCount}…" to true
+        else -> "Linked to phone" to true
     }
     CompactChip(
         modifier = Modifier.fillMaxWidth(),
@@ -284,7 +316,7 @@ private fun SyncFooter(ui: WatchUiState, onRetry: () -> Unit) {
             Text(
                 text,
                 style = MaterialTheme.typography.caption2,
-                color = if (ui.phoneReachable) MaterialTheme.colors.primary else MaterialTheme.colors.secondary,
+                color = if (good) MaterialTheme.colors.primary else MaterialTheme.colors.secondary,
             )
         },
     )

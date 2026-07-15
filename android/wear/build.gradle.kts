@@ -18,8 +18,8 @@ android {
         // Wear OS 3 (Galaxy Watch 4 and newer) = API 30.
         minSdk = 30
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.2"
+        versionCode = 3
+        versionName = "0.3"
     }
 
     // A committed, stable signing key shared with :mobile. The Wear Data Layer only

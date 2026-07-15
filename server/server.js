@@ -26,6 +26,16 @@ const PORT = Number(process.env.PORT) || 4000;
 const TOKEN = process.env.FACTORY_TOKEN || "";
 const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, "stoptrack-data.json");
 
+// The StopTrack web app to serve at "/" so a supervisor can open this server's
+// URL in any browser (phone included) and get the full app — no separate
+// supervisor UI to maintain. Resolution order: APP_HTML env override, the repo
+// layout (../index.html), or a copy placed next to this script. If none exist
+// the server still runs; "/" just explains where to put the file.
+const APP_HTML = process.env.APP_HTML
+  || [path.join(__dirname, "..", "index.html"), path.join(__dirname, "index.html")]
+    .find((p) => { try { return fs.existsSync(p); } catch { return false; } })
+  || "";
+
 if (!TOKEN) {
   console.warn("WARNING: FACTORY_TOKEN is not set. Set one so only your devices can sync:\n" +
     "  FACTORY_TOKEN=some-long-random-secret node server.js\n" +
@@ -122,6 +132,27 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const route = url.pathname.replace(/\/$/, "") || "/";
   const now = Date.now();
+
+  // Serve the StopTrack app itself at "/" — the supervisor interface. The page
+  // is public (same code as the deployed web app); all DATA stays behind the
+  // bearer token, which the supervisor enters once in Supervisor → Server sync.
+  if ((route === "/" || route === "/index.html") && req.method === "GET") {
+    if (APP_HTML) {
+      try {
+        const html = fs.readFileSync(APP_HTML);
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" });
+        return res.end(html);
+      } catch (e) {
+        return send(res, 500, { ok: false, error: "Could not read app file: " + e.message });
+      }
+    }
+    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+    return res.end(
+      "StopTrack sync server is running.\n\n" +
+      "To serve the app here too, put the built index.html next to server.js\n" +
+      "(or set APP_HTML=/path/to/index.html) and restart.\n",
+    );
+  }
 
   // /health is open so a device can test connectivity before it has the token
   // pasted in. It still requires the token when one is configured.
@@ -234,5 +265,6 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`StopTrack sync server listening on http://0.0.0.0:${PORT}`);
   console.log(`Data file: ${DATA_FILE}`);
+  console.log(APP_HTML ? `Supervisor app served at "/" from: ${APP_HTML}` : `Supervisor app NOT served ("/" shows instructions) — no index.html found.`);
   console.log(TOKEN ? "Auth: token required." : "Auth: OPEN (no token set).");
 });

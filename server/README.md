@@ -9,6 +9,11 @@ This is a **reference implementation** — small, dependency-free, and easy to
 replace. The binding artifact is the [API contract](#api) below; any backend that
 honours it will work with the app unchanged.
 
+> **Plain-language setup guide** — PC hosting, reach-it-from-anywhere via
+> Cloudflare Tunnel, and connecting the browser / phone / watch: see
+> [SETUP.md](SETUP.md). The server also **serves the app itself at `/`**, so its
+> URL doubles as the supervisor interface in any browser.
+
 ## Run it
 
 Needs only [Node.js](https://nodejs.org) 16+ (no `npm install` required).

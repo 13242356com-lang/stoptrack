@@ -225,9 +225,14 @@ Full details in `android/README.md`. Key facts for future sessions:
 
 - **Why native:** Wear OS 3+ has no browser, so `index.html` can't run on the
   watch. A watch app must be an installed APK.
-- **Companion, server-free:** watch ⇄ phone runs over the **Wear Data Layer**
-  (no network). The phone companion stores stops on-device. The remote
-  `server/` is **optional / last-resort**, only used if forwarding is enabled.
+- **Two sync paths, server first:** the watch's **primary, reliable path is
+  direct HTTP sync to `server/`** (URL + token entered on the watch; push
+  stops, pull supervisor config every ~15 s — `OperatorViewModel.serverSync`).
+  The **Wear Data Layer** watch ⇄ phone path still exists as a server-free
+  fallback but proved fragile on real hardware (pairing/Play-Services/cert
+  preconditions); don't rely on it alone. `server/server.js` also **serves the
+  web app at `/`** so a supervisor can open the server URL from anywhere and
+  edit config (see `server/SETUP.md`).
 - **The web app is unchanged:** the phone companion runs a local HTTP server on
   `127.0.0.1` speaking the StopTrack sync contract. Point **Supervisor → Server
   sync** at `http://127.0.0.1:<port>` and watch stops appear in the supervisor
