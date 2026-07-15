@@ -1,3 +1,5 @@
+import java.io.File
+
 // :mobile — the phone companion. Bridges the watch (Wear Data Layer) to the web
 // app (local HTTP sync server on 127.0.0.1) and, optionally, to a remote server.
 plugins {
@@ -75,11 +77,11 @@ dependencies {
 // ---------------------------------------------------------------------------
 val prepareWebAsset by tasks.registering {
     val repoRoot = rootProject.projectDir.parentFile          // android/.. = repo root
-    val sourceHtml = java.io.File(repoRoot, "index.html")
+    val sourceHtml = File(repoRoot, "index.html")
     val assetsDir = layout.projectDirectory.dir("src/main/assets").asFile
-    val assetHtml = java.io.File(assetsDir, "index.html")
+    val assetHtml = File(assetsDir, "index.html")
     inputs.file(sourceHtml)
-    inputs.file(java.io.File(projectDir, "build-web-asset.mjs"))
+    inputs.file(File(projectDir, "build-web-asset.mjs"))
     outputs.file(assetHtml)
     doLast {
         assetsDir.mkdirs()
