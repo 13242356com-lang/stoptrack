@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- StopTrack emerald, matching the web app's accent. -->
+    <color name="ic_launcher_background">#0F172A</color>
+    <color name="stoptrack_emerald">#10B981</color>
+</resources>

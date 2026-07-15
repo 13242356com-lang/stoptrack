@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Wear apps draw their own Compose UI; this base theme just gives a black
+         background (correct for round OLED watches) and no action bar. -->
+    <style name="StopTrackWearTheme" parent="@android:style/Theme.DeviceDefault">
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+</resources>
