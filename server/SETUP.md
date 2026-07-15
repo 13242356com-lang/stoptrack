@@ -34,21 +34,31 @@ You need a PC that stays on (Windows assumed below; any OS works).
    - `server/server.js`
    - `server/start-stoptrack.bat`
    - `index.html`  ← this is the supervisor page the server will show
-3. **Set your factory token** — right-click `start-stoptrack.bat` → **Edit**,
-   and change `change-me-to-a-long-random-secret` to your own long random
-   password (letters+numbers, 20+ characters). Save. This token is what every
-   device must know — treat it like a password.
-4. **Double-click `start-stoptrack.bat`.** A black window opens saying
-   `StopTrack sync server listening…` — the server is running. Keep the window
-   open (closing it stops the server).
-5. **Test it:** on the same PC, open a browser and go to
-   `http://localhost:4000` — **StopTrack itself should appear.** That page is
-   your supervisor interface.
+3. **Double-click `start-stoptrack.bat`.** A black window opens. **No token to
+   set up** — the server makes its own the first time and prints it. Keep the
+   window open (closing it stops the server). You'll see something like:
 
-**Find the PC's address for other devices on the factory Wi-Fi:** press
-`Win+R`, type `cmd`, Enter, then type `ipconfig`. Look for **IPv4 Address**,
-e.g. `192.168.x.x`. Other devices on the same Wi-Fi then use
-`http://<PC-IP>:4000`.
+   ```
+   ================================================================
+     StopTrack server is READY — set up each device with:
+
+      Address (this PC):  http://localhost:4000
+      Address (Wi-Fi):    http://<PC-IP>:4000
+
+      Auth token:         Xq7t-9fКd2s…   <- your unique token
+     ...
+   ================================================================
+   ```
+
+   **Write down the `Auth token` line** — that's what every device uses. It's
+   saved in `stoptrack-token.txt` and stays the same on every restart. (Prefer
+   your own token? Set `FACTORY_TOKEN` and it uses that instead.)
+4. **Test it:** on the same PC, open a browser and go to `http://localhost:4000`
+   — **StopTrack itself should appear.** That page is your supervisor interface.
+
+**The `Address (Wi-Fi)` line** the server printed is what other devices on the
+factory Wi-Fi use (e.g. `http://<PC-IP>:4000`). If you need to find it another
+way: `Win+R` → `cmd` → `ipconfig` → **IPv4 Address**.
 
 **Start automatically when the PC boots (recommended):** Start menu → “Task
 Scheduler” → Create Basic Task → name `StopTrack` → trigger **When the computer
@@ -82,6 +92,9 @@ and a **domain name** added to it (any cheap one, ~$10/year — e.g.
    - Service type: **HTTP**, URL: `localhost:4000`
 4. Done. Your server is now at **`https://stoptrack.yourfactory.com`** from
    anywhere — phone on cellular, home, holiday.
+5. **(Nice-to-have)** so the server window prints that anywhere-address for you,
+   edit `start-stoptrack.bat` and set it: change the `set PUBLIC_URL=` line to
+   `set PUBLIC_URL=https://stoptrack.yourfactory.com`, then restart the server.
 
 > **Don't want to buy a domain?** Then skip Part B: everything still works on
 > the factory Wi-Fi via `http://<PC-IP>:4000`; you just can't reach it from

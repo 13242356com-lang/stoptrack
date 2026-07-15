@@ -36,9 +36,11 @@ Environment variables:
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `FACTORY_TOKEN` | *(empty)* | Shared secret. If empty the server runs **open** (no auth) and warns — only acceptable on a trusted, isolated LAN. |
+| `FACTORY_TOKEN` | *(auto)* | Shared secret every device sends. **Leave unset** and the server generates its own unique token, saves it to `stoptrack-token.txt`, and prints it at startup (stable across restarts). Set this only to pick your own token. |
+| `PUBLIC_URL` | *(empty)* | Your reach-from-anywhere https address (from a tunnel/reverse proxy). Only used to print it at startup. |
 | `PORT` | `4000` | Port to listen on. |
 | `DATA_FILE` | `./stoptrack-data.json` | Where records are persisted. |
+| `TOKEN_FILE` | `./stoptrack-token.txt` | Where the auto-generated token is saved. |
 | `SMTP_HOST` | *(empty)* | SMTP server for handover emails. Unset ⇒ `/report` answers 501 and the app falls back to copy. |
 | `SMTP_PORT` | `587` | SMTP port (465 switches to implicit TLS). |
 | `SMTP_USER` / `SMTP_PASS` | *(empty)* | SMTP credentials (omit for an open relay on a trusted LAN). |

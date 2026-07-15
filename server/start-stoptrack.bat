@@ -2,14 +2,17 @@
 REM ============================================================
 REM  StopTrack server — double-click to start (Windows)
 REM
-REM  1) EDIT THE TOKEN BELOW once (make it long and random —
-REM     it is the password every device uses).
-REM  2) Double-click this file. Keep the window open.
+REM  No token to set up: the server makes its own unique token
+REM  the first time and prints it. Keep this window open, then
+REM  read the "Auth token" and "Address" lines it shows and
+REM  enter them on each phone / watch / browser.
 REM
-REM  The server address is then:  http://<this-PC's-IP>:4000
+REM  OPTIONAL: after you set up a tunnel (SETUP.md Part B), put
+REM  your https address on the line below so it's printed too:
+REM     set PUBLIC_URL=https://stoptrack.yourdomain.com
 REM ============================================================
 
-set FACTORY_TOKEN=change-me-to-a-long-random-secret
+set PUBLIC_URL=
 
 cd /d "%~dp0"
 echo Starting StopTrack server... (close this window to stop it)
