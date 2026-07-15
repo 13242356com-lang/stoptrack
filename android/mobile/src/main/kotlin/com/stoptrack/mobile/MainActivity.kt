@@ -30,7 +30,8 @@ class MainActivity : ComponentActivity() {
         }
 
         // Kick the bridge on launch; it is START_STICKY so it stays up afterwards.
-        CompanionService.start(this)
+        // Guarded so a service-start hiccup can never stop the UI from opening.
+        runCatching { CompanionService.start(this) }
 
         setContent {
             CompanionTheme {
