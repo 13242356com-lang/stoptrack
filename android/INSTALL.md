@@ -3,11 +3,16 @@
 No coding. This walks you through getting the two apps onto a phone and a watch.
 
 There are **two apps**:
-- **Phone app** ("StopTrack Companion") — the bridge. Easy to install.
-- **Watch app** ("StopTrack") — the timer. The fiddly part.
+- **Phone app** ("StopTrack") — the **whole app**: the operator screen, the
+  supervisor view, analytics, exports, settings. Easy to install.
+- **Watch app** ("StopTrack") — the timer on the wrist. The fiddly part.
 
 They work **together, offline**. The watch talks to the phone over Bluetooth; the
-phone remembers everything. No internet or server needed.
+phone app is the full StopTrack and remembers everything. No Chrome, no separate
+companion, no manual setup — and no internet or server needed on the floor.
+
+> Supervisor settings you change in the phone app (machines, reasons, quick
+> stops) sync to the watch automatically.
 
 ---
 
@@ -39,11 +44,13 @@ phone remembers everything. No internet or server needed.
 2. On the phone, tap the file.
 3. Android will say it can't install from unknown sources — tap **Settings**, turn
    on **Allow from this source**, go back, and tap **Install**.
-4. Open **StopTrack Companion**. Allow notifications when asked. You'll see a screen
-   showing "Bridge status", a web-app address, and watch info. Leave it installed —
-   it runs quietly in the background.
+4. Open **StopTrack**. Allow notifications when asked. The full app opens — the
+   same operator and supervisor screens as before, now as an installed app. Leave
+   it installed; a small ongoing notification means the watch bridge is running.
 
-That's the phone done.
+That's the phone done — this *is* StopTrack now. (Tap the notification's **Bridge
+settings** only if you ever need the advanced watch/port or optional remote-server
+options.)
 
 ---
 
@@ -97,23 +104,18 @@ developer account**, then:
 
 ## Part 4 — Turn it on
 
-1. On the **watch**, open **StopTrack**. Tap a **machine**, then **Start stop**.
+1. On the **phone**, open **StopTrack** and set up machines/operators as usual —
+   it's the full app (operator + supervisor).
+2. On the **watch**, open **StopTrack**. Tap a **machine**, then **Start stop**.
    Use **Pause / End** as the machine stops and restarts. After **End**, tap the
    reason. That's the whole operator job.
-2. Finished stops travel to the phone automatically (they queue on the watch if the
-   phone is briefly out of range, and send when it's back).
+3. Finished stops travel to the phone automatically (they queue on the watch if the
+   phone is briefly out of range, and send when it's back). They appear in the
+   phone app's supervisor view with **no setup** — the app and watch are already
+   linked.
 
-### See the data in the web app (optional but recommended)
-On the **same phone**, open the StopTrack web app in Chrome:
-1. Go to **Supervisor → Server sync**.
-2. **Server URL**: type the address shown on the companion's home screen
-   (looks like `http://127.0.0.1:4000`).
-3. Leave the token blank (unless you set one on the companion).
-4. Tick **Enable background sync** → **Save** → **Test connection** (should say
-   reachable).
-
-Now every stop logged on the watch shows up in the supervisor view — all on the
-phone, no server.
+That's it. Supervisor changes you make on the phone (machines, reasons, quick
+stops) push to the watch automatically.
 
 ---
 
@@ -122,12 +124,11 @@ phone, no server.
 - **Watch says "Phone offline"** — make sure the watch and phone are paired in the
   Galaxy Wearable app and Bluetooth is on. Stops are kept safe on the watch and
   send once reconnected.
-- **Web app "Test connection" fails** — check the port number matches the one on the
-  companion screen, and that StopTrack Companion is still open/installed. If your
-  browser blocks it, open the web app from `http://localhost` or install it as an
-  app (Chrome menu → *Add to Home screen*).
-- **No stops showing in the supervisor view** — confirm background sync is ticked
-  and you pressed **Save** in the web app.
+- **Watch stops not appearing in the phone app** — make sure the **StopTrack** app
+  has been opened at least once and its ongoing "StopTrack running" notification is
+  showing (that's the bridge). Reopen the app if the notification is gone.
+- **The app shows a red error screen** — that's the built-in crash reporter.
+  Screenshot it and send it on; it says exactly what went wrong.
 
 ---
 

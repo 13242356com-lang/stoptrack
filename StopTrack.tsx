@@ -987,7 +987,22 @@ export default function App() {
         if (cfg.updatedAt) setConfigUpdatedAt(cfg.updatedAt);
       }
       // Server sync config is device-local; loading it also flips the outbox gate.
-      const sc = await api.loadSyncConfig();
+      let sc = await api.loadSyncConfig();
+      // Inside the native StopTrack app shell (Android WebView), auto-connect to
+      // the built-in bridge — the phone companion's local sync server — so watch
+      // stops and supervisor config sync with zero manual setup. The shell exposes
+      // window.StopTrackNative.syncUrl(); outside the shell this is a no-op.
+      const native = (typeof window !== "undefined") ? window.StopTrackNative : null;
+      if (native && typeof native.syncUrl === "function") {
+        try {
+          const url = native.syncUrl();
+          if (url) {
+            const token = (typeof native.token === "function" ? native.token() : "") || "";
+            sc = { url, token, enabled: true };
+            await api.saveSyncConfig(sc);
+          }
+        } catch (e) { /* fall back to any saved config */ }
+      }
       if (sc) { setSyncCfg(sc); api.setSyncEnabled(!!(sc.enabled && sc.url)); }
       const prefs = await api.loadPrefs();
       if (prefs) {

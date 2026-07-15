@@ -17,6 +17,7 @@
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.StopTrackCompanion">
@@ -30,6 +31,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Watch-bridge plumbing (local port + optional remote forward). Opened
+             from the persistent notification; not a launcher entry. -->
+        <activity
+            android:name=".BridgeSettingsActivity"
+            android:exported="false"
+            android:label="@string/bridge_settings_title" />
 
         <!-- Foreground bridge: hosts the local sync server + remote forwarder. -->
         <service

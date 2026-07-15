@@ -1,3 +1,5 @@
+import java.io.File
+
 // :mobile — the phone companion. Bridges the watch (Wear Data Layer) to the web
 // app (local HTTP sync server on 127.0.0.1) and, optionally, to a remote server.
 plugins {
@@ -66,3 +68,39 @@ dependencies {
 
     debugImplementation(libs.androidx.compose.ui.tooling)
 }
+
+// ---------------------------------------------------------------------------
+// Bundle the web app (../../index.html) into the APK's assets so the phone app
+// shows the full StopTrack UI in a WebView. build-web-asset.mjs inlines React +
+// Tailwind for offline use when Node + network are available (CI); otherwise we
+// fall back to a plain copy that fetches those from CDNs on first launch.
+// ---------------------------------------------------------------------------
+val prepareWebAsset by tasks.registering {
+    val repoRoot = rootProject.projectDir.parentFile          // android/.. = repo root
+    val sourceHtml = File(repoRoot, "index.html")
+    val assetsDir = layout.projectDirectory.dir("src/main/assets").asFile
+    val assetHtml = File(assetsDir, "index.html")
+    inputs.file(sourceHtml)
+    inputs.file(File(projectDir, "build-web-asset.mjs"))
+    outputs.file(assetHtml)
+    doLast {
+        assetsDir.mkdirs()
+        val ranNode = try {
+            val proc = ProcessBuilder("node", "android/mobile/build-web-asset.mjs")
+                .directory(repoRoot).inheritIO().start()
+            proc.waitFor() == 0
+        } catch (e: Exception) {
+            logger.warn("prepareWebAsset: node unavailable (${e.message}); using plain copy (needs internet on first launch).")
+            false
+        }
+        if (!ranNode || !assetHtml.exists()) {
+            sourceHtml.copyTo(assetHtml, overwrite = true)
+        }
+    }
+}
+
+// Make sure the asset exists before Android merges/packages assets (covers both
+// the preBuild anchor and the variant-specific mergeAssets tasks).
+tasks.named("preBuild") { dependsOn(prepareWebAsset) }
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
+    .configureEach { dependsOn(prepareWebAsset) }
