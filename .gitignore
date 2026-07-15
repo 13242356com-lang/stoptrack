@@ -7,9 +7,10 @@ build/build_src.tsx
 build/app.js
 
 # runtime data (never commit factory data / secrets)
-# server's stops/production/sessions store
+# server's storage unit: stops/production/sessions store + auto-generated token
+server/data/
+# legacy locations (pre-storage-folder), still ignored
 server/stoptrack-data.json
-# auto-generated per-server auth token (secret)
 server/stoptrack-token.txt
 server/node_modules/
 # gateway FileSink output / demo events

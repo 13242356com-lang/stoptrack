@@ -39,8 +39,14 @@ Environment variables:
 | `FACTORY_TOKEN` | *(auto)* | Shared secret every device sends. **Leave unset** and the server generates its own unique token, saves it to `stoptrack-token.txt`, and prints it at startup (stable across restarts). Set this only to pick your own token. |
 | `PUBLIC_URL` | *(empty)* | Your reach-from-anywhere https address (from a tunnel/reverse proxy). Only used to print it at startup. |
 | `PORT` | `4000` | Port to listen on. |
-| `DATA_FILE` | `./stoptrack-data.json` | Where records are persisted. |
-| `TOKEN_FILE` | `./stoptrack-token.txt` | Where the auto-generated token is saved. |
+| `DATA_DIR` | `./data` | **Storage unit** — the one folder holding the data file + token. Auto-created; back this up. |
+| `DATA_FILE` | `<DATA_DIR>/stoptrack-data.json` | Override just the records file path if needed. |
+| `TOKEN_FILE` | `<DATA_DIR>/stoptrack-token.txt` | Override just the token file path if needed. |
+| `LOG_VERBOSE` | *(off)* | `1` logs every request (noisy — devices poll often). Default logs only meaningful activity (saves, settings changes, unauthorized attempts). |
+
+On first run the server auto-creates `data/`, moves any pre-existing
+`stoptrack-data.json` / `stoptrack-token.txt` into it, and logs activity to the
+console (handy when launched from `start-stoptrack.bat`).
 | `SMTP_HOST` | *(empty)* | SMTP server for handover emails. Unset ⇒ `/report` answers 501 and the app falls back to copy. |
 | `SMTP_PORT` | `587` | SMTP port (465 switches to implicit TLS). |
 | `SMTP_USER` / `SMTP_PASS` | *(empty)* | SMTP credentials (omit for an open relay on a trusted LAN). |

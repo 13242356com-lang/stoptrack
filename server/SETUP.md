@@ -65,8 +65,14 @@ Scheduler” → Create Basic Task → name `StopTrack` → trigger **When the c
 starts** → action **Start a program** → browse to your
 `C:\StopTrack\start-stoptrack.bat` → Finish.
 
-> **Where's the data?** In `stoptrack-data.json` next to `server.js`. Back that
-> one file up now and then and you can never lose your history.
+> **Where's the data?** In a **`data`** folder next to `server.js` — it holds
+> everything (your history + the auth token). Copy that folder somewhere safe
+> now and then and you can never lose your history.
+
+> **Live logs:** the black window shows what's happening as it happens — e.g.
+> `saved 2 stop(s) from 192.168.1.30`, `settings updated by …`,
+> `unauthorized … (wrong token)`. Handy for confirming a device is really
+> talking to the server. (Want every single request? Set `LOG_VERBOSE=1`.)
 
 ---
 
