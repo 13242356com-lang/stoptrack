@@ -21,6 +21,7 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 
 const PORT = Number(process.env.PORT) || 4000;
 const TOKEN = process.env.FACTORY_TOKEN || "";
@@ -262,9 +263,29 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// Connectable addresses for humans. 0.0.0.0 is the BIND address (all
+// interfaces) — you can't open it in a browser; use localhost or a LAN IP.
+function lanIPv4s() {
+  const out = [];
+  const ifaces = os.networkInterfaces();
+  for (const name of Object.keys(ifaces)) {
+    for (const ni of ifaces[name] || []) {
+      if (ni.family === "IPv4" && !ni.internal) out.push(ni.address);
+    }
+  }
+  return out;
+}
+
 server.listen(PORT, () => {
-  console.log(`StopTrack sync server listening on http://0.0.0.0:${PORT}`);
+  console.log("");
+  console.log("StopTrack server is running. Open it at:");
+  console.log(`   On this PC:       http://localhost:${PORT}`);
+  for (const ip of lanIPv4s()) {
+    console.log(`   On the network:   http://${ip}:${PORT}   <- use this on phones/watches (same Wi-Fi)`);
+  }
+  console.log(`   (Do NOT use http://0.0.0.0:${PORT} — that address won't connect.)`);
+  console.log("");
   console.log(`Data file: ${DATA_FILE}`);
   console.log(APP_HTML ? `Supervisor app served at "/" from: ${APP_HTML}` : `Supervisor app NOT served ("/" shows instructions) — no index.html found.`);
-  console.log(TOKEN ? "Auth: token required." : "Auth: OPEN (no token set).");
+  console.log(TOKEN ? "Auth: token required." : "Auth: OPEN (no token set) — set FACTORY_TOKEN.");
 });

@@ -120,6 +120,11 @@ up Part B, otherwise the **LAN address** (`http://192.168.1.50:4000`).
 
 ## If something's not working
 
+- **"Failed to fetch" / it filled in `http://0.0.0.0:4000`** — `0.0.0.0` is not
+  a connectable address (it's the server saying "I listen on everything"). In
+  the Server URL field use **`http://localhost:4000`** on the same PC, or the
+  PC's **LAN IP** (e.g. `http://192.168.1.50:4000`) from another device. The
+  server window now prints the exact addresses to use.
 - **Browser shows nothing at the LAN address** — is the black server window
   still open on the PC? Are both devices on the same Wi-Fi? Windows Firewall may
   ask to allow Node — click **Allow**.
