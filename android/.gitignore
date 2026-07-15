@@ -1,0 +1,16 @@
+# Gradle / Android build outputs — never commit these.
+.gradle/
+build/
+*/build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Keystores / signing — never commit secrets.
+*.jks
+*.keystore
+keystore.properties
