@@ -157,8 +157,18 @@ up Part B, otherwise the **LAN address** (`http://<PC-IP>:4000`).
 
 ## Security notes (short version)
 
-- The **token is the key to your data** — long, random, shared only with your
-  own devices. Change it in one place (`start-stoptrack.bat`) if it ever leaks,
-  then re-enter it on devices.
-- Going through the **tunnel is encrypted (https)**. Plain `http://` is fine
-  inside the factory LAN, but never expose port 4000 straight to the internet.
+- The **token is the key to your data** — anyone who has it can read and change
+  everything. It's auto-generated and saved in `stoptrack-token.txt` inside your
+  data folder. Keep it secret; share it only with your own devices. **If it ever
+  leaks, rotate it:** delete `stoptrack-token.txt`, restart the server (a new
+  token prints), and re-enter the new token on each device.
+- **Prefer the tunnel — it's encrypted (https).** Plain `http://` on the factory
+  LAN sends the token in the clear, so anyone able to sniff the network could
+  capture it. That's acceptable only on a trusted, switched LAN. For anything
+  beyond that — remote access, guest Wi-Fi, or if you're unsure — go through the
+  **HTTPS tunnel** so the token and data are encrypted end to end.
+- **Never expose port 4000 straight to the internet.** Put it behind the tunnel
+  (or a proper HTTPS reverse proxy). The token is the only gate, and it's a
+  single shared secret — treat losing it like losing a master key.
+- Fuller threat model and the deliberate tradeoffs are in
+  [`../SECURITY.md`](../SECURITY.md).

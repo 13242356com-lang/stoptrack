@@ -99,8 +99,13 @@ only compares `updatedAt`. See the StopTrack data model for fields
 - **Deletes** arrive as tombstones (`{ id, deleted: true, updatedAt, deletedAt }`),
   not as removals, so a delete on one device reaches the others. The client hides
   and eventually purges them; you may prune old tombstones here too if desired.
-- Put this behind **HTTPS** (a reverse proxy such as Caddy/nginx) if it's exposed
-  beyond a trusted LAN — the token is a bearer secret sent on every request.
+- Put this behind **HTTPS** (a reverse proxy such as Caddy/nginx, or the
+  Cloudflare Tunnel in [`SETUP.md`](SETUP.md)) whenever it's exposed beyond a
+  trusted, switched LAN — the token is a bearer secret sent in cleartext on every
+  plain-`http` request, so a network sniffer can capture it. Rotate the token
+  (delete `stoptrack-token.txt` and restart) if it leaks. The auth check is
+  constant-time and record ids are validated against prototype-pollution; see
+  [`../SECURITY.md`](../SECURITY.md) for the full threat model.
 - For higher volume, swap the JSON-file `load/persist` helpers in `server.js` for
   SQLite (e.g. `better-sqlite3`) or Postgres. The routing and contract stay the
   same.
