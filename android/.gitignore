@@ -13,10 +13,8 @@ captures/
 # Generated at build time by :mobile's prepareWebAsset task (bundled web app).
 mobile/src/main/assets/index.html
 
-# Keystores / signing — never commit secrets.
+# Keystores / signing — never commit. The release key lives in CI secrets
+# (STOPTRACK_KEYSTORE etc.); see android/SIGNING.md.
 *.jks
 *.keystore
 keystore.properties
-# Exception: the shared sideload/debug key MUST be committed so phone + watch
-# sign identically (Wear Data Layer requirement). Not a Play production key.
-!keystore/stoptrack-debug.jks

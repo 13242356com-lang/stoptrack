@@ -29,11 +29,16 @@ companion, no manual setup — and no internet or server needed on the floor.
 **Alternative — the Actions tab** (if a Release isn't there yet):
 1. **Actions** tab → **Build watch app** → newest row with a **green tick** ✓.
 2. Scroll to **Artifacts** → **stoptrack-apks** → download the `.zip` and unzip.
-   Inside: `mobile-debug.apk` (the phone app) and `wear-debug.apk` (the watch app)
-   — the same files as the Release, just with their raw build names.
+   Inside: `mobile-release.apk` (the phone app) and `wear-release.apk` (the watch
+   app) — the same files as the Release, just with their raw build names.
 
 > A "green tick" means the apps built fine. A red ✗ means something broke — tell
 > whoever maintains the code and they can fix it; a new green build will appear.
+
+> **Signing (one-time, from v0.4 on):** release APKs are now signed with a
+> private key held in repo secrets — see [`SIGNING.md`](SIGNING.md) to set it up.
+> Because the key changed, **uninstall the old StopTrack** on the phone and watch
+> before installing v0.4; after that, updates install over the top as usual.
 
 ---
 

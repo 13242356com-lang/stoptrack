@@ -6,6 +6,15 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+// Release signing uses a PRIVATE key from CI (env / GitHub secrets) or gradle
+// properties — never committed. Falls back to the default debug key when unset
+// (those APKs are NOT authenticity-guaranteed). Must resolve the SAME key as
+// :mobile so the Wear Data Layer (same-cert requirement) still pairs. See
+// android/SIGNING.md.
+val releaseKeystore: String? = System.getenv("STOPTRACK_KEYSTORE")
+    ?: (findProperty("stoptrack.keystore") as String?)
+val hasReleaseKey: Boolean = releaseKeystore != null && file(releaseKeystore).exists()
+
 android {
     namespace = "com.stoptrack.wear"
     compileSdk = 35
@@ -18,30 +27,26 @@ android {
         // Wear OS 3 (Galaxy Watch 4 and newer) = API 30.
         minSdk = 30
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.3"
+        versionCode = 4
+        versionName = "0.4"
     }
 
-    // A committed, stable signing key shared with :mobile. The Wear Data Layer only
-    // connects a phone and watch app signed with the SAME certificate, and a fixed
-    // key also lets new builds install over old ones. This is a sideload/debug key,
-    // not a Play production key.
     signingConfigs {
-        create("shared") {
-            storeFile = file("${rootDir}/keystore/stoptrack-debug.jks")
-            storePassword = "stoptrack"
-            keyAlias = "stoptrack"
-            keyPassword = "stoptrack"
+        if (hasReleaseKey) {
+            create("release") {
+                storeFile = file(releaseKeystore!!)
+                storePassword = System.getenv("STOPTRACK_STORE_PASSWORD") ?: (findProperty("stoptrack.storePassword") as String?)
+                keyAlias = System.getenv("STOPTRACK_KEY_ALIAS") ?: (findProperty("stoptrack.keyAlias") as String?)
+                keyPassword = System.getenv("STOPTRACK_KEY_PASSWORD") ?: (findProperty("stoptrack.keyPassword") as String?)
+            }
         }
     }
 
     buildTypes {
-        debug {
-            signingConfig = signingConfigs.getByName("shared")
-        }
+        // debug uses the default per-machine debug key.
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("shared")
+            signingConfig = signingConfigs.getByName(if (hasReleaseKey) "release" else "debug")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
