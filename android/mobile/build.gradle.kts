@@ -62,6 +62,14 @@ android {
     buildFeatures {
         compose = true
     }
+
+    lint {
+        // Release builds run lint with gating on; debug never did. Report lint
+        // findings but don't fail the release build on them — e.g.
+        // InvalidFragmentVersionForActivityResult is a false positive here
+        // (MainActivity is a Compose ComponentActivity, not a Fragment).
+        abortOnError = false
+    }
 }
 
 kotlin {

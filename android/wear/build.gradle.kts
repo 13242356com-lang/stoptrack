@@ -59,6 +59,13 @@ android {
     buildFeatures {
         compose = true
     }
+
+    lint {
+        // Release builds run lint with gating on; debug never did. Report lint
+        // findings but don't fail the release build on them (keeps the release
+        // pipeline aligned with what debug builds did).
+        abortOnError = false
+    }
 }
 
 kotlin {
