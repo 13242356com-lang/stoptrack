@@ -25,18 +25,55 @@ const os = require("os");
 const crypto = require("crypto");
 
 const PORT = Number(process.env.PORT) || 4000;
-const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, "stoptrack-data.json");
 
 // Public https address (from a Cloudflare Tunnel / reverse proxy). Optional —
 // set it once you've done SETUP.md Part B so startup prints the anywhere-URL.
 const PUBLIC_URL = (process.env.PUBLIC_URL || "").trim().replace(/\/$/, "");
 
+// --- console logging --------------------------------------------------------
+// You run this from the .bat and watch the window, so log activity there.
+// Meaningful events are always logged; set LOG_VERBOSE=1 to also log every
+// poll (noisy — devices poll every ~15s). ASCII only so Windows cmd shows it.
+const VERBOSE = /^(1|true|yes|on)$/i.test(process.env.LOG_VERBOSE || "");
+function stamp() { return new Date().toTimeString().slice(0, 8); } // HH:MM:SS
+function log(msg) { console.log(`[${stamp()}] ${msg}`); }
+function clientIp(req) {
+  const raw = req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || (req.socket && req.socket.remoteAddress) || "?";
+  return String(raw).split(",")[0].trim().replace(/^::ffff:/, "");
+}
+
+// --- storage unit -----------------------------------------------------------
+// Everything the server keeps — the data file AND the auth token — lives in ONE
+// folder, the "storage unit", so it's easy to find and back up. Defaults to a
+// `data/` folder next to server.js; override with DATA_DIR. (DATA_FILE /
+// TOKEN_FILE can still point individual files elsewhere if you need.)
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); }
+catch (e) { console.error("Could not create storage folder:", DATA_DIR, "-", e.message); }
+
+const DATA_FILE = process.env.DATA_FILE || path.join(DATA_DIR, "stoptrack-data.json");
+const TOKEN_FILE = process.env.TOKEN_FILE || path.join(DATA_DIR, "stoptrack-token.txt");
+
+// One-time migration: older versions kept these next to server.js. Move them
+// into the storage folder so upgrades don't lose data or change the token.
+for (const [legacy, target] of [
+  [path.join(__dirname, "stoptrack-data.json"), DATA_FILE],
+  [path.join(__dirname, "stoptrack-token.txt"), TOKEN_FILE],
+]) {
+  try {
+    if (legacy !== target && fs.existsSync(legacy) && !fs.existsSync(target)) {
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.renameSync(legacy, target);
+      console.log(`Moved existing ${path.basename(legacy)} into storage folder.`);
+    }
+  } catch { /* keep legacy file where it is if the move fails */ }
+}
+
 // --- auth token (auto-generated) --------------------------------------------
 // No manual step: this server mints its OWN unique token the first time it runs
-// and remembers it in stoptrack-token.txt, so it's stable across restarts and
+// and remembers it in the storage folder, so it's stable across restarts and
 // every device keeps working. Override with FACTORY_TOKEN if you prefer to pick
 // your own. The token is printed at startup so you can copy it to devices.
-const TOKEN_FILE = process.env.TOKEN_FILE || path.join(__dirname, "stoptrack-token.txt");
 function resolveToken() {
   if (process.env.FACTORY_TOKEN) return process.env.FACTORY_TOKEN.trim();
   try {
@@ -64,11 +101,26 @@ const APP_HTML = process.env.APP_HTML
 
 // --- persistence (single JSON file) ----------------------------------------
 // Shape: { stops: { [id]: record }, production: { [id]: record }, sessions: { [id]: record }, config: { config, updatedAt } }
-let db = { stops: {}, production: {}, sessions: {}, config: { config: null, updatedAt: 0 } };
+// Collections use null-prototype objects and record ids are validated, so a
+// record whose id is "__proto__"/"constructor"/"prototype" can't pollute or
+// corrupt the store.
+const RESERVED_IDS = new Set(["__proto__", "constructor", "prototype"]);
+const safeId = (id) => typeof id === "string" && id.length > 0 && id.length <= 512 && !RESERVED_IDS.has(id);
+function emptyCollections() {
+  return { stops: Object.create(null), production: Object.create(null), sessions: Object.create(null), config: { config: null, updatedAt: 0 } };
+}
+let db = emptyCollections();
 try {
   if (fs.existsSync(DATA_FILE)) {
     const parsed = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-    db = { stops: parsed.stops || {}, production: parsed.production || {}, sessions: parsed.sessions || {}, config: parsed.config || { config: null, updatedAt: 0 } };
+    db = emptyCollections();
+    for (const coll of ["stops", "production", "sessions"]) {
+      const src = parsed && parsed[coll];
+      if (src && typeof src === "object") {
+        for (const id of Object.keys(src)) if (safeId(id)) db[coll][id] = src[id];
+      }
+    }
+    if (parsed && parsed.config) db.config = parsed.config;
   }
 } catch (e) { console.error("Could not read data file, starting empty:", e.message); }
 
@@ -122,6 +174,7 @@ function send(res, status, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(status, {
     "Content-Type": "application/json",
+    "X-Content-Type-Options": "nosniff",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Authorization, Content-Type",
     "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
@@ -129,10 +182,14 @@ function send(res, status, obj) {
   res.end(body);
 }
 
+// Constant-time bearer-token check. Comparing the raw strings with === leaks the
+// token byte-by-byte via timing; hash both to a fixed 32 bytes and compare with
+// timingSafeEqual (also sidesteps its throw-on-unequal-length).
 function authOk(req) {
   if (!TOKEN) return true; // open mode (warned at startup)
-  const h = req.headers["authorization"] || "";
-  return h === `Bearer ${TOKEN}`;
+  const provided = crypto.createHash("sha256").update(req.headers["authorization"] || "").digest();
+  const expected = crypto.createHash("sha256").update(`Bearer ${TOKEN}`).digest();
+  return crypto.timingSafeEqual(provided, expected);
 }
 
 function readBody(req) {
@@ -152,6 +209,8 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const route = url.pathname.replace(/\/$/, "") || "/";
   const now = Date.now();
+  const ip = clientIp(req);
+  if (VERBOSE) log(`${req.method} ${route} - ${ip}`);
 
   // Serve the StopTrack app itself at "/" — the supervisor interface. The page
   // is public (same code as the deployed web app); all DATA stays behind the
@@ -160,13 +219,15 @@ const server = http.createServer(async (req, res) => {
     if (APP_HTML) {
       try {
         const html = fs.readFileSync(APP_HTML);
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" });
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "X-Content-Type-Options": "nosniff", "Cache-Control": "no-cache" });
+        log(`supervisor page opened - ${ip}`);
         return res.end(html);
       } catch (e) {
-        return send(res, 500, { ok: false, error: "Could not read app file: " + e.message });
+        console.error("Could not read app file:", e.message);
+        return send(res, 500, { ok: false, error: "Server error" });
       }
     }
-    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "X-Content-Type-Options": "nosniff" });
     return res.end(
       "StopTrack sync server is running.\n\n" +
       "To serve the app here too, put the built index.html next to server.js\n" +
@@ -181,7 +242,10 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { ok: true, serverTime: now });
   }
 
-  if (!authOk(req)) return send(res, 401, { ok: false, error: "Unauthorized" });
+  if (!authOk(req)) {
+    log(`unauthorized ${req.method} ${route} - ${ip} (wrong/missing token)`);
+    return send(res, 401, { ok: false, error: "Unauthorized" });
+  }
 
   try {
     if (route === "/stops" && req.method === "GET") {
@@ -193,13 +257,15 @@ const server = http.createServer(async (req, res) => {
     if (route === "/stops" && req.method === "POST") {
       const body = await readBody(req);
       const incoming = Array.isArray(body.stops) ? body.stops : [];
+      let saved = 0;
       for (const r of incoming) {
-        if (!r || !r.id) continue;
+        if (!r || !safeId(r.id)) continue;
         const cur = db.stops[r.id];
         // Last-write-wins: keep whichever record was mutated more recently.
-        if (!cur || stampOf(r) >= stampOf(cur)) db.stops[r.id] = r;
+        if (!cur || stampOf(r) >= stampOf(cur)) { db.stops[r.id] = r; saved++; }
       }
       persist();
+      if (saved > 0) log(`saved ${saved} stop(s) from ${ip}`);
       return send(res, 200, { ok: true, serverTime: now });
     }
 
@@ -213,12 +279,14 @@ const server = http.createServer(async (req, res) => {
     if (route === "/production" && req.method === "POST") {
       const body = await readBody(req);
       const incoming = Array.isArray(body.records) ? body.records : [];
+      let saved = 0;
       for (const r of incoming) {
-        if (!r || !r.id) continue;
+        if (!r || !safeId(r.id)) continue;
         const cur = db.production[r.id];
-        if (!cur || stampOf(r) >= stampOf(cur)) db.production[r.id] = r;
+        if (!cur || stampOf(r) >= stampOf(cur)) { db.production[r.id] = r; saved++; }
       }
       persist();
+      if (saved > 0) log(`saved ${saved} production record(s) from ${ip}`);
       return send(res, 200, { ok: true, serverTime: now });
     }
 
@@ -232,12 +300,14 @@ const server = http.createServer(async (req, res) => {
     if (route === "/sessions" && req.method === "POST") {
       const body = await readBody(req);
       const incoming = Array.isArray(body.records) ? body.records : [];
+      let saved = 0;
       for (const r of incoming) {
-        if (!r || !r.id) continue;
+        if (!r || !safeId(r.id)) continue;
         const cur = db.sessions[r.id];
-        if (!cur || stampOf(r) >= stampOf(cur)) db.sessions[r.id] = r;
+        if (!cur || stampOf(r) >= stampOf(cur)) { db.sessions[r.id] = r; saved++; }
       }
       persist();
+      if (saved > 0 && VERBOSE) log(`saved ${saved} session record(s) from ${ip}`);
       return send(res, 200, { ok: true, serverTime: now });
     }
 
@@ -251,6 +321,7 @@ const server = http.createServer(async (req, res) => {
       if (incomingAt >= (db.config.updatedAt || 0)) {
         db.config = { config: body.config || null, updatedAt: incomingAt };
         persist();
+        log(`settings updated (machines/reasons/quick-stops) by ${ip}`);
       }
       return send(res, 200, { ok: true, serverTime: now });
     }
@@ -272,13 +343,16 @@ const server = http.createServer(async (req, res) => {
         });
         return send(res, 200, { ok: true, serverTime: now });
       } catch (e) {
-        return send(res, 502, { ok: false, error: "Mail send failed: " + (e.message || "unknown") });
+        console.error("Mail send failed:", e.message);
+        return send(res, 502, { ok: false, error: "Mail send failed" });
       }
     }
 
     return send(res, 404, { ok: false, error: "Not found" });
   } catch (e) {
-    return send(res, 400, { ok: false, error: e.message || "Bad request" });
+    // Don't echo internals (parse errors, paths) back to the client.
+    console.error(`request error on ${route}:`, e.message);
+    return send(res, 400, { ok: false, error: "Bad request" });
   }
 });
 
@@ -294,6 +368,12 @@ function lanIPv4s() {
   }
   return out;
 }
+
+// Timeouts so a slow/half-open client can't tie up a connection indefinitely
+// (basic slowloris hardening). Node defaults are minutes; tighten them.
+server.headersTimeout = 15000;   // must finish sending headers within 15s
+server.requestTimeout = 30000;   // whole request within 30s
+server.setTimeout(60000);        // idle socket cap
 
 server.listen(PORT, () => {
   const line = "=".repeat(64);
@@ -319,7 +399,10 @@ server.listen(PORT, () => {
   console.log(`  (Don't use http://0.0.0.0:${PORT} — that address won't connect.)`);
   console.log(line);
   console.log("");
-  console.log(`Data file:  ${DATA_FILE}`);
-  console.log(`Token file: ${TOKEN_FILE}  (keep this secret)`);
-  console.log(APP_HTML ? `Supervisor app served at "/" from: ${APP_HTML}` : `Supervisor app NOT served — no index.html found next to server.js.`);
+  console.log(`Storage:  ${DATA_DIR}   (all data + token live here — back this folder up)`);
+  console.log(`Loaded:   ${Object.keys(db.stops).length} stops, ${Object.keys(db.production).length} production, ${Object.keys(db.sessions).length} sessions`);
+  console.log(APP_HTML ? `App page: served at "/" from ${APP_HTML}` : `App page: NOT served — no index.html found next to server.js.`);
+  console.log(VERBOSE ? "Logging:  verbose (every request)." : "Logging:  activity only (set LOG_VERBOSE=1 for every request).");
+  console.log("");
+  log("waiting for devices…");
 });

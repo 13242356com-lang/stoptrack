@@ -52,9 +52,32 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Build debug APKs
+      # Decode the private release signing key from a repo secret (if set). Both
+      # apps then sign with the SAME real key (Data-Layer pairing + updatable).
+      # Without the secret the release build falls back to a debug key and warns.
+      - name: Configure signing key
+        env:
+          KS_B64: ${{ secrets.SIGNING_KEYSTORE_B64 }}
+          STORE_PW: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          KEY_PW: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/stoptrack-release.jks"
+            {
+              echo "STOPTRACK_KEYSTORE=$RUNNER_TEMP/stoptrack-release.jks"
+              echo "STOPTRACK_STORE_PASSWORD=$STORE_PW"
+              echo "STOPTRACK_KEY_ALIAS=$ALIAS"
+              echo "STOPTRACK_KEY_PASSWORD=$KEY_PW"
+            } >> "$GITHUB_ENV"
+            echo "Release APKs will be signed with the private key from secrets."
+          else
+            echo "::warning::No SIGNING_KEYSTORE_B64 secret set — release APKs are debug-signed (NOT authentic). See android/SIGNING.md."
+          fi
+
+      - name: Build release APKs
         working-directory: android
-        run: ./gradlew :mobile:assembleDebug :wear:assembleDebug --stacktrace --no-daemon
+        run: ./gradlew :mobile:assembleRelease :wear:assembleRelease --stacktrace --no-daemon
 
       - name: Upload APKs
         uses: actions/upload-artifact@v4
@@ -62,8 +85,8 @@ jobs:
           name: stoptrack-apks
           if-no-files-found: error
           path: |
-            android/mobile/build/outputs/apk/debug/*.apk
-            android/wear/build/outputs/apk/debug/*.apk
+            android/mobile/build/outputs/apk/release/*.apk
+            android/wear/build/outputs/apk/release/*.apk
 
       # On main, also publish the APKs to the repo's Releases page with friendly
       # names, so they're a one-tap download from the repo front page — no digging
@@ -72,8 +95,8 @@ jobs:
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
         run: |
           mkdir -p release
-          cp android/mobile/build/outputs/apk/debug/mobile-debug.apk release/StopTrack-phone.apk
-          cp android/wear/build/outputs/apk/debug/wear-debug.apk release/StopTrack-watch.apk
+          cp android/mobile/build/outputs/apk/release/mobile-release.apk release/StopTrack-phone.apk
+          cp android/wear/build/outputs/apk/release/wear-release.apk release/StopTrack-watch.apk
 
       # Rolling "latest" release, refreshed on every push to main.
       - name: Publish latest release

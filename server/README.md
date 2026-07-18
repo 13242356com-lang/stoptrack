@@ -39,8 +39,14 @@ Environment variables:
 | `FACTORY_TOKEN` | *(auto)* | Shared secret every device sends. **Leave unset** and the server generates its own unique token, saves it to `stoptrack-token.txt`, and prints it at startup (stable across restarts). Set this only to pick your own token. |
 | `PUBLIC_URL` | *(empty)* | Your reach-from-anywhere https address (from a tunnel/reverse proxy). Only used to print it at startup. |
 | `PORT` | `4000` | Port to listen on. |
-| `DATA_FILE` | `./stoptrack-data.json` | Where records are persisted. |
-| `TOKEN_FILE` | `./stoptrack-token.txt` | Where the auto-generated token is saved. |
+| `DATA_DIR` | `./data` | **Storage unit** — the one folder holding the data file + token. Auto-created; back this up. |
+| `DATA_FILE` | `<DATA_DIR>/stoptrack-data.json` | Override just the records file path if needed. |
+| `TOKEN_FILE` | `<DATA_DIR>/stoptrack-token.txt` | Override just the token file path if needed. |
+| `LOG_VERBOSE` | *(off)* | `1` logs every request (noisy — devices poll often). Default logs only meaningful activity (saves, settings changes, unauthorized attempts). |
+
+On first run the server auto-creates `data/`, moves any pre-existing
+`stoptrack-data.json` / `stoptrack-token.txt` into it, and logs activity to the
+console (handy when launched from `start-stoptrack.bat`).
 | `SMTP_HOST` | *(empty)* | SMTP server for handover emails. Unset ⇒ `/report` answers 501 and the app falls back to copy. |
 | `SMTP_PORT` | `587` | SMTP port (465 switches to implicit TLS). |
 | `SMTP_USER` / `SMTP_PASS` | *(empty)* | SMTP credentials (omit for an open relay on a trusted LAN). |
@@ -93,8 +99,13 @@ only compares `updatedAt`. See the StopTrack data model for fields
 - **Deletes** arrive as tombstones (`{ id, deleted: true, updatedAt, deletedAt }`),
   not as removals, so a delete on one device reaches the others. The client hides
   and eventually purges them; you may prune old tombstones here too if desired.
-- Put this behind **HTTPS** (a reverse proxy such as Caddy/nginx) if it's exposed
-  beyond a trusted LAN — the token is a bearer secret sent on every request.
+- Put this behind **HTTPS** (a reverse proxy such as Caddy/nginx, or the
+  Cloudflare Tunnel in [`SETUP.md`](SETUP.md)) whenever it's exposed beyond a
+  trusted, switched LAN — the token is a bearer secret sent in cleartext on every
+  plain-`http` request, so a network sniffer can capture it. Rotate the token
+  (delete `stoptrack-token.txt` and restart) if it leaks. The auth check is
+  constant-time and record ids are validated against prototype-pollution; see
+  [`../SECURITY.md`](../SECURITY.md) for the full threat model.
 - For higher volume, swap the JSON-file `load/persist` helpers in `server.js` for
   SQLite (e.g. `better-sqlite3`) or Postgres. The routing and contract stay the
   same.
