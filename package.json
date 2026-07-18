@@ -2,7 +2,7 @@
   "name": "stoptrack",
   "version": "1.0.0",
   "private": true,
-  "description": "StopTrack — offline-first ASLA machine downtime tracker. Single-file web app built from StopTrack.tsx.",
+  "description": "StopTrack — offline-first machine downtime tracker. Single-file web app built from StopTrack.tsx.",
   "type": "module",
   "scripts": {
     "build": "node build/build.mjs",

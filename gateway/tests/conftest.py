@@ -23,7 +23,7 @@ TAGS = [
     TagSpec(name="faultCode", address="DB1.DBW2", type="int"),
 ]
 
-FAULT_MAP = {4: "Teflon change", 7: "Foil / infeed jam"}
+FAULT_MAP = {4: "Tooling change", 7: "Material jam"}
 
 RULES_RAW = [
     {"when": "running edge false", "emit": "stop_started"},
@@ -72,7 +72,7 @@ def make_gateway(min_stop_ms: int = 0, running: bool = True, fault: int = 0):
     adapter = FakeAdapter({"running": running, "faultCode": fault})
     sink = CaptureSink()
     machine = MachineRuntime(
-        name="ASLA 1 - Laser",
+        name="Line 1 - Station A",
         adapter=adapter,
         tags=TAGS,
         rules=RuleEngine([parse_rule(r) for r in RULES_RAW], FAULT_MAP),

@@ -26,8 +26,8 @@ at ~3s the machine "stops" with fault code 4, at ~10s it runs again. Expected
 output:
 
 ```
-[HH:MM:SS] STOP started   ASLA 1 - Laser
-[HH:MM:SS] STOP ended     ASLA 1 - Laser — 7s, reason: Teflon change
+[HH:MM:SS] STOP started   Line 1 - Station A
+[HH:MM:SS] STOP ended     Line 1 - Station A — 7s, reason: Tooling change
 ```
 
 That single pair of lines proves the whole pipeline: poll → edge detection →
@@ -61,7 +61,7 @@ python virtual_plc/opcua_server.py --port 4840
 python -m plc_gateway --config virtual_plc/opcua.yaml --i-have-authorization --run-for 15
 ```
 
-Both produce the same `STOP started / STOP ended … reason: Teflon change` events
+Both produce the same `STOP started / STOP ended … reason: Tooling change` events
 as the simulator — now over a real socket. The same configs point at a Siemens
 **PLCSIM Advanced** VM by swapping `127.0.0.1` for the VM's IP.
 
@@ -93,10 +93,10 @@ Gateway core:  poll loop → EdgeDetector → RuleEngine → EventSink(s)
 ## Event contract (what StopTrack will consume in Phase 4)
 
 ```json
-{ "type": "stop_started", "machine": "ASLA 1 - Laser", "ts": 1720000000000 }
-{ "type": "stop_ended",   "machine": "ASLA 1 - Laser", "ts": 1720000042000,
+{ "type": "stop_started", "machine": "Line 1 - Station A", "ts": 1720000000000 }
+{ "type": "stop_ended",   "machine": "Line 1 - Station A", "ts": 1720000042000,
   "start": 1720000000000, "duration": 42000,
-  "reason": "Teflon change", "faultCode": 4, "auto": true }
+  "reason": "Tooling change", "faultCode": 4, "auto": true }
 ```
 
 ## Config

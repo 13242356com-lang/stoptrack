@@ -30,3 +30,4 @@ const Sparkles = I(React.createElement(React.Fragment, null, React.createElement
 const Lock = I(React.createElement(React.Fragment, null, React.createElement("rect", { x: "3", y: "11", width: "18", height: "11", rx: "2", ry: "2" }), React.createElement("path", { d: "M7 11V7a5 5 0 0 1 10 0v4" })));
 const Unlock = I(React.createElement(React.Fragment, null, React.createElement("rect", { x: "3", y: "11", width: "18", height: "11", rx: "2", ry: "2" }), React.createElement("path", { d: "M7 11V7a5 5 0 0 1 9.9-1" })));
 const PencilLine = I(React.createElement(React.Fragment, null, React.createElement("path", { d: "M12 20h9" }), React.createElement("path", { d: "M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" })));
+const Target = I(React.createElement(React.Fragment, null, React.createElement("circle", { cx: "12", cy: "12", r: "10" }), React.createElement("circle", { cx: "12", cy: "12", r: "6" }), React.createElement("circle", { cx: "12", cy: "12", r: "2" })));

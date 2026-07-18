@@ -53,7 +53,7 @@ def main() -> None:
 
     try:
         asyncio.run(run_machine(
-            "ASLA 1 - Laser", push,
+            "Line 1 - Station A", push,
             timeline=None if args.interactive else DEMO_TIMELINE,
             interactive=args.interactive,
         ))

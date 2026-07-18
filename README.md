@@ -1,9 +1,8 @@
 # StopTrack
 
-Offline-first **machine-downtime tracker** for a solar-panel factory's ASLA
-(Assemble & Laser) line. Operators log stops on their phone; a supervisor view
-aggregates downtime, OEE, and exports. The whole app ships as one self-contained
-`index.html`.
+Offline-first **machine-downtime tracker** for any factory line. Operators log
+stops on their phone; a supervisor view aggregates downtime, OEE, and exports.
+The whole app ships as one self-contained `index.html`.
 
 > Private project. See [`CLAUDE.md`](CLAUDE.md) for the full architecture, data
 > model, and design constraints.

@@ -77,7 +77,7 @@ def authorization_error(cfg: GatewayConfig, cli_authorized: bool) -> str | None:
         "REFUSING to connect: this run would dial a live PLC endpoint for "
         f"{names}.\n"
         "This connects to real industrial equipment. Only proceed against a "
-        "simulator or an explicitly authorized machine - the ASLA line must never "
+        "simulator or an explicitly authorized machine - the production line must never "
         "be a target without written ACP/engineering sign-off.\n"
         "Re-run with --i-have-authorization (or set 'authorized: true' on the "
         "machine) once you are sure of the endpoint."

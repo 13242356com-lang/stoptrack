@@ -7,10 +7,9 @@ without re-explaining the project each session. Read this first.
 
 ## What StopTrack is
 
-StopTrack is a **machine downtime tracker** for a solar-panel factory. Operators
-run it on their phone to log when an **ASLA machine** (Assemble & Laser line)
-stops, why it stopped, and for how long. A supervisor view aggregates the data
-into analytics and exports.
+StopTrack is a **universal machine downtime tracker** for any factory line.
+Operators run it on their phone to log when a machine stops, why it stopped, and
+for how long. A supervisor view aggregates the data into analytics and exports.
 
 It is a **single-file, offline-first web app**. The whole thing ships as one
 `index.html` that an operator opens in Chrome on their phone — no server, no
@@ -76,9 +75,12 @@ seam clean.
 
 ### Storage keys
 - `stop:<id>` — one record per stop
-- `config:lists` — machines / reasons / quickStops / shift
+- `config:lists` — machines / reasons / quickStops / shifts (each shift =
+  {id,name,start,end,goal}) / rates / handoverEmails. A legacy `shift`
+  {start,end} mirror of the first shift is written alongside for old clients /
+  the watch config.
 - `config:prefs` — dark mode, last reason, cleared-before cutoff, operator,
-  machine, setupLocked
+  machine, setupLocked, shiftId (the operator's chosen shift)
 - `inprogress:current` — live-timer autosave for recovery
 
 ---
@@ -88,7 +90,7 @@ seam clean.
 ```js
 {
   id,            // `${start}-${random}`
-  machine,       // e.g. "ASLA - Laser"
+  machine,       // e.g. "Line 1"
   operator,      // trimmed name, or "Unnamed"
   start, end,    // epoch ms. For manual stops, start is BACK-DATED by duration.
   duration,      // ms
@@ -136,7 +138,8 @@ the supervisor view. This was a real bug; the fix was `loggedAt`. Filter uses
 - Stat cards, search, machine filter, date-range filter (all / 7d / 30d / custom).
 - Log table with a **manual** badge on manually-reported stops.
 - Analytics: 7-day downtime trend, top problem machines, downtime by reason.
-- Settings: shift times, machines list, reasons list, quick stops.
+- Settings: shifts (each with times + optional output goal), machines list,
+  reasons list, quick stops, machine rates.
 - **Discard** (soft, requires explanation, kept in exports, auto-purged after 60
   days) and **Delete permanently** (hard delete, confirmation required).
 - **Export CSV / JSON** — respects current filters, includes discarded rows and a
@@ -165,9 +168,11 @@ the supervisor view. This was a real bug; the fix was `loggedAt`. Filter uses
    runtime without flagging it.
 6. **Keep the `api` object as the only storage touchpoint** so the future
    server-sync swap stays a one-place change.
-7. **Child of a real workplace.** Reasons/machines default to ASLA line specifics
-   (Infeed, Lamination, Laser, Outfeed, Stringer; Teflon change, Laser cleaning,
-   Foil / infeed jam, etc.). Keep domain defaults realistic.
+7. **Universal, generic defaults.** StopTrack is not tied to any one workplace.
+   Reasons/machines default to neutral examples (Line 1–3, Packaging, Assembly;
+   Mechanical fault, Tooling change, Cleaning, Material jam, etc.) that a
+   supervisor edits to match their line. Keep defaults generic — never hard-code a
+   specific customer's machine or process names.
 
 ---
 
@@ -276,9 +281,10 @@ Full details in `android/README.md`. Key facts for future sessions:
 
 ## Glossary (domain context)
 
-- **ASLA** — Assemble & Laser machine line for solar cells. Machines: ASLA 1,
-  ASLA 3 (ASLA 2 not always in scope).
-- **Teflon change / Laser cleaning / Foil (infeed) jam** — common real stop
-  reasons on this line.
+- **Machine / line** — whatever equipment a supervisor configures; StopTrack is
+  machine-agnostic. Defaults ship as generic examples (Line 1–3, Packaging,
+  Assembly) meant to be replaced per deployment.
+- **Shift** — a supervisor-defined time frame (name + start/end + optional output
+  goal) that operators pick from; drives uptime %, pace, and goal achievability.
 - **OEE** — Overall Equipment Effectiveness (availability × performance ×
   quality). StopTrack currently surfaces the availability/uptime side.

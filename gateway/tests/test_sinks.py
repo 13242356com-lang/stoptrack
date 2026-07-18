@@ -12,9 +12,9 @@ def test_file_sink_appends_json_lines(tmp_path):
 
     async def scenario():
         sink = FileSink(path)
-        started = stop_started("ASLA 1 - Laser", ts=1_720_000_000_000)
-        ended = stop_ended("ASLA 1 - Laser", start=1_720_000_000_000,
-                           ts=1_720_000_042_000, reason="Teflon change", fault_code=4)
+        started = stop_started("Line 1 - Station A", ts=1_720_000_000_000)
+        ended = stop_ended("Line 1 - Station A", start=1_720_000_000_000,
+                           ts=1_720_000_042_000, reason="Tooling change", fault_code=4)
         await sink.emit(started)
         await sink.emit(ended)
         await sink.close()
@@ -25,10 +25,10 @@ def test_file_sink_appends_json_lines(tmp_path):
     first, second = (json.loads(l) for l in lines)
     assert first["type"] == "stop_started"
     assert second == {
-        "type": "stop_ended", "machine": "ASLA 1 - Laser",
+        "type": "stop_ended", "machine": "Line 1 - Station A",
         "ts": 1_720_000_042_000, "start": 1_720_000_000_000,
         "duration": 42_000, "auto": True,
-        "reason": "Teflon change", "faultCode": 4,
+        "reason": "Tooling change", "faultCode": 4,
     }
 
 

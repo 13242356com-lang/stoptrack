@@ -37,7 +37,7 @@ async def serve(port: int, interactive: bool) -> None:
     idx = await server.register_namespace(NS_URI)
 
     objects = server.get_objects_node()
-    machine = await objects.add_object(idx, "ASLA_1_Laser")
+    machine = await objects.add_object(idx, "Line_1_Station_A")
     running = await machine.add_variable(ua.NodeId("Machine_Running", idx), "Machine_Running", True, ua.VariantType.Boolean)
     fault = await machine.add_variable(ua.NodeId("Fault_Code", idx), "Fault_Code", 0, ua.VariantType.Int16)
     cycle = await machine.add_variable(ua.NodeId("Cycle_Count", idx), "Cycle_Count", 0, ua.VariantType.Int32)
@@ -52,7 +52,7 @@ async def serve(port: int, interactive: bool) -> None:
 
     async with server:
         await run_machine(
-            "ASLA 1 - Laser", push,
+            "Line 1 - Station A", push,
             timeline=None if interactive else DEMO_TIMELINE,
             interactive=interactive,
         )

@@ -4,7 +4,7 @@ import pytest
 from plc_gateway.core.edge import Edge
 from plc_gateway.core.rules import RuleEngine, parse_rule
 
-FAULT_MAP = {4: "Teflon change", 7: "Foil / infeed jam"}
+FAULT_MAP = {4: "Tooling change", 7: "Material jam"}
 
 
 def engine():
@@ -48,7 +48,7 @@ def test_false_to_true_fires_ended_with_mapped_reason():
     )
     assert len(firings) == 1
     assert firings[0].emit == "stop_ended"
-    assert firings[0].reason == "Teflon change"
+    assert firings[0].reason == "Tooling change"
     assert firings[0].fault_code == 4
 
 

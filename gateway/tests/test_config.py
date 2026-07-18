@@ -11,7 +11,7 @@ sink:
   - type: file
     path: events.jsonl
 machines:
-  - name: "ASLA 1 - Laser"
+  - name: "Line 1 - Station A"
     protocol: sim
     tags:
       running:   { address: "DB1.DBX0.0", type: bool }
@@ -22,7 +22,7 @@ machines:
       - when: running edge true
         emit: stop_ended
         enrich: { reason_from: faultCode }
-    faultMap: { 4: "Teflon change" }
+    faultMap: { 4: "Tooling change" }
 """
 
 
@@ -39,9 +39,9 @@ def test_valid_yaml_loads(tmp_path):
     assert [s.type for s in cfg.sinks] == ["console", "file"]
     assert cfg.sinks[1].path == "events.jsonl"
     m = cfg.machines[0]
-    assert m.name == "ASLA 1 - Laser"
+    assert m.name == "Line 1 - Station A"
     assert {t.name for t in m.tags} == {"running", "faultCode"}
-    assert m.fault_map == {4: "Teflon change"}
+    assert m.fault_map == {4: "Tooling change"}
     assert len(m.rules) == 2
 
 
