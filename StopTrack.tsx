@@ -2,22 +2,24 @@ import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
   Play, Square, Pause, Clock, Factory, AlertCircle, BarChart3, List, User,
   RefreshCw, Trash2, CheckCircle, Settings, Plus, X, Download, Search,
-  Moon, Sun, TrendingUp, RotateCcw, Zap, Archive, Sparkles, Lock, Unlock, PencilLine,
+  Moon, Sun, TrendingUp, RotateCcw, Zap, Archive, Sparkles, Lock, Unlock, PencilLine, Target,
 } from "lucide-react";
 
 /* ============================================================================
-   StopTrack — ASLA machine downtime tracker (solar panel factory)
+   StopTrack — universal machine downtime tracker
    Single-file, offline-first. All persistence goes through the `api` object
    below so it can be swapped for a server backend with no UI changes.
    ========================================================================== */
 
 // ---------- Defaults --------------------------------------------------------
+// Generic example lists — StopTrack is universal, so defaults are neutral. A
+// supervisor edits these to match any line/machine in Supervisor → Settings.
 const DEFAULT_MACHINES = [
-  "ASLA - Infeed", "ASLA - Lamination", "ASLA - Laser", "ASLA - Outfeed", "Stringer",
+  "Line 1", "Line 2", "Line 3", "Packaging", "Assembly",
 ];
 const DEFAULT_REASONS = [
-  "Mechanical fault", "Quality check", "Waiting on maintenance", "Teflon change",
-  "Laser cleaning", "Material shortage", "Changeover / Setup", "Foil / infeed jam",
+  "Mechanical fault", "Quality check", "Waiting on maintenance", "Tooling change",
+  "Cleaning", "Material shortage", "Changeover / Setup", "Material jam",
   "Operator break", "Electrical fault", "Other",
 ];
 // Quick-stop buttons shown on the operator timer (reason + optional default note).
@@ -25,9 +27,15 @@ const DEFAULT_QUICK_STOPS = [
   { label: "Mechanical fault", reason: "Mechanical fault" },
   { label: "Quality check", reason: "Quality check" },
   { label: "Maintenance", reason: "Waiting on maintenance" },
-  { label: "Teflon change", reason: "Teflon change" },
-  { label: "Laser cleaning", reason: "Laser cleaning" },
-  { label: "Foil jam", reason: "Foil / infeed jam" },
+  { label: "Tooling change", reason: "Tooling change" },
+  { label: "Cleaning", reason: "Cleaning" },
+  { label: "Material jam", reason: "Material jam" },
+];
+// Shifts: supervisor-defined time frames operators pick from. `goal` = optional
+// per-shift output target (units); 0 = no goal. Legacy single-shift configs
+// (`config.shift`) migrate into a one-entry list on load.
+const DEFAULT_SHIFTS = [
+  { id: "shift-1", name: "Day", start: "06:00", end: "14:00", goal: 0 },
 ];
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -69,6 +77,41 @@ function shiftLengthMs(shift) {
   return mins * 60 * 1000;
 }
 
+// Today's occurrence of a shift's END as epoch ms, rolling into tomorrow for an
+// overnight shift or one whose end time has already passed — the honest "time
+// left in the shift" denominator for the goal projection.
+function shiftEndAt(shift, now = Date.now()) {
+  if (!shift?.end) return null;
+  const [eh, em] = shift.end.split(":").map(Number);
+  const d = new Date(now);
+  d.setHours(eh, em, 0, 0);
+  let end = d.getTime();
+  if (end <= now) end += 24 * 60 * 60 * 1000; // already past today → later tonight/tomorrow
+  return end;
+}
+
+// Coerce a shifts array (or a legacy single `shift`) into a valid, non-empty list
+// of {id,name,start,end,goal}. Returns null if there's nothing usable.
+function normalizeShifts(shiftsArr, legacyShift) {
+  const clean = Array.isArray(shiftsArr)
+    ? shiftsArr.filter((s) => s && s.start && s.end).map((s, i) => ({
+        id: s.id || `shift-${i + 1}`,
+        name: s.name || `Shift ${i + 1}`,
+        start: s.start, end: s.end,
+        goal: Math.max(0, Number(s.goal) || 0),
+      }))
+    : [];
+  if (clean.length) return clean;
+  if (legacyShift && legacyShift.start && legacyShift.end)
+    return [{ id: "shift-1", name: "Shift 1", start: legacyShift.start, end: legacyShift.end, goal: 0 }];
+  return null;
+}
+
+// Legacy mirror written alongside `shifts` so older clients / the watch config
+// (which reads only {start,end}) keep working off the primary shift.
+const legacyShiftOf = (shifts) =>
+  shifts && shifts[0] ? { start: shifts[0].start, end: shifts[0].end } : { start: "06:00", end: "14:00" };
+
 // Stable key fragment for a machine name (used in production record ids).
 const machineSlug = (m) => String(m || "").replace(/[^a-zA-Z0-9]+/g, "-");
 const HOUR_MS = 60 * 60 * 1000;
@@ -102,10 +145,37 @@ function computeOEE({ plannedMs, downtimeMs, unitsProduced, scrapCount, ratePerH
 const pct = (f) => (f == null ? "—" : `${(f * 100).toFixed(1)}%`);
 const oeeAccent = (f) => (f == null ? "" : f > 0.85 ? "text-emerald-500" : f > 0.6 ? "text-amber-500" : "text-red-500");
 
+// ---------- Shift output goal ----------------------------------------------
+// Given a units goal, what's been produced, the machine's rated units/hour, and
+// when the shift ends, project whether the goal is still reachable. `slackMs` is
+// how much MORE downtime can be absorbed and still hit it — so it shrinks with
+// every stop (the "given the number and times of stops" part). state:
+//   met   — already at/over the goal
+//   track — comfortably reachable
+//   risk  — reachable but little slack left
+//   missed— can't be reached even running flat-out for the rest of the shift
+//   na    — no goal or no machine rate set (can't project)
+function computeGoalStatus({ goal, produced, ratePerHour, shiftEndMs, now = Date.now() }) {
+  const g = Math.max(0, Number(goal) || 0);
+  const made = Math.max(0, Number(produced) || 0);
+  const rate = Number(ratePerHour) || 0;
+  if (g <= 0 || rate <= 0 || !shiftEndMs) return { state: "na", goal: g, produced: made };
+  const need = Math.max(0, g - made);
+  const remainingMs = Math.max(0, shiftEndMs - now);
+  if (need === 0) return { state: "met", goal: g, produced: made, need, remainingMs, slackMs: remainingMs, ratePerHour: rate };
+  const requiredRunMs = (need / rate) * HOUR_MS;
+  const slackMs = remainingMs - requiredRunMs;
+  const state = slackMs < 0 ? "missed" : slackMs < 15 * 60 * 1000 ? "risk" : "track";
+  return { state, goal: g, produced: made, need, remainingMs, requiredRunMs, slackMs, ratePerHour: rate };
+}
+const goalAccent = (state) =>
+  state === "missed" ? "text-red-500" : state === "risk" ? "text-amber-500"
+    : state === "met" || state === "track" ? "text-emerald-500" : "";
+
 // ---------- Shift handover report -------------------------------------------
 // Snapshot of the operator's current shift, for the handover modal / email.
 // Roaming-aware: machines-worked breakdown and shift-wide OEE come from myShift.
-function buildShiftReport({ operator, machine, myStops, myShift, clearedBefore }) {
+function buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, activeShift, goalStatus }) {
   const downtimeMs = myStops.reduce((a, s) => a + s.duration, 0);
   const byReason = {};
   myStops.forEach((s) => { byReason[s.reason] = (byReason[s.reason] || 0) + s.duration; });
@@ -113,12 +183,23 @@ function buildShiftReport({ operator, machine, myStops, myShift, clearedBefore }
   const longest = myStops.reduce((best, s) => (!best || s.duration > best.duration ? s : best), null);
   return {
     operator: operator.trim() || "Unnamed", machine,
+    shiftName: activeShift?.name || null,
     windowStart: clearedBefore || null, windowEnd: Date.now(),
     stopCount: myStops.length, downtimeMs, topReasons, longest,
     machines: myShift.rows, hasSessions: myShift.hasSessions,
-    oee: myShift.overall,
+    oee: myShift.overall, goal: goalStatus || null,
     notes: myStops.filter((s) => s.notes).map((s) => ({ reason: s.reason, notes: s.notes })),
   };
+}
+
+// One-line human summary of a goal projection, shared by the report + the UI.
+function goalSummaryText(g) {
+  if (!g || g.state === "na") return "";
+  if (g.state === "met") return `Goal ${g.goal} met (${g.produced} made)`;
+  const base = `Goal ${g.goal} · made ${g.produced}`;
+  if (g.state === "missed") return `${base} · not achievable (short by ${g.need})`;
+  const slack = g.slackMs != null ? `, up to ${fmtDur(g.slackMs)} more downtime OK` : "";
+  return `${base} · ${g.state === "risk" ? "at risk" : "on track"} (need ${g.need}${slack})`;
 }
 
 // Plain-text rendering of the report — what gets copied / emailed.
@@ -126,10 +207,11 @@ function formatReportText(r) {
   const lines = [];
   lines.push("STOPTRACK SHIFT HANDOVER");
   lines.push(`Operator: ${r.operator}${r.machines.length <= 1 ? ` · Machine: ${r.machines[0]?.machine || r.machine}` : ""}`);
-  lines.push(`Shift: ${r.windowStart ? fmtTime(r.windowStart) : "start"} → ${fmtTime(r.windowEnd)}`);
+  lines.push(`Shift: ${r.shiftName ? `${r.shiftName} · ` : ""}${r.windowStart ? fmtTime(r.windowStart) : "start"} → ${fmtTime(r.windowEnd)}`);
   lines.push("");
   lines.push(`Stops: ${r.stopCount} · Downtime: ${fmtDur(r.downtimeMs)}`);
   lines.push(`OEE${r.oee.partial ? " (partial)" : ""}: ${pct(r.oee.oee)}  [A ${pct(r.oee.a)} · P ${pct(r.oee.p)} · Q ${pct(r.oee.q)}]`);
+  { const gs = goalSummaryText(r.goal); if (gs) lines.push(gs); }
   if (r.machines.length) {
     lines.push("");
     lines.push("Machines worked:");
@@ -848,7 +930,10 @@ export default function App() {
   const [machines, setMachines] = useState(DEFAULT_MACHINES);
   const [reasons, setReasons] = useState(DEFAULT_REASONS);
   const [quickStops, setQuickStops] = useState(DEFAULT_QUICK_STOPS);
-  const [shift, setShift] = useState({ start: "06:00", end: "14:00" });
+  // Supervisor-defined shifts (shared config). Operators pick one; the choice
+  // (shiftId) is a personal pref like operator/machine.
+  const [shifts, setShifts] = useState(DEFAULT_SHIFTS);
+  const [shiftId, setShiftId] = useState(DEFAULT_SHIFTS[0].id);
 
   // prefs (personal)
   const [lastReason, setLastReason] = useState(null);
@@ -908,6 +993,12 @@ export default function App() {
   const [handoverOpen, setHandoverOpen] = useState(false);
 
   const t = useTheme(dark);
+
+  // The operator's chosen shift (falls back to the first configured shift).
+  const activeShift = useMemo(
+    () => shifts.find((s) => s.id === shiftId) || shifts[0] || { id: "shift-1", name: "Shift", start: "06:00", end: "14:00", goal: 0 },
+    [shifts, shiftId],
+  );
 
   // Latest snapshots for the sync merges, without re-creating the merge callbacks
   // on every render.
@@ -980,7 +1071,7 @@ export default function App() {
         if (cfg.machines?.length) { setMachines(cfg.machines); setMachine(cfg.machines[0]); }
         if (cfg.reasons?.length) { setReasons(cfg.reasons); setReason(cfg.reasons[0]); }
         if (cfg.quickStops) setQuickStops(cfg.quickStops);
-        if (cfg.shift) setShift(cfg.shift);
+        { const ls = normalizeShifts(cfg.shifts, cfg.shift); if (ls) setShifts(ls); }
         if (cfg.supervisorPinHash) setSupervisorPinHash(cfg.supervisorPinHash);
         if (cfg.rates) setRates(cfg.rates);
         if (cfg.handoverEmails) setHandoverEmails(cfg.handoverEmails);
@@ -1022,6 +1113,7 @@ export default function App() {
         if (typeof prefs.dark === "boolean") setDark(prefs.dark);
         if (prefs.lastReason) setLastReason(prefs.lastReason);
         if (prefs.clearedBefore) setClearedBefore(prefs.clearedBefore);
+        if (prefs.shiftId) setShiftId(prefs.shiftId);
         // Only a *locked* setup carries the name/machine across a refresh.
         // An unlocked session intentionally starts blank each load.
         if (prefs.setupLocked) {
@@ -1135,7 +1227,7 @@ export default function App() {
     if (cfg.machines?.length) setMachines(cfg.machines);
     if (cfg.reasons?.length) setReasons(cfg.reasons);
     if (cfg.quickStops) setQuickStops(cfg.quickStops);
-    if (cfg.shift) setShift(cfg.shift);
+    { const ls = normalizeShifts(cfg.shifts, cfg.shift); if (ls) setShifts(ls); }
     setSupervisorPinHash(cfg.supervisorPinHash ?? null);
     if (cfg.rates) setRates(cfg.rates);
     if (cfg.handoverEmails) setHandoverEmails(cfg.handoverEmails);
@@ -1144,8 +1236,8 @@ export default function App() {
   }, []);
 
   const localConfig = useMemo(
-    () => ({ machines, reasons, quickStops, shift, supervisorPinHash, rates, handoverEmails, updatedAt: configUpdatedAt }),
-    [machines, reasons, quickStops, shift, supervisorPinHash, rates, handoverEmails, configUpdatedAt],
+    () => ({ machines, reasons, quickStops, shifts, shift: legacyShiftOf(shifts), supervisorPinHash, rates, handoverEmails, updatedAt: configUpdatedAt }),
+    [machines, reasons, quickStops, shifts, supervisorPinHash, rates, handoverEmails, configUpdatedAt],
   );
 
   const sync = useSync({ cfg: syncCfg, onRemoteStops: applyRemoteStops, onRemoteProduction: applyRemoteProduction, onRemoteSessions: applyRemoteSessions, localConfig, onRemoteConfig: applyRemoteConfig });
@@ -1170,24 +1262,28 @@ export default function App() {
   // every edit; the new value is returned so callers can push it immediately.
   const persistConfig = useCallback((patch) => {
     const updatedAt = Date.now();
-    const next = { machines, reasons, quickStops, shift, supervisorPinHash, rates, handoverEmails, ...patch, updatedAt };
+    const merged = { machines, reasons, quickStops, shifts, supervisorPinHash, rates, handoverEmails, ...patch };
+    // Keep the legacy single `shift` mirror in step with `shifts` for older
+    // clients / the watch config (which reads only {start,end}).
+    const next = { ...merged, shift: legacyShiftOf(merged.shifts), updatedAt };
     setConfigUpdatedAt(updatedAt);
     api.saveConfig(next);
     if (syncCfg && syncCfg.enabled && syncCfg.url) api.remotePutConfig(next, syncCfg);
     return next;
-  }, [machines, reasons, quickStops, shift, supervisorPinHash, rates, handoverEmails, syncCfg]);
+  }, [machines, reasons, quickStops, shifts, supervisorPinHash, rates, handoverEmails, syncCfg]);
 
   const persistPrefs = useCallback((patch) => {
     // operator/machine/setupLocked are persisted so a locked setup survives a
     // page refresh. When unlocked we still write them, but the loader ignores
     // operator/machine unless setupLocked is true.
-    api.savePrefs({ dark, lastReason, clearedBefore, operator, machine, setupLocked, ...patch });
-  }, [dark, lastReason, clearedBefore, operator, machine, setupLocked]);
+    api.savePrefs({ dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId, ...patch });
+  }, [dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId]);
 
   const updateMachines = (next) => { setMachines(next); persistConfig({ machines: next }); };
   const updateReasons = (next) => { setReasons(next); persistConfig({ reasons: next }); };
   const updateQuickStops = (next) => { setQuickStops(next); persistConfig({ quickStops: next }); };
-  const updateShift = (next) => { setShift(next); persistConfig({ shift: next }); };
+  const updateShifts = (next) => { setShifts(next); persistConfig({ shifts: next }); };
+  const selectShift = (id) => { setShiftId(id); persistPrefs({ shiftId: id }); };
   const updateRates = (next) => { setRates(next); persistConfig({ rates: next }); };
   const updateHandoverEmails = (next) => { setHandoverEmails(next); persistConfig({ handoverEmails: next }); };
   const toggleDark = () => { const n = !dark; setDark(n); persistPrefs({ dark: n }); };
@@ -1456,14 +1552,25 @@ export default function App() {
       // single-machine framing against the configured shift length.
       const downtimeMs = myStops.reduce((a, s) => a + s.duration, 0);
       overall = computeOEE({
-        plannedMs: shiftLengthMs(shift), downtimeMs,
+        plannedMs: shiftLengthMs(activeShift), downtimeMs,
         unitsProduced: myProduction?.unitsProduced, scrapCount: myProduction?.scrapCount,
         ratePerHour: rates?.[machine],
       });
     }
     rows.sort((a, b) => b.mannedMs - a.mannedMs);
     return { rows, overall, hasSessions };
-  }, [sessions, myStops, production, rates, shift, clearedBefore, operator, machine, myProduction, slowTick]);
+  }, [sessions, myStops, production, rates, activeShift, clearedBefore, operator, machine, myProduction, slowTick]);
+
+  // ---- shift output goal (achievability) -----------------------------------
+  // Units produced this shift (all machines worked) vs the active shift's goal,
+  // projected against the current machine's rate and time left in the shift.
+  const goalStatus = useMemo(() => {
+    const produced = myShift.rows.reduce((a, r) => a + (r.units || 0), 0);
+    return computeGoalStatus({
+      goal: activeShift.goal, produced,
+      ratePerHour: rates?.[machine], shiftEndMs: shiftEndAt(activeShift), now: Date.now(),
+    });
+  }, [myShift, activeShift, rates, machine, slowTick]);
 
   return (
     <div className={`min-h-screen ${t.app} transition-colors`}>
@@ -1472,7 +1579,7 @@ export default function App() {
           <div className="bg-emerald-500/20 rounded-lg p-1.5"><Factory size={20} className="text-emerald-400" /></div>
           <div>
             <h1 className="font-bold text-lg leading-none">StopTrack</h1>
-            <span className="text-[10px] text-slate-400 uppercase tracking-wide">ASLA downtime</span>
+            <span className="text-[10px] text-slate-400 uppercase tracking-wide">Machine downtime</span>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -1496,12 +1603,13 @@ export default function App() {
             onSave={handleSave} onDiscardPending={handleDiscardPending} saving={saving} saveError={saveError}
             myStops={myStops} machines={machines} reasons={reasons} quickStops={quickStops}
             applyQuickStop={applyQuickStop} lastReason={lastReason}
-            shift={shift} clearedBefore={clearedBefore} onNewShift={() => setNewShiftOpen(true)} showAll={showAll} onToggleShowAll={toggleShowAll}
+            shift={activeShift} shifts={shifts} shiftId={shiftId} onSelectShift={selectShift}
+            clearedBefore={clearedBefore} onNewShift={() => setNewShiftOpen(true)} showAll={showAll} onToggleShowAll={toggleShowAll}
             setupLocked={setupLocked} onLockSetup={lockSetup} onUnlockSetup={unlockSetup}
             onOpenManual={() => { setSaveError(""); setManualOpen(true); }}
             syncStatus={sync.status} syncOn={syncOn}
             rates={rates} myProduction={myProduction} onSaveProduction={handleSaveProduction}
-            myShift={myShift}
+            myShift={myShift} goalStatus={goalStatus}
             onOpenHandover={() => setHandoverOpen(true)}
           />
         ) : (supervisorPinHash && !supervisorUnlocked) ? (
@@ -1509,9 +1617,9 @@ export default function App() {
         ) : (
           <SupervisorView
             t={t} stops={stops} loading={loading} onRefresh={refreshStops}
-            machines={machines} reasons={reasons} quickStops={quickStops} shift={shift}
+            machines={machines} reasons={reasons} quickStops={quickStops} shifts={shifts}
             updateMachines={updateMachines} updateReasons={updateReasons} updateQuickStops={updateQuickStops}
-            updateShift={updateShift} discardStop={discardStop} deleteStop={deleteStop}
+            updateShifts={updateShifts} discardStop={discardStop} deleteStop={deleteStop}
             hasPin={!!supervisorPinHash} updatePin={updatePin}
             syncCfg={syncCfg} updateSyncConfig={updateSyncConfig} syncStatus={sync.status} onSyncNow={sync.flush}
             rates={rates} updateRates={updateRates} production={production} sessions={sessions}
@@ -1558,7 +1666,7 @@ export default function App() {
       {handoverOpen && (
         <ShiftHandoverModal
           t={t} dark={dark}
-          report={buildShiftReport({ operator, machine, myStops, myShift, clearedBefore })}
+          report={buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, activeShift, goalStatus })}
           handoverEmails={handoverEmails} syncCfg={syncCfg}
           onClose={() => setHandoverOpen(false)}
         />
@@ -1575,10 +1683,10 @@ function OperatorView(props) {
     t, operator, setOperator, machine, setMachine, timer, onStop,
     pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError,
     myStops, machines, reasons, quickStops, applyQuickStop, lastReason,
-    shift, clearedBefore, onNewShift, showAll, onToggleShowAll,
+    shift, shifts, shiftId, onSelectShift, clearedBefore, onNewShift, showAll, onToggleShowAll,
     setupLocked, onLockSetup, onUnlockSetup, onOpenManual,
     syncStatus, syncOn,
-    rates, myProduction, onSaveProduction, myShift, onOpenHandover,
+    rates, myProduction, onSaveProduction, myShift, goalStatus, onOpenHandover,
   } = props;
 
   const { state, elapsed, start, pause, resume } = timer;
@@ -1620,6 +1728,31 @@ function OperatorView(props) {
         {oee.p == null && " — set a machine rate in Supervisor → Settings"}
         {oee.p != null && oee.q == null && " — enter shift output below"}
       </div>
+
+      {/* shift output goal — is it still reachable given downtime so far? */}
+      {goalStatus && goalStatus.state !== "na" && (
+        <div className={`${t.card} rounded-xl px-4 py-3 flex items-center justify-between gap-3`}>
+          <div className="flex items-center gap-2 min-w-0">
+            <Target size={18} className={goalAccent(goalStatus.state)} />
+            <div className="min-w-0">
+              <div className="text-sm font-semibold">
+                {goalStatus.state === "met" ? "Goal met"
+                  : goalStatus.state === "missed" ? "Goal not achievable"
+                  : goalStatus.state === "risk" ? "Goal at risk" : "On track for goal"}
+              </div>
+              <div className={`text-[11px] ${t.sub}`}>
+                {goalStatus.produced} / {goalStatus.goal} units
+                {(goalStatus.state === "track" || goalStatus.state === "risk") && goalStatus.slackMs != null
+                  && ` · up to ${fmtDur(goalStatus.slackMs)} more downtime OK`}
+                {goalStatus.state === "missed" && ` · short by ${goalStatus.need} (need ${goalStatus.need}, time's too short)`}
+              </div>
+            </div>
+          </div>
+          <div className={`text-right font-bold ${goalAccent(goalStatus.state)}`}>
+            {Math.min(999, Math.round((goalStatus.produced / Math.max(1, goalStatus.goal)) * 100))}%
+          </div>
+        </div>
+      )}
 
       {/* machines worked this shift (only interesting once roaming) */}
       {myShift.hasSessions && myShift.rows.length > 0 && (
@@ -1664,6 +1797,19 @@ function OperatorView(props) {
             </select>
           )}
         </div>
+        {shifts && shifts.length > 1 && (
+          <div className="flex flex-col gap-1">
+            <span className={`text-xs font-semibold ${t.sub} flex items-center gap-1`}><Clock size={13} /> SHIFT — tap to switch</span>
+            <div className="flex flex-wrap gap-1.5">
+              {shifts.map((s) => (
+                <button key={s.id} onClick={() => onSelectShift(s.id)}
+                  className={`px-3 py-2 rounded-lg text-sm font-semibold transition active:scale-95 ${s.id === shiftId ? "bg-emerald-500 text-white shadow" : t.chip}`}>
+                  {s.name} <span className="opacity-70 font-normal">{s.start}–{s.end}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         {!setupLocked ? (
           <button onClick={onLockSetup} disabled={!canLock}
             className={`w-full flex items-center justify-center gap-2 font-bold py-2.5 rounded-lg transition ${canLock ? "bg-slate-800 hover:bg-slate-900 text-white" : `${t.muted} ${t.sub} cursor-not-allowed`}`}>
@@ -1920,7 +2066,14 @@ function ManualStopModal({ t, dark, machine, machines, reasons, quickStops, last
 /* ============================================================================
    SUPERVISOR VIEW
    ========================================================================== */
-function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quickStops, shift, updateMachines, updateReasons, updateQuickStops, updateShift, discardStop, deleteStop, hasPin, updatePin, syncCfg, updateSyncConfig, syncStatus, onSyncNow, rates, updateRates, production, sessions, handoverEmails, updateHandoverEmails }) {
+function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quickStops, shifts, updateMachines, updateReasons, updateQuickStops, updateShifts, discardStop, deleteStop, hasPin, updatePin, syncCfg, updateSyncConfig, syncStatus, onSyncNow, rates, updateRates, production, sessions, handoverEmails, updateHandoverEmails }) {
+  // Uptime/OEE assume a shift length; with several shifts the supervisor picks
+  // which one frames the analytics (defaults to the first).
+  const [analyticsShiftId, setAnalyticsShiftId] = useState(shifts?.[0]?.id);
+  const shift = useMemo(
+    () => shifts?.find((s) => s.id === analyticsShiftId) || shifts?.[0] || { start: "06:00", end: "14:00" },
+    [shifts, analyticsShiftId],
+  );
   const [tab, setTab] = useState("log");
   const [filterMachine, setFilterMachine] = useState("All");
   const [query, setQuery] = useState("");
@@ -2242,22 +2395,23 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
               ))}</div>
             )}
           </div>
+          {shifts && shifts.length > 1 && (
+            <div className="flex items-center justify-center gap-2 text-xs">
+              <span className={t.sub}>Frame uptime by shift:</span>
+              <select value={analyticsShiftId} onChange={(e) => setAnalyticsShiftId(e.target.value)}
+                className={`border rounded-lg px-2 py-1 ${t.input}`}>
+                {shifts.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.start}–{s.end})</option>)}
+              </select>
+            </div>
+          )}
           <p className={`text-center text-xs ${t.sub}`}>Analytics exclude discarded stops. Uptime % assumes a {shift.start}–{shift.end} shift.</p>
         </div>
       )}
 
       {tab === "manage" && (
         <div className="space-y-4">
-          <div className={`${t.card} rounded-xl p-4`}>
-            <h3 className="font-bold mb-3 flex items-center gap-2"><Clock size={16} /> Shift times</h3>
-            <p className={`text-xs ${t.sub} mb-3`}>Used to calculate uptime % and operator pace.</p>
-            <div className="flex items-center gap-3 flex-wrap">
-              <label className="flex flex-col gap-1 text-xs"><span className={t.sub}>START</span><input type="time" value={shift.start} onChange={(e) => updateShift({ ...shift, start: e.target.value })} className={`border rounded-lg px-3 py-2 ${t.input}`} /></label>
-              <label className="flex flex-col gap-1 text-xs"><span className={t.sub}>END</span><input type="time" value={shift.end} onChange={(e) => updateShift({ ...shift, end: e.target.value })} className={`border rounded-lg px-3 py-2 ${t.input}`} /></label>
-              <span className={`text-sm ${t.sub} self-end pb-2`}>= {fmtDur(shiftLengthMs(shift))} / shift</span>
-            </div>
-          </div>
-          <ListManager t={t} title="Machines" icon={<Factory size={16} />} items={machines} onChange={updateMachines} placeholder="e.g. ASLA - Outfeed" />
+          <ShiftsManager t={t} shifts={shifts} onChange={updateShifts} />
+          <ListManager t={t} title="Machines" icon={<Factory size={16} />} items={machines} onChange={updateMachines} placeholder="e.g. Line 1 - Packaging" />
           <ListManager t={t} title="Stop reasons" icon={<AlertCircle size={16} />} items={reasons} onChange={updateReasons} placeholder="e.g. Sensor calibration" />
           <QuickStopManager t={t} quickStops={quickStops} reasons={reasons} onChange={updateQuickStops} />
           <RatesManager t={t} machines={machines} rates={rates} onChange={updateRates} />
@@ -2334,7 +2488,7 @@ function QuickStopManager({ t, quickStops, reasons, onChange }) {
       <h3 className="font-bold mb-3 flex items-center gap-2"><Zap size={16} /> Quick stops</h3>
       <p className={`text-xs ${t.sub} mb-3`}>One-tap buttons operators see when documenting a stop.</p>
       <div className="space-y-2 mb-3">
-        <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Button label (e.g. Teflon change)" className={`w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}`} />
+        <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Button label (e.g. Tooling change)" className={`w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}`} />
         <div className="flex gap-2 flex-wrap">
           <select value={reason} onChange={(e) => setReason(e.target.value)} className={`border rounded-lg px-3 py-2 text-sm ${t.input}`}>{reasons.map((r) => <option key={r}>{r}</option>)}</select>
           <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Default notes (optional)" className={`flex-1 min-w-[140px] border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}`} />
@@ -2589,6 +2743,41 @@ function RatesManager({ t, machines, rates, onChange }) {
           </label>
         ))}
       </div>
+    </div>
+  );
+}
+
+// Supervisor settings: the shifts operators pick from. Each has a name, time
+// frame, and an optional output goal (units) used for the achievability check.
+function ShiftsManager({ t, shifts, onChange }) {
+  const update = (id, patch) => onChange(shifts.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+  const remove = (id) => { if (shifts.length > 1) onChange(shifts.filter((s) => s.id !== id)); };
+  const add = () => onChange([...shifts, { id: `shift-${Date.now().toString(36)}`, name: `Shift ${shifts.length + 1}`, start: "06:00", end: "14:00", goal: 0 }]);
+  return (
+    <div className={`${t.card} rounded-xl p-4`}>
+      <h3 className="font-bold mb-1 flex items-center gap-2"><Clock size={16} /> Shifts</h3>
+      <p className={`text-xs ${t.sub} mb-3`}>Time frames operators pick from. Used for uptime %, operator pace, and each shift's output goal.</p>
+      <div className="space-y-3">
+        {shifts.map((s) => (
+          <div key={s.id} className={`${t.muted} rounded-lg p-3 space-y-2`}>
+            <div className="flex items-center gap-2">
+              <input value={s.name} maxLength={24} onChange={(e) => update(s.id, { name: e.target.value })} placeholder="Shift name"
+                className={`flex-1 border rounded-lg px-3 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}`} />
+              {shifts.length > 1 && (
+                <button onClick={() => remove(s.id)} className="text-red-500 hover:text-red-600 p-1" title="Remove shift"><Trash2 size={16} /></button>
+              )}
+            </div>
+            <div className="flex items-center gap-3 flex-wrap">
+              <label className="flex flex-col gap-1 text-xs"><span className={t.sub}>START</span><input type="time" value={s.start} onChange={(e) => update(s.id, { start: e.target.value })} className={`border rounded-lg px-3 py-2 ${t.input}`} /></label>
+              <label className="flex flex-col gap-1 text-xs"><span className={t.sub}>END</span><input type="time" value={s.end} onChange={(e) => update(s.id, { end: e.target.value })} className={`border rounded-lg px-3 py-2 ${t.input}`} /></label>
+              <label className="flex flex-col gap-1 text-xs"><span className={t.sub}>GOAL (units)</span><input type="number" inputMode="numeric" min="0" value={s.goal || ""} onChange={(e) => update(s.id, { goal: Math.max(0, Number(e.target.value) || 0) })} placeholder="none"
+                className={`w-24 border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}`} /></label>
+              <span className={`text-sm ${t.sub} self-end pb-2`}>= {fmtDur(shiftLengthMs(s))}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+      <button onClick={add} className={`mt-3 w-full flex items-center justify-center gap-2 text-sm font-semibold py-2 rounded-lg ${t.chip} active:scale-95`}><Plus size={16} /> Add shift</button>
     </div>
   );
 }

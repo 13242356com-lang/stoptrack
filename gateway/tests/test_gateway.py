@@ -25,10 +25,10 @@ def test_full_stop_cycle_pairs_and_computes_duration():
     ended = sink.of_type("stop_ended")
     assert len(started) == 1 and len(ended) == 1
     ev = ended[0]
-    assert ev["machine"] == "ASLA 1 - Laser"
+    assert ev["machine"] == "Line 1 - Station A"
     assert ev["start"] == started[0]["ts"]
     assert ev["duration"] == ev["ts"] - ev["start"] >= 0
-    assert ev["reason"] == "Teflon change"
+    assert ev["reason"] == "Tooling change"
     assert ev["faultCode"] == 4
     assert ev["auto"] is True
 
@@ -93,7 +93,7 @@ def test_long_stop_survives_debounce_with_original_start_ts():
     assert len(started) == 1 and len(ended) == 1
     assert ended[0]["start"] == started[0]["ts"]     # original ts preserved
     assert ended[0]["duration"] >= 50
-    assert ended[0]["reason"] == "Foil / infeed jam"
+    assert ended[0]["reason"] == "Material jam"
 
 
 def test_stop_crossing_threshold_and_ending_same_poll_emits_ordered_pair():

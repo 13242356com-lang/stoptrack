@@ -20,21 +20,23 @@ data class WatchConfig(
     val updatedAt: Long = 0L,
 ) {
     companion object {
+        // Generic example lists — StopTrack is universal. A supervisor edits
+        // these to match any line/machine; kept in step with the web defaults.
         val DEFAULT_MACHINES = listOf(
-            "ASLA - Infeed", "ASLA - Lamination", "ASLA - Laser", "ASLA - Outfeed", "Stringer",
+            "Line 1", "Line 2", "Line 3", "Packaging", "Assembly",
         )
         val DEFAULT_REASONS = listOf(
-            "Mechanical fault", "Quality check", "Waiting on maintenance", "Teflon change",
-            "Laser cleaning", "Material shortage", "Changeover / Setup", "Foil / infeed jam",
+            "Mechanical fault", "Quality check", "Waiting on maintenance", "Tooling change",
+            "Cleaning", "Material shortage", "Changeover / Setup", "Material jam",
             "Operator break", "Electrical fault", "Other",
         )
         val DEFAULT_QUICK_STOPS = listOf(
             QuickStop("Mechanical fault", "Mechanical fault"),
             QuickStop("Quality check", "Quality check"),
             QuickStop("Maintenance", "Waiting on maintenance"),
-            QuickStop("Teflon change", "Teflon change"),
-            QuickStop("Laser cleaning", "Laser cleaning"),
-            QuickStop("Foil jam", "Foil / infeed jam"),
+            QuickStop("Tooling change", "Tooling change"),
+            QuickStop("Cleaning", "Cleaning"),
+            QuickStop("Material jam", "Material jam"),
         )
 
         val DEFAULT = WatchConfig()

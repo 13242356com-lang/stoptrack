@@ -9,7 +9,7 @@ sink:
   type: console
 
 machines:
-  - name: "ASLA 1 - Laser"
+  - name: "Line 1 - Station A"
     protocol: s7
     s7:
       host: "127.0.0.1"
@@ -24,6 +24,6 @@ machines:
       - { when: "running edge false", emit: stop_started }
       - { when: "running edge true",  emit: stop_ended, enrich: { reason_from: faultCode } }
     faultMap:
-      4: "Teflon change"
-      7: "Foil / infeed jam"
+      4: "Tooling change"
+      7: "Material jam"
       2: "Laser cleaning"

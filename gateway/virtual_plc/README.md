@@ -24,8 +24,8 @@ python -m plc_gateway --config virtual_plc/s7.yaml --i-have-authorization --run-
 Expected gateway output (over a real snap7 socket):
 
 ```
-STOP started   ASLA 1 - Laser
-STOP ended     ASLA 1 - Laser - 7s, reason: Teflon change
+STOP started   Line 1 - Station A
+STOP ended     Line 1 - Station A - 7s, reason: Tooling change
 ```
 
 Real S7-1200/1500 CPUs use TCP **102**; `snap7_server.py` defaults to **1102** to
@@ -53,4 +53,4 @@ The same configs work against a Siemens **PLCSIM Advanced** instance (usually in
 Hyper-V/VMware VM): change `s7.host` / `opcua.endpoint` from `127.0.0.1` to the
 VM's IP, set `s7.port: 102`, and for OPC UA enable the CPU's OPC UA server in its
 properties (off by default). The `--i-have-authorization` flag is still required —
-and the real ASLA line must never be a target without written ACP sign-off.
+and the real production line must never be a target without written ACP sign-off.

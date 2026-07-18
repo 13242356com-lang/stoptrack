@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#0f172a" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
-  <title>StopTrack — ASLA Downtime</title>
+  <title>StopTrack — Machine Downtime</title>
 
   <script src="https://cdn.tailwindcss.com"></script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -104,21 +104,25 @@ const Sparkles = I(React.createElement(React.Fragment, null, React.createElement
 const Lock = I(React.createElement(React.Fragment, null, React.createElement("rect", { x: "3", y: "11", width: "18", height: "11", rx: "2", ry: "2" }), React.createElement("path", { d: "M7 11V7a5 5 0 0 1 10 0v4" })));
 const Unlock = I(React.createElement(React.Fragment, null, React.createElement("rect", { x: "3", y: "11", width: "18", height: "11", rx: "2", ry: "2" }), React.createElement("path", { d: "M7 11V7a5 5 0 0 1 9.9-1" })));
 const PencilLine = I(React.createElement(React.Fragment, null, React.createElement("path", { d: "M12 20h9" }), React.createElement("path", { d: "M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" })));
+const Target = I(React.createElement(React.Fragment, null, React.createElement("circle", { cx: "12", cy: "12", r: "10" }), React.createElement("circle", { cx: "12", cy: "12", r: "6" }), React.createElement("circle", { cx: "12", cy: "12", r: "2" })));
 const DEFAULT_MACHINES = [
-    "ASLA - Infeed", "ASLA - Lamination", "ASLA - Laser", "ASLA - Outfeed", "Stringer",
+    "Line 1", "Line 2", "Line 3", "Packaging", "Assembly",
 ];
 const DEFAULT_REASONS = [
-    "Mechanical fault", "Quality check", "Waiting on maintenance", "Teflon change",
-    "Laser cleaning", "Material shortage", "Changeover / Setup", "Foil / infeed jam",
+    "Mechanical fault", "Quality check", "Waiting on maintenance", "Tooling change",
+    "Cleaning", "Material shortage", "Changeover / Setup", "Material jam",
     "Operator break", "Electrical fault", "Other",
 ];
 const DEFAULT_QUICK_STOPS = [
     { label: "Mechanical fault", reason: "Mechanical fault" },
     { label: "Quality check", reason: "Quality check" },
     { label: "Maintenance", reason: "Waiting on maintenance" },
-    { label: "Teflon change", reason: "Teflon change" },
-    { label: "Laser cleaning", reason: "Laser cleaning" },
-    { label: "Foil jam", reason: "Foil / infeed jam" },
+    { label: "Tooling change", reason: "Tooling change" },
+    { label: "Cleaning", reason: "Cleaning" },
+    { label: "Material jam", reason: "Material jam" },
+];
+const DEFAULT_SHIFTS = [
+    { id: "shift-1", name: "Day", start: "06:00", end: "14:00", goal: 0 },
 ];
 const DAY = 24 * 60 * 60 * 1000;
 const RETENTION_MS = 60 * DAY;
@@ -161,6 +165,33 @@ function shiftLengthMs(shift) {
         mins += 24 * 60;
     return mins * 60 * 1000;
 }
+function shiftEndAt(shift, now = Date.now()) {
+    if (!(shift === null || shift === void 0 ? void 0 : shift.end))
+        return null;
+    const [eh, em] = shift.end.split(":").map(Number);
+    const d = new Date(now);
+    d.setHours(eh, em, 0, 0);
+    let end = d.getTime();
+    if (end <= now)
+        end += 24 * 60 * 60 * 1000;
+    return end;
+}
+function normalizeShifts(shiftsArr, legacyShift) {
+    const clean = Array.isArray(shiftsArr)
+        ? shiftsArr.filter((s) => s && s.start && s.end).map((s, i) => ({
+            id: s.id || `shift-${i + 1}`,
+            name: s.name || `Shift ${i + 1}`,
+            start: s.start, end: s.end,
+            goal: Math.max(0, Number(s.goal) || 0),
+        }))
+        : [];
+    if (clean.length)
+        return clean;
+    if (legacyShift && legacyShift.start && legacyShift.end)
+        return [{ id: "shift-1", name: "Shift 1", start: legacyShift.start, end: legacyShift.end, goal: 0 }];
+    return null;
+}
+const legacyShiftOf = (shifts) => shifts && shifts[0] ? { start: shifts[0].start, end: shifts[0].end } : { start: "06:00", end: "14:00" };
 const machineSlug = (m) => String(m || "").replace(/[^a-zA-Z0-9]+/g, "-");
 const HOUR_MS = 60 * 60 * 1000;
 function computeOEE({ plannedMs, downtimeMs, unitsProduced, scrapCount, ratePerHour }) {
@@ -181,7 +212,24 @@ function computeOEE({ plannedMs, downtimeMs, unitsProduced, scrapCount, ratePerH
 }
 const pct = (f) => (f == null ? "—" : `${(f * 100).toFixed(1)}%`);
 const oeeAccent = (f) => (f == null ? "" : f > 0.85 ? "text-emerald-500" : f > 0.6 ? "text-amber-500" : "text-red-500");
-function buildShiftReport({ operator, machine, myStops, myShift, clearedBefore }) {
+function computeGoalStatus({ goal, produced, ratePerHour, shiftEndMs, now = Date.now() }) {
+    const g = Math.max(0, Number(goal) || 0);
+    const made = Math.max(0, Number(produced) || 0);
+    const rate = Number(ratePerHour) || 0;
+    if (g <= 0 || rate <= 0 || !shiftEndMs)
+        return { state: "na", goal: g, produced: made };
+    const need = Math.max(0, g - made);
+    const remainingMs = Math.max(0, shiftEndMs - now);
+    if (need === 0)
+        return { state: "met", goal: g, produced: made, need, remainingMs, slackMs: remainingMs, ratePerHour: rate };
+    const requiredRunMs = (need / rate) * HOUR_MS;
+    const slackMs = remainingMs - requiredRunMs;
+    const state = slackMs < 0 ? "missed" : slackMs < 15 * 60 * 1000 ? "risk" : "track";
+    return { state, goal: g, produced: made, need, remainingMs, requiredRunMs, slackMs, ratePerHour: rate };
+}
+const goalAccent = (state) => state === "missed" ? "text-red-500" : state === "risk" ? "text-amber-500"
+    : state === "met" || state === "track" ? "text-emerald-500" : "";
+function buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, activeShift, goalStatus }) {
     const downtimeMs = myStops.reduce((a, s) => a + s.duration, 0);
     const byReason = {};
     myStops.forEach((s) => { byReason[s.reason] = (byReason[s.reason] || 0) + s.duration; });
@@ -189,22 +237,39 @@ function buildShiftReport({ operator, machine, myStops, myShift, clearedBefore }
     const longest = myStops.reduce((best, s) => (!best || s.duration > best.duration ? s : best), null);
     return {
         operator: operator.trim() || "Unnamed", machine,
+        shiftName: (activeShift === null || activeShift === void 0 ? void 0 : activeShift.name) || null,
         windowStart: clearedBefore || null, windowEnd: Date.now(),
         stopCount: myStops.length, downtimeMs, topReasons, longest,
         machines: myShift.rows, hasSessions: myShift.hasSessions,
-        oee: myShift.overall,
+        oee: myShift.overall, goal: goalStatus || null,
         notes: myStops.filter((s) => s.notes).map((s) => ({ reason: s.reason, notes: s.notes })),
     };
+}
+function goalSummaryText(g) {
+    if (!g || g.state === "na")
+        return "";
+    if (g.state === "met")
+        return `Goal ${g.goal} met (${g.produced} made)`;
+    const base = `Goal ${g.goal} · made ${g.produced}`;
+    if (g.state === "missed")
+        return `${base} · not achievable (short by ${g.need})`;
+    const slack = g.slackMs != null ? `, up to ${fmtDur(g.slackMs)} more downtime OK` : "";
+    return `${base} · ${g.state === "risk" ? "at risk" : "on track"} (need ${g.need}${slack})`;
 }
 function formatReportText(r) {
     var _a;
     const lines = [];
     lines.push("STOPTRACK SHIFT HANDOVER");
     lines.push(`Operator: ${r.operator}${r.machines.length <= 1 ? ` · Machine: ${((_a = r.machines[0]) === null || _a === void 0 ? void 0 : _a.machine) || r.machine}` : ""}`);
-    lines.push(`Shift: ${r.windowStart ? fmtTime(r.windowStart) : "start"} → ${fmtTime(r.windowEnd)}`);
+    lines.push(`Shift: ${r.shiftName ? `${r.shiftName} · ` : ""}${r.windowStart ? fmtTime(r.windowStart) : "start"} → ${fmtTime(r.windowEnd)}`);
     lines.push("");
     lines.push(`Stops: ${r.stopCount} · Downtime: ${fmtDur(r.downtimeMs)}`);
     lines.push(`OEE${r.oee.partial ? " (partial)" : ""}: ${pct(r.oee.oee)}  [A ${pct(r.oee.a)} · P ${pct(r.oee.p)} · Q ${pct(r.oee.q)}]`);
+    {
+        const gs = goalSummaryText(r.goal);
+        if (gs)
+            lines.push(gs);
+    }
     if (r.machines.length) {
         lines.push("");
         lines.push("Machines worked:");
@@ -994,7 +1059,8 @@ function App() {
     const [machines, setMachines] = useState(DEFAULT_MACHINES);
     const [reasons, setReasons] = useState(DEFAULT_REASONS);
     const [quickStops, setQuickStops] = useState(DEFAULT_QUICK_STOPS);
-    const [shift, setShift] = useState({ start: "06:00", end: "14:00" });
+    const [shifts, setShifts] = useState(DEFAULT_SHIFTS);
+    const [shiftId, setShiftId] = useState(DEFAULT_SHIFTS[0].id);
     const [lastReason, setLastReason] = useState(null);
     const [clearedBefore, setClearedBefore] = useState(0);
     const [showAll, setShowAll] = useState(false);
@@ -1022,6 +1088,7 @@ function App() {
     const [sessions, setSessions] = useState([]);
     const [handoverOpen, setHandoverOpen] = useState(false);
     const t = useTheme(dark);
+    const activeShift = useMemo(() => shifts.find((s) => s.id === shiftId) || shifts[0] || { id: "shift-1", name: "Shift", start: "06:00", end: "14:00", goal: 0 }, [shifts, shiftId]);
     const stopsRef = useRef(stops);
     stopsRef.current = stops;
     const productionRef = useRef(production);
@@ -1090,8 +1157,11 @@ function App() {
                 }
                 if (cfg.quickStops)
                     setQuickStops(cfg.quickStops);
-                if (cfg.shift)
-                    setShift(cfg.shift);
+                {
+                    const ls = normalizeShifts(cfg.shifts, cfg.shift);
+                    if (ls)
+                        setShifts(ls);
+                }
                 if (cfg.supervisorPinHash)
                     setSupervisorPinHash(cfg.supervisorPinHash);
                 if (cfg.rates)
@@ -1133,6 +1203,8 @@ function App() {
                     setLastReason(prefs.lastReason);
                 if (prefs.clearedBefore)
                     setClearedBefore(prefs.clearedBefore);
+                if (prefs.shiftId)
+                    setShiftId(prefs.shiftId);
                 if (prefs.setupLocked) {
                     setSetupLocked(true);
                     if (prefs.operator)
@@ -1237,8 +1309,11 @@ function App() {
             setReasons(cfg.reasons);
         if (cfg.quickStops)
             setQuickStops(cfg.quickStops);
-        if (cfg.shift)
-            setShift(cfg.shift);
+        {
+            const ls = normalizeShifts(cfg.shifts, cfg.shift);
+            if (ls)
+                setShifts(ls);
+        }
         setSupervisorPinHash((_c = cfg.supervisorPinHash) !== null && _c !== void 0 ? _c : null);
         if (cfg.rates)
             setRates(cfg.rates);
@@ -1247,7 +1322,7 @@ function App() {
         setConfigUpdatedAt(cfg.updatedAt || Date.now());
         api.saveConfig(cfg);
     }, []);
-    const localConfig = useMemo(() => ({ machines, reasons, quickStops, shift, supervisorPinHash, rates, handoverEmails, updatedAt: configUpdatedAt }), [machines, reasons, quickStops, shift, supervisorPinHash, rates, handoverEmails, configUpdatedAt]);
+    const localConfig = useMemo(() => ({ machines, reasons, quickStops, shifts, shift: legacyShiftOf(shifts), supervisorPinHash, rates, handoverEmails, updatedAt: configUpdatedAt }), [machines, reasons, quickStops, shifts, supervisorPinHash, rates, handoverEmails, configUpdatedAt]);
     const sync = useSync({ cfg: syncCfg, onRemoteStops: applyRemoteStops, onRemoteProduction: applyRemoteProduction, onRemoteSessions: applyRemoteSessions, localConfig, onRemoteConfig: applyRemoteConfig });
     const updateSyncConfig = useCallback(async (next) => {
         await api.saveSyncConfig(next);
@@ -1264,20 +1339,22 @@ function App() {
         setReason(reasons[0]); }, [reasons, reason]);
     const persistConfig = useCallback((patch) => {
         const updatedAt = Date.now();
-        const next = Object.assign(Object.assign({ machines, reasons, quickStops, shift, supervisorPinHash, rates, handoverEmails }, patch), { updatedAt });
+        const merged = Object.assign({ machines, reasons, quickStops, shifts, supervisorPinHash, rates, handoverEmails }, patch);
+        const next = Object.assign(Object.assign({}, merged), { shift: legacyShiftOf(merged.shifts), updatedAt });
         setConfigUpdatedAt(updatedAt);
         api.saveConfig(next);
         if (syncCfg && syncCfg.enabled && syncCfg.url)
             api.remotePutConfig(next, syncCfg);
         return next;
-    }, [machines, reasons, quickStops, shift, supervisorPinHash, rates, handoverEmails, syncCfg]);
+    }, [machines, reasons, quickStops, shifts, supervisorPinHash, rates, handoverEmails, syncCfg]);
     const persistPrefs = useCallback((patch) => {
-        api.savePrefs(Object.assign({ dark, lastReason, clearedBefore, operator, machine, setupLocked }, patch));
-    }, [dark, lastReason, clearedBefore, operator, machine, setupLocked]);
+        api.savePrefs(Object.assign({ dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId }, patch));
+    }, [dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId]);
     const updateMachines = (next) => { setMachines(next); persistConfig({ machines: next }); };
     const updateReasons = (next) => { setReasons(next); persistConfig({ reasons: next }); };
     const updateQuickStops = (next) => { setQuickStops(next); persistConfig({ quickStops: next }); };
-    const updateShift = (next) => { setShift(next); persistConfig({ shift: next }); };
+    const updateShifts = (next) => { setShifts(next); persistConfig({ shifts: next }); };
+    const selectShift = (id) => { setShiftId(id); persistPrefs({ shiftId: id }); };
     const updateRates = (next) => { setRates(next); persistConfig({ rates: next }); };
     const updateHandoverEmails = (next) => { setHandoverEmails(next); persistConfig({ handoverEmails: next }); };
     const toggleDark = () => { const n = !dark; setDark(n); persistPrefs({ dark: n }); };
@@ -1520,14 +1597,21 @@ function App() {
         else {
             const downtimeMs = myStops.reduce((a, s) => a + s.duration, 0);
             overall = computeOEE({
-                plannedMs: shiftLengthMs(shift), downtimeMs,
+                plannedMs: shiftLengthMs(activeShift), downtimeMs,
                 unitsProduced: myProduction === null || myProduction === void 0 ? void 0 : myProduction.unitsProduced, scrapCount: myProduction === null || myProduction === void 0 ? void 0 : myProduction.scrapCount,
                 ratePerHour: rates === null || rates === void 0 ? void 0 : rates[machine],
             });
         }
         rows.sort((a, b) => b.mannedMs - a.mannedMs);
         return { rows, overall, hasSessions };
-    }, [sessions, myStops, production, rates, shift, clearedBefore, operator, machine, myProduction, slowTick]);
+    }, [sessions, myStops, production, rates, activeShift, clearedBefore, operator, machine, myProduction, slowTick]);
+    const goalStatus = useMemo(() => {
+        const produced = myShift.rows.reduce((a, r) => a + (r.units || 0), 0);
+        return computeGoalStatus({
+            goal: activeShift.goal, produced,
+            ratePerHour: rates === null || rates === void 0 ? void 0 : rates[machine], shiftEndMs: shiftEndAt(activeShift), now: Date.now(),
+        });
+    }, [myShift, activeShift, rates, machine, slowTick]);
     return (React.createElement("div", { className: `min-h-screen ${t.app} transition-colors` },
         React.createElement("header", { className: "bg-slate-900 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-10" },
             React.createElement("div", { className: "flex items-center gap-2" },
@@ -1535,7 +1619,7 @@ function App() {
                     React.createElement(Factory, { size: 20, className: "text-emerald-400" })),
                 React.createElement("div", null,
                     React.createElement("h1", { className: "font-bold text-lg leading-none" }, "StopTrack"),
-                    React.createElement("span", { className: "text-[10px] text-slate-400 uppercase tracking-wide" }, "ASLA downtime"))),
+                    React.createElement("span", { className: "text-[10px] text-slate-400 uppercase tracking-wide" }, "Machine downtime"))),
             React.createElement("div", { className: "flex items-center gap-2" },
                 React.createElement("button", { onClick: toggleDark, className: "p-2 text-slate-300 hover:text-white", title: "Toggle theme", "aria-label": "Toggle theme" }, dark ? React.createElement(Sun, { size: 18 }) : React.createElement(Moon, { size: 18 })),
                 React.createElement("div", { className: "flex bg-slate-700 rounded-lg p-1 text-sm" },
@@ -1543,7 +1627,7 @@ function App() {
                     React.createElement("button", { onClick: () => setView("supervisor"), className: `px-3 py-1.5 rounded-md flex items-center gap-1 transition ${view === "supervisor" ? "bg-emerald-500 text-white font-semibold" : "text-slate-300"}` },
                         supervisorPinHash && React.createElement(Lock, { size: 12 }),
                         " Supervisor")))),
-        React.createElement("main", { className: "max-w-3xl mx-auto p-4 pb-24" }, view === "operator" ? (React.createElement(OperatorView, { t: t, operator: operator, setOperator: setOperator, machine: machine, setMachine: switchMachine, timer: timer, onStop: handleStop, pendingStop: pendingStop, reason: reason, setReason: setReason, notes: notes, setNotes: setNotes, onSave: handleSave, onDiscardPending: handleDiscardPending, saving: saving, saveError: saveError, myStops: myStops, machines: machines, reasons: reasons, quickStops: quickStops, applyQuickStop: applyQuickStop, lastReason: lastReason, shift: shift, clearedBefore: clearedBefore, onNewShift: () => setNewShiftOpen(true), showAll: showAll, onToggleShowAll: toggleShowAll, setupLocked: setupLocked, onLockSetup: lockSetup, onUnlockSetup: unlockSetup, onOpenManual: () => { setSaveError(""); setManualOpen(true); }, syncStatus: sync.status, syncOn: syncOn, rates: rates, myProduction: myProduction, onSaveProduction: handleSaveProduction, myShift: myShift, onOpenHandover: () => setHandoverOpen(true) })) : (supervisorPinHash && !supervisorUnlocked) ? (React.createElement(PinGate, { t: t, pinHash: supervisorPinHash, onUnlock: () => setSupervisorUnlocked(true) })) : (React.createElement(SupervisorView, { t: t, stops: stops, loading: loading, onRefresh: refreshStops, machines: machines, reasons: reasons, quickStops: quickStops, shift: shift, updateMachines: updateMachines, updateReasons: updateReasons, updateQuickStops: updateQuickStops, updateShift: updateShift, discardStop: discardStop, deleteStop: deleteStop, hasPin: !!supervisorPinHash, updatePin: updatePin, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: sync.status, onSyncNow: sync.flush, rates: rates, updateRates: updateRates, production: production, sessions: sessions, handoverEmails: handoverEmails, updateHandoverEmails: updateHandoverEmails }))),
+        React.createElement("main", { className: "max-w-3xl mx-auto p-4 pb-24" }, view === "operator" ? (React.createElement(OperatorView, { t: t, operator: operator, setOperator: setOperator, machine: machine, setMachine: switchMachine, timer: timer, onStop: handleStop, pendingStop: pendingStop, reason: reason, setReason: setReason, notes: notes, setNotes: setNotes, onSave: handleSave, onDiscardPending: handleDiscardPending, saving: saving, saveError: saveError, myStops: myStops, machines: machines, reasons: reasons, quickStops: quickStops, applyQuickStop: applyQuickStop, lastReason: lastReason, shift: activeShift, shifts: shifts, shiftId: shiftId, onSelectShift: selectShift, clearedBefore: clearedBefore, onNewShift: () => setNewShiftOpen(true), showAll: showAll, onToggleShowAll: toggleShowAll, setupLocked: setupLocked, onLockSetup: lockSetup, onUnlockSetup: unlockSetup, onOpenManual: () => { setSaveError(""); setManualOpen(true); }, syncStatus: sync.status, syncOn: syncOn, rates: rates, myProduction: myProduction, onSaveProduction: handleSaveProduction, myShift: myShift, goalStatus: goalStatus, onOpenHandover: () => setHandoverOpen(true) })) : (supervisorPinHash && !supervisorUnlocked) ? (React.createElement(PinGate, { t: t, pinHash: supervisorPinHash, onUnlock: () => setSupervisorUnlocked(true) })) : (React.createElement(SupervisorView, { t: t, stops: stops, loading: loading, onRefresh: refreshStops, machines: machines, reasons: reasons, quickStops: quickStops, shifts: shifts, updateMachines: updateMachines, updateReasons: updateReasons, updateQuickStops: updateQuickStops, updateShifts: updateShifts, discardStop: discardStop, deleteStop: deleteStop, hasPin: !!supervisorPinHash, updatePin: updatePin, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: sync.status, onSyncNow: sync.flush, rates: rates, updateRates: updateRates, production: production, sessions: sessions, handoverEmails: handoverEmails, updateHandoverEmails: updateHandoverEmails }))),
         recovered && (React.createElement("div", { className: "fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30" },
             React.createElement("div", { className: `${dark ? "bg-slate-900" : "bg-white"} rounded-xl shadow-xl p-5 max-w-sm w-full space-y-3` },
                 React.createElement("div", { className: "flex items-center gap-2 font-bold" },
@@ -1569,10 +1653,10 @@ function App() {
                     React.createElement("button", { onClick: startNewShift, className: "flex-1 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 rounded-lg" }, "Start new shift"),
                     React.createElement("button", { onClick: () => setNewShiftOpen(false), className: `px-4 ${t.sub} font-semibold` }, "Cancel"))))),
         manualOpen && (React.createElement(ManualStopModal, { t: t, dark: dark, machine: machine, machines: machines, reasons: reasons, quickStops: quickStops, lastReason: lastReason, saving: saving, saveError: saveError, onSave: handleManualSave, onClose: () => setManualOpen(false) })),
-        handoverOpen && (React.createElement(ShiftHandoverModal, { t: t, dark: dark, report: buildShiftReport({ operator, machine, myStops, myShift, clearedBefore }), handoverEmails: handoverEmails, syncCfg: syncCfg, onClose: () => setHandoverOpen(false) }))));
+        handoverOpen && (React.createElement(ShiftHandoverModal, { t: t, dark: dark, report: buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, activeShift, goalStatus }), handoverEmails: handoverEmails, syncCfg: syncCfg, onClose: () => setHandoverOpen(false) }))));
 }
 function OperatorView(props) {
-    const { t, operator, setOperator, machine, setMachine, timer, onStop, pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError, myStops, machines, reasons, quickStops, applyQuickStop, lastReason, shift, clearedBefore, onNewShift, showAll, onToggleShowAll, setupLocked, onLockSetup, onUnlockSetup, onOpenManual, syncStatus, syncOn, rates, myProduction, onSaveProduction, myShift, onOpenHandover, } = props;
+    const { t, operator, setOperator, machine, setMachine, timer, onStop, pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError, myStops, machines, reasons, quickStops, applyQuickStop, lastReason, shift, shifts, shiftId, onSelectShift, clearedBefore, onNewShift, showAll, onToggleShowAll, setupLocked, onLockSetup, onUnlockSetup, onOpenManual, syncStatus, syncOn, rates, myProduction, onSaveProduction, myShift, goalStatus, onOpenHandover, } = props;
     const { state, elapsed, start, pause, resume } = timer;
     const { running, paused } = state;
     const downtimeMs = useMemo(() => myStops.reduce((a, s) => a + s.duration, 0), [myStops]);
@@ -1604,6 +1688,24 @@ function OperatorView(props) {
             pct(oee.q),
             oee.p == null && " — set a machine rate in Supervisor → Settings",
             oee.p != null && oee.q == null && " — enter shift output below"),
+        goalStatus && goalStatus.state !== "na" && (React.createElement("div", { className: `${t.card} rounded-xl px-4 py-3 flex items-center justify-between gap-3` },
+            React.createElement("div", { className: "flex items-center gap-2 min-w-0" },
+                React.createElement(Target, { size: 18, className: goalAccent(goalStatus.state) }),
+                React.createElement("div", { className: "min-w-0" },
+                    React.createElement("div", { className: "text-sm font-semibold" }, goalStatus.state === "met" ? "Goal met"
+                        : goalStatus.state === "missed" ? "Goal not achievable"
+                            : goalStatus.state === "risk" ? "Goal at risk" : "On track for goal"),
+                    React.createElement("div", { className: `text-[11px] ${t.sub}` },
+                        goalStatus.produced,
+                        " / ",
+                        goalStatus.goal,
+                        " units",
+                        (goalStatus.state === "track" || goalStatus.state === "risk") && goalStatus.slackMs != null
+                            && ` · up to ${fmtDur(goalStatus.slackMs)} more downtime OK`,
+                        goalStatus.state === "missed" && ` · short by ${goalStatus.need} (need ${goalStatus.need}, time's too short)`))),
+            React.createElement("div", { className: `text-right font-bold ${goalAccent(goalStatus.state)}` },
+                Math.min(999, Math.round((goalStatus.produced / Math.max(1, goalStatus.goal)) * 100)),
+                "%"))),
         myShift.hasSessions && myShift.rows.length > 0 && (React.createElement("div", { className: "flex flex-wrap gap-1.5 justify-center -mt-1" }, myShift.rows.map((r) => (React.createElement("span", { key: r.machine, className: `${t.chip} rounded-full px-3 py-1 text-[11px]` },
             React.createElement("span", { className: "font-semibold" }, r.machine),
             " · ",
@@ -1632,6 +1734,17 @@ function OperatorView(props) {
                         m,
                         timingHere && React.createElement("span", { className: "absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse", title: "Stop being timed here" })));
                 }))) : (React.createElement("select", { value: machine, onChange: (e) => setMachine(e.target.value), className: `border rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }, machines.map((m) => React.createElement("option", { key: m }, m))))),
+            shifts && shifts.length > 1 && (React.createElement("div", { className: "flex flex-col gap-1" },
+                React.createElement("span", { className: `text-xs font-semibold ${t.sub} flex items-center gap-1` },
+                    React.createElement(Clock, { size: 13 }),
+                    " SHIFT \u2014 tap to switch"),
+                React.createElement("div", { className: "flex flex-wrap gap-1.5" }, shifts.map((s) => (React.createElement("button", { key: s.id, onClick: () => onSelectShift(s.id), className: `px-3 py-2 rounded-lg text-sm font-semibold transition active:scale-95 ${s.id === shiftId ? "bg-emerald-500 text-white shadow" : t.chip}` },
+                    s.name,
+                    " ",
+                    React.createElement("span", { className: "opacity-70 font-normal" },
+                        s.start,
+                        "\u2013",
+                        s.end))))))),
             !setupLocked ? (React.createElement("button", { onClick: onLockSetup, disabled: !canLock, className: `w-full flex items-center justify-center gap-2 font-bold py-2.5 rounded-lg transition ${canLock ? "bg-slate-800 hover:bg-slate-900 text-white" : `${t.muted} ${t.sub} cursor-not-allowed`}` },
                 React.createElement(Lock, { size: 16 }),
                 " Lock name")) : (React.createElement("button", { onClick: onUnlockSetup, className: "w-full flex items-center justify-center gap-2 font-bold py-2.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white transition" },
@@ -1819,7 +1932,10 @@ function ManualStopModal({ t, dark, machine, machines, reasons, quickStops, last
                     " Save stop"),
                 React.createElement("button", { onClick: onClose, disabled: saving, className: `px-4 ${t.sub} hover:text-red-500 font-semibold` }, "Cancel")))));
 }
-function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quickStops, shift, updateMachines, updateReasons, updateQuickStops, updateShift, discardStop, deleteStop, hasPin, updatePin, syncCfg, updateSyncConfig, syncStatus, onSyncNow, rates, updateRates, production, sessions, handoverEmails, updateHandoverEmails }) {
+function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quickStops, shifts, updateMachines, updateReasons, updateQuickStops, updateShifts, discardStop, deleteStop, hasPin, updatePin, syncCfg, updateSyncConfig, syncStatus, onSyncNow, rates, updateRates, production, sessions, handoverEmails, updateHandoverEmails }) {
+    var _a;
+    const [analyticsShiftId, setAnalyticsShiftId] = useState((_a = shifts === null || shifts === void 0 ? void 0 : shifts[0]) === null || _a === void 0 ? void 0 : _a.id);
+    const shift = useMemo(() => (shifts === null || shifts === void 0 ? void 0 : shifts.find((s) => s.id === analyticsShiftId)) || (shifts === null || shifts === void 0 ? void 0 : shifts[0]) || { start: "06:00", end: "14:00" }, [shifts, analyticsShiftId]);
     const [tab, setTab] = useState("log");
     const [filterMachine, setFilterMachine] = useState("All");
     const [query, setQuery] = useState("");
@@ -2153,6 +2269,15 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
                         React.createElement("span", { className: `font-mono ${t.sub}` }, fmtDur(e.down))),
                     React.createElement("div", { className: `h-2 ${t.muted} rounded-full overflow-hidden` },
                         React.createElement("div", { className: "h-full bg-emerald-500 rounded-full", style: { width: `${(e.down / byOperator.max) * 100}%` } })))))))),
+            shifts && shifts.length > 1 && (React.createElement("div", { className: "flex items-center justify-center gap-2 text-xs" },
+                React.createElement("span", { className: t.sub }, "Frame uptime by shift:"),
+                React.createElement("select", { value: analyticsShiftId, onChange: (e) => setAnalyticsShiftId(e.target.value), className: `border rounded-lg px-2 py-1 ${t.input}` }, shifts.map((s) => React.createElement("option", { key: s.id, value: s.id },
+                    s.name,
+                    " (",
+                    s.start,
+                    "\u2013",
+                    s.end,
+                    ")"))))),
             React.createElement("p", { className: `text-center text-xs ${t.sub}` },
                 "Analytics exclude discarded stops. Uptime % assumes a ",
                 shift.start,
@@ -2160,23 +2285,8 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
                 shift.end,
                 " shift."))),
         tab === "manage" && (React.createElement("div", { className: "space-y-4" },
-            React.createElement("div", { className: `${t.card} rounded-xl p-4` },
-                React.createElement("h3", { className: "font-bold mb-3 flex items-center gap-2" },
-                    React.createElement(Clock, { size: 16 }),
-                    " Shift times"),
-                React.createElement("p", { className: `text-xs ${t.sub} mb-3` }, "Used to calculate uptime % and operator pace."),
-                React.createElement("div", { className: "flex items-center gap-3 flex-wrap" },
-                    React.createElement("label", { className: "flex flex-col gap-1 text-xs" },
-                        React.createElement("span", { className: t.sub }, "START"),
-                        React.createElement("input", { type: "time", value: shift.start, onChange: (e) => updateShift(Object.assign(Object.assign({}, shift), { start: e.target.value })), className: `border rounded-lg px-3 py-2 ${t.input}` })),
-                    React.createElement("label", { className: "flex flex-col gap-1 text-xs" },
-                        React.createElement("span", { className: t.sub }, "END"),
-                        React.createElement("input", { type: "time", value: shift.end, onChange: (e) => updateShift(Object.assign(Object.assign({}, shift), { end: e.target.value })), className: `border rounded-lg px-3 py-2 ${t.input}` })),
-                    React.createElement("span", { className: `text-sm ${t.sub} self-end pb-2` },
-                        "= ",
-                        fmtDur(shiftLengthMs(shift)),
-                        " / shift"))),
-            React.createElement(ListManager, { t: t, title: "Machines", icon: React.createElement(Factory, { size: 16 }), items: machines, onChange: updateMachines, placeholder: "e.g. ASLA - Outfeed" }),
+            React.createElement(ShiftsManager, { t: t, shifts: shifts, onChange: updateShifts }),
+            React.createElement(ListManager, { t: t, title: "Machines", icon: React.createElement(Factory, { size: 16 }), items: machines, onChange: updateMachines, placeholder: "e.g. Line 1 - Packaging" }),
             React.createElement(ListManager, { t: t, title: "Stop reasons", icon: React.createElement(AlertCircle, { size: 16 }), items: reasons, onChange: updateReasons, placeholder: "e.g. Sensor calibration" }),
             React.createElement(QuickStopManager, { t: t, quickStops: quickStops, reasons: reasons, onChange: updateQuickStops }),
             React.createElement(RatesManager, { t: t, machines: machines, rates: rates, onChange: updateRates }),
@@ -2267,7 +2377,7 @@ function QuickStopManager({ t, quickStops, reasons, onChange }) {
             " Quick stops"),
         React.createElement("p", { className: `text-xs ${t.sub} mb-3` }, "One-tap buttons operators see when documenting a stop."),
         React.createElement("div", { className: "space-y-2 mb-3" },
-            React.createElement("input", { value: label, onChange: (e) => setLabel(e.target.value), placeholder: "Button label (e.g. Teflon change)", className: `w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
+            React.createElement("input", { value: label, onChange: (e) => setLabel(e.target.value), placeholder: "Button label (e.g. Tooling change)", className: `w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
             React.createElement("div", { className: "flex gap-2 flex-wrap" },
                 React.createElement("select", { value: reason, onChange: (e) => setReason(e.target.value), className: `border rounded-lg px-3 py-2 text-sm ${t.input}` }, reasons.map((r) => React.createElement("option", { key: r }, r))),
                 React.createElement("input", { value: notes, onChange: (e) => setNotes(e.target.value), placeholder: "Default notes (optional)", className: `flex-1 min-w-[140px] border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
@@ -2520,6 +2630,38 @@ function RatesManager({ t, machines, rates, onChange }) {
                 React.createElement("input", { type: "number", inputMode: "numeric", min: "0", value: (_a = rates === null || rates === void 0 ? void 0 : rates[m]) !== null && _a !== void 0 ? _a : "", onChange: (e) => setRate(m, e.target.value), placeholder: "\u2014", className: `w-28 border rounded-lg px-3 py-2 text-sm font-mono text-right focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
                 React.createElement("span", { className: `text-xs ${t.sub} w-16` }, "units/h")));
         }))));
+}
+function ShiftsManager({ t, shifts, onChange }) {
+    const update = (id, patch) => onChange(shifts.map((s) => (s.id === id ? Object.assign(Object.assign({}, s), patch) : s)));
+    const remove = (id) => { if (shifts.length > 1)
+        onChange(shifts.filter((s) => s.id !== id)); };
+    const add = () => onChange([...shifts, { id: `shift-${Date.now().toString(36)}`, name: `Shift ${shifts.length + 1}`, start: "06:00", end: "14:00", goal: 0 }]);
+    return (React.createElement("div", { className: `${t.card} rounded-xl p-4` },
+        React.createElement("h3", { className: "font-bold mb-1 flex items-center gap-2" },
+            React.createElement(Clock, { size: 16 }),
+            " Shifts"),
+        React.createElement("p", { className: `text-xs ${t.sub} mb-3` }, "Time frames operators pick from. Used for uptime %, operator pace, and each shift's output goal."),
+        React.createElement("div", { className: "space-y-3" }, shifts.map((s) => (React.createElement("div", { key: s.id, className: `${t.muted} rounded-lg p-3 space-y-2` },
+            React.createElement("div", { className: "flex items-center gap-2" },
+                React.createElement("input", { value: s.name, maxLength: 24, onChange: (e) => update(s.id, { name: e.target.value }), placeholder: "Shift name", className: `flex-1 border rounded-lg px-3 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
+                shifts.length > 1 && (React.createElement("button", { onClick: () => remove(s.id), className: "text-red-500 hover:text-red-600 p-1", title: "Remove shift" },
+                    React.createElement(Trash2, { size: 16 })))),
+            React.createElement("div", { className: "flex items-center gap-3 flex-wrap" },
+                React.createElement("label", { className: "flex flex-col gap-1 text-xs" },
+                    React.createElement("span", { className: t.sub }, "START"),
+                    React.createElement("input", { type: "time", value: s.start, onChange: (e) => update(s.id, { start: e.target.value }), className: `border rounded-lg px-3 py-2 ${t.input}` })),
+                React.createElement("label", { className: "flex flex-col gap-1 text-xs" },
+                    React.createElement("span", { className: t.sub }, "END"),
+                    React.createElement("input", { type: "time", value: s.end, onChange: (e) => update(s.id, { end: e.target.value }), className: `border rounded-lg px-3 py-2 ${t.input}` })),
+                React.createElement("label", { className: "flex flex-col gap-1 text-xs" },
+                    React.createElement("span", { className: t.sub }, "GOAL (units)"),
+                    React.createElement("input", { type: "number", inputMode: "numeric", min: "0", value: s.goal || "", onChange: (e) => update(s.id, { goal: Math.max(0, Number(e.target.value) || 0) }), placeholder: "none", className: `w-24 border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` })),
+                React.createElement("span", { className: `text-sm ${t.sub} self-end pb-2` },
+                    "= ",
+                    fmtDur(shiftLengthMs(s)))))))),
+        React.createElement("button", { onClick: add, className: `mt-3 w-full flex items-center justify-center gap-2 text-sm font-semibold py-2 rounded-lg ${t.chip} active:scale-95` },
+            React.createElement(Plus, { size: 16 }),
+            " Add shift")));
 }
 function HandoverEmailsManager({ t, emails, onChange }) {
     const [input, setInput] = useState((emails || []).join(", "));
