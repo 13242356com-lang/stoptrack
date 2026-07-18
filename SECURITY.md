@@ -21,6 +21,11 @@ model, some behaviours are deliberate accepted tradeoffs (below).
   logged server-side only; clients get generic messages.
 - **HTTP hardening**: `X-Content-Type-Options: nosniff` and request/header/idle
   timeouts (basic slowloris mitigation).
+- **Rate limiting** (`server/server.js`): per-IP fixed-window limits — a generous
+  overall cap (`RATE_LIMIT`, default 240/min) plus a tight cap on *failed* auth
+  (`RATE_LIMIT_AUTH`, default 20/min) that throttles token guessing. Over the
+  limit returns `429` with `Retry-After`. In-memory (per process), IP from
+  `CF-Connecting-IP`/`X-Forwarded-For` behind the tunnel.
 
 ## Accepted tradeoffs (documented, safe under the trusted-LAN model)
 - **Plain HTTP on the LAN** sends the bearer token in cleartext, so anyone
