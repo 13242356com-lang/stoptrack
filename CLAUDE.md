@@ -76,9 +76,9 @@ seam clean.
 ### Storage keys
 - `stop:<id>` — one record per stop
 - `config:lists` — machines / reasons / quickStops / shifts (each shift =
-  {id,name,start,end,goal}) / rates / handoverEmails. A legacy `shift`
-  {start,end} mirror of the first shift is written alongside for old clients /
-  the watch config.
+  {id,name,start,end,goals:{machine:units}}) / rates / handoverEmails. A legacy
+  `shift` {start,end} mirror of the first shift is written alongside for old
+  clients / the watch config.
 - `config:prefs` — dark mode, last reason, cleared-before cutoff, operator,
   machine, setupLocked, shiftId (the operator's chosen shift)
 - `inprogress:current` — live-timer autosave for recovery
@@ -138,8 +138,8 @@ the supervisor view. This was a real bug; the fix was `loggedAt`. Filter uses
 - Stat cards, search, machine filter, date-range filter (all / 7d / 30d / custom).
 - Log table with a **manual** badge on manually-reported stops.
 - Analytics: 7-day downtime trend, top problem machines, downtime by reason.
-- Settings: shifts (each with times + optional output goal), machines list,
-  reasons list, quick stops, machine rates.
+- Settings: shifts (each with times + optional per-machine output goals),
+  machines list, reasons list, quick stops, machine rates.
 - **Discard** (soft, requires explanation, kept in exports, auto-purged after 60
   days) and **Delete permanently** (hard delete, confirmation required).
 - **Export CSV / JSON** — respects current filters, includes discarded rows and a
