@@ -243,10 +243,14 @@ Full details in `android/README.md`. Key facts for future sessions:
   sync** at `http://127.0.0.1:<port>` and watch stops appear in the supervisor
   view. (Needs CORS + Private Network Access headers — handled in
   `mobile/LocalSyncServer.kt`.)
-- **Modules:** `:shared` (record model + contract, pure Kotlin — the only piece
-  that must track the web record), `:wear` (Compose watch app; `TimerEngine` is
-  a port of `useTimer`), `:mobile` (bridge: `PhoneStore` mirrors `server.js`,
-  `LocalSyncServer`, Wear listener, optional `RemoteForwarder`).
+- **Modules:** `:shared` (record model + contract + **`TimerEngine`** = the
+  `Timer`/`TimerState` port of `useTimer`, pure Kotlin — the only piece that must
+  track the web record), `:wear` (Compose watch app; drives the shared `Timer`),
+  `:mobile` (full app + bridge: `PhoneStore` mirrors `server.js`, `LocalSyncServer`,
+  Wear listener, optional `RemoteForwarder`, and the **quick-stop presence** —
+  `QuickStopController` + notification actions + `OverlayController` floating
+  bubble, so a stop can be logged from the notification/bubble without opening the
+  app; needs `SYSTEM_ALERT_WINDOW` for the overlay).
 - **Build reality:** needs the Android SDK + Android Studio; **can't be built or
   runtime-tested in the cloud/CI session** (no SDK, no watch). Only `:shared`
   and the wear timer/format logic are compile-verified. Build in Android Studio;

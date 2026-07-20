@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.stoptrack.shared.StopRecord
 import com.stoptrack.shared.StopTrackJson
+import com.stoptrack.shared.TimerState
 import com.stoptrack.shared.WatchConfig
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString

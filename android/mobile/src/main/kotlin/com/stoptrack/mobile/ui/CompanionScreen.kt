@@ -27,12 +27,19 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.stoptrack.mobile.CompanionService
 import com.stoptrack.mobile.CompanionUi
 import com.stoptrack.mobile.CompanionViewModel
 
@@ -57,6 +64,7 @@ fun CompanionScreen(vm: CompanionViewModel) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             StatusCard(ui)
+            QuickStopCard(ui, vm)
             LocalServerCard(ui, vm)
             WatchCard(ui, vm)
             RemoteForwardCard(ui, vm)
@@ -95,6 +103,66 @@ private fun StatusCard(ui: CompanionUi) = SectionCard("Bridge status") {
     }
 }
 
+
+@Composable
+private fun QuickStopCard(ui: CompanionUi, vm: CompanionViewModel) = SectionCard("Quick stop") {
+    val context = LocalContext.current
+    var name by remember { mutableStateOf(ui.settings.operatorName) }
+    LaunchedEffect(ui.settings.operatorName) { name = ui.settings.operatorName }
+
+    Text(
+        "Log a stop from the notification or a floating button, without opening the app.",
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(8.dp))
+    OutlinedTextField(
+        value = name,
+        onValueChange = { name = it.take(40) },
+        label = { Text("Operator name (on quick-logged stops)") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Spacer(Modifier.height(6.dp))
+    OutlinedButton(onClick = { vm.setOperatorName(name) }, modifier = Modifier.fillMaxWidth()) {
+        Text("Save name")
+    }
+
+    Spacer(Modifier.height(12.dp))
+    // Re-checks the overlay permission after the user returns from granting it.
+    val overlayLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) {
+        if (Settings.canDrawOverlays(context)) {
+            vm.setOverlayEnabled(true)
+            context.startService(
+                Intent(context, CompanionService::class.java).setAction(CompanionService.ACTION_REFRESH_OVERLAY),
+            )
+        } else {
+            vm.setOverlayEnabled(false)
+        }
+    }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+        Text("Floating button (over other apps)", style = MaterialTheme.typography.bodyMedium)
+        Switch(
+            checked = ui.settings.overlayEnabled,
+            onCheckedChange = { want ->
+                if (want && !Settings.canDrawOverlays(context)) {
+                    overlayLauncher.launch(
+                        Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}")),
+                    )
+                } else {
+                    vm.setOverlayEnabled(want)
+                }
+            },
+        )
+    }
+    Text(
+        "Drag it anywhere; tap to start, tap again to end. Needs the one-time “Display over other apps” permission.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
 
 @Composable
 private fun LocalServerCard(ui: CompanionUi, vm: CompanionViewModel) = SectionCard("Local server") {

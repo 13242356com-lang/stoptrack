@@ -43,9 +43,25 @@ the watch to the existing StopTrack web app.
 
 | Module | What it is |
 |--------|-----------|
-| `:shared` | Pure Kotlin/JVM. The `StopRecord` / `WatchConfig` / `QuickStop` model (matching the web record byte-for-byte), the sync-contract path constants, the Wear Data Layer protocol, LWW helpers, and a `HttpURLConnection` `RemoteSyncClient`. |
-| `:wear` | The Wear OS app (Compose for Wear OS). The operator timer loop — Start / Pause / Resume / End, reason + quick-stop selection, and a phone-link/outbox status footer. `TimerEngine` is a faithful port of the web `useTimer`. |
-| `:mobile` | The phone companion. `PhoneStore` (on-device data set like `server.js`), `LocalSyncServer` (NanoHTTPD on loopback), the Wear listener/bridge, an optional `RemoteForwarder`, and a small Compose Material3 setup/status screen. |
+| `:shared` | Pure Kotlin/JVM. The `StopRecord` / `WatchConfig` / `QuickStop` model (matching the web record byte-for-byte), the sync-contract path constants, the Wear Data Layer protocol, LWW helpers, a `HttpURLConnection` `RemoteSyncClient`, and **`TimerEngine`** (`Timer`/`TimerState`, a faithful port of the web `useTimer`) — shared by the watch and the phone quick-timer. |
+| `:wear` | The Wear OS app (Compose for Wear OS). The operator timer loop — Start / Pause / Resume / End, reason + quick-stop selection, and a phone-link/outbox status footer. Drives the shared `Timer`. |
+| `:mobile` | The phone companion + full app. `PhoneStore` (on-device data set like `server.js`), `LocalSyncServer` (NanoHTTPD on loopback), the Wear listener/bridge, an optional `RemoteForwarder`, a Compose setup/status screen, and the **quick-stop presence** (`QuickStopController` + notification actions + `OverlayController` floating bubble). |
+
+### Quick-stop presence (notification + floating bubble)
+So an operator can log a stop **without opening the app**, `CompanionService`
+hosts a native quick-timer (`QuickStopController`, reusing the shared `Timer`):
+- The **persistent notification** shows the live stop timer (Idle / Recording
+  mm:ss / Paused) with a monochrome status-bar icon and **Start / Pause / End**
+  actions. On End it writes a `StopRecord` straight into `PhoneStore`, which the
+  web app + supervisor pick up via the running loopback sync — works with the app
+  backgrounded or closed.
+- The **floating "Shazam-style" bubble** (`OverlayController`, a draggable
+  `WindowManager` overlay) mirrors + toggles the same timer over other apps. It
+  needs the one-time **Display over other apps** permission (`SYSTEM_ALERT_WINDOW`),
+  toggled in Bridge settings → *Quick stop*.
+- To avoid double-counting, the web app reports its own timer via
+  `NativeBridge.reportTimerActive(...)`; while an in-app stop runs, the native
+  surfaces hide their Start.
 
 ---
 

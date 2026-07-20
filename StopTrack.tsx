@@ -957,6 +957,16 @@ export default function App() {
   const [setupLocked, setSetupLocked] = useState(false);
   const timer = useTimer({ operator, machine });
 
+  // In the native Android shell, tell the app when the in-app timer is
+  // running/paused so its notification + floating "quick stop" button don't offer
+  // a second Start (which would double-count the same stop). No-op in a browser.
+  useEffect(() => {
+    const n = (typeof window !== "undefined") ? window.StopTrackNative : null;
+    if (n && typeof n.reportTimerActive === "function") {
+      try { n.reportTimerActive(!!(timer.state.running || timer.state.paused)); } catch (e) { /* ignore */ }
+    }
+  }, [timer.state.running, timer.state.paused]);
+
   // documentation of a just-ended stop
   const [pendingStop, setPendingStop] = useState(null);
   const [reason, setReason] = useState(DEFAULT_REASONS[0]);
