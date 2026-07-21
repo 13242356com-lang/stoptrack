@@ -253,6 +253,14 @@ function formatReportText(r) {
 }
 
 function downloadFile(content, filename, type) {
+  // In the Android shell a blob/anchor download is silently dropped by the WebView
+  // (no DownloadListener, and blob: URLs never reach it). Hand the bytes to native,
+  // which writes the file to the Downloads folder. Falls back to the browser path.
+  const n = (typeof window !== "undefined") ? window.StopTrackNative : null;
+  if (n && typeof n.saveFile === "function") {
+    try { n.saveFile(filename, type || "application/octet-stream", String(content)); return; }
+    catch (e) { /* fall through to the browser download */ }
+  }
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");

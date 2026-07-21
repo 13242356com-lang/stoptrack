@@ -312,6 +312,14 @@ function formatReportText(r) {
     return lines.join("\n");
 }
 function downloadFile(content, filename, type) {
+    const n = (typeof window !== "undefined") ? window.StopTrackNative : null;
+    if (n && typeof n.saveFile === "function") {
+        try {
+            n.saveFile(filename, type || "application/octet-stream", String(content));
+            return;
+        }
+        catch (e) { }
+    }
     const blob = new Blob([content], { type });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");

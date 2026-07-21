@@ -69,6 +69,16 @@ this one timer, so they can never disagree.
   native→JS state pushes via `window.StopTrackShell.onState(...)`. In a plain
   browser (no shell) the web app falls back to its own local timer, unchanged.
 
+### Backup & Restore inside the WebView
+A WebView doesn't do browser-style downloads or `<input type=file>` pickers on its
+own, so the phone app wires both:
+- **Download backup / CSV / JSON** → `NativeBridge.saveFile(...)` writes the file
+  to the device **Downloads** folder (MediaStore on API 29+, the app's external
+  Downloads dir below that). The web `downloadFile` helper calls this when the
+  shell is present and falls back to a blob download in a plain browser.
+- **Restore from backup** → a `WebChromeClient.onShowFileChooser` routes the file
+  input to the system document picker.
+
 ---
 
 ## Get the app files (APKs)

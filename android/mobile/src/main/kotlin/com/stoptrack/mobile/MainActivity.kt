@@ -2,13 +2,20 @@ package com.stoptrack.mobile
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ContentValues
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
 import android.webkit.JavascriptInterface
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
@@ -40,6 +47,18 @@ class MainActivity : ComponentActivity() {
 
     private val notifPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* best-effort */ }
+
+    /** Pending `<input type=file>` callback (Restore-from-backup picker), fed by
+     *  [fileChooserLauncher]. */
+    private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
+
+    /** System document picker for the web app's file inputs (Restore from backup).
+     *  A WebView shows no picker without a WebChromeClient wired to one. */
+    private val fileChooserLauncher =
+        registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+            fileChooserCallback?.onReceiveValue(if (uri != null) arrayOf(uri) else null)
+            fileChooserCallback = null
+        }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -102,6 +121,25 @@ class MainActivity : ComponentActivity() {
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         }
         webViewClient = WebViewClient()
+        // Without a WebChromeClient the web app's <input type=file> (Restore from
+        // backup) opens nothing — route it to the system document picker.
+        webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(
+                view: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                params: FileChooserParams?,
+            ): Boolean {
+                fileChooserCallback?.onReceiveValue(null) // cancel any earlier request
+                fileChooserCallback = filePathCallback
+                return try {
+                    fileChooserLauncher.launch("*/*")
+                    true
+                } catch (e: Exception) {
+                    fileChooserCallback = null
+                    false
+                }
+            }
+        }
         addJavascriptInterface(NativeBridge(), "StopTrackNative")
     }
 
@@ -120,6 +158,34 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    /**
+     * Write [content] to the device's Downloads. API 29+ uses MediaStore (no
+     * permission, lands in the shared Downloads folder); older devices fall back
+     * to the app's external Downloads dir. Returns a human-readable location, or
+     * null on failure.
+     */
+    private fun writeToDownloads(filename: String, mimeType: String, content: String): String? {
+        val bytes = content.toByteArray(Charsets.UTF_8)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, filename)
+                put(MediaStore.Downloads.MIME_TYPE, mimeType)
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val resolver = contentResolver
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
+            resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: return null
+            values.clear()
+            values.put(MediaStore.Downloads.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+            return "Downloads/$filename"
+        }
+        val dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: filesDir
+        val file = java.io.File(dir, filename)
+        file.outputStream().use { it.write(bytes) }
+        return file.absolutePath
     }
 
     /** Fire a command to the always-on service (which owns the timer). */
@@ -145,6 +211,23 @@ class MainActivity : ComponentActivity() {
         /** Loopback needs no token. */
         @JavascriptInterface
         fun token(): String = ""
+
+        /** Save a file (backup / CSV / JSON export) to the Downloads folder. A blob
+         *  download from the WebView is silently dropped, so the web app hands the
+         *  bytes here instead. */
+        @JavascriptInterface
+        fun saveFile(filename: String, mimeType: String?, content: String) {
+            val loc = runCatching {
+                writeToDownloads(filename, mimeType?.ifBlank { null } ?: "application/octet-stream", content)
+            }.getOrNull()
+            runOnUiThread {
+                Toast.makeText(
+                    this@MainActivity,
+                    if (loc != null) "Saved: $loc" else "Couldn't save $filename",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+        }
 
         /** Push the current native timer/pending state to the just-registered shell. */
         @JavascriptInterface
