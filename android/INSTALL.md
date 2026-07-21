@@ -136,6 +136,28 @@ doesn't depend on the Bluetooth phone link:
 
 ---
 
+## Updating without losing your data
+
+Your machines, shifts, reasons and logged stops live **on the device**. Two things
+can wipe them on an update — here's how to keep everything:
+
+1. **Always back up first.** In the app: **Supervisor → Settings → Backup &
+   Restore → Download backup**. You get one `stoptrack-backup-*.json` file. After
+   updating, open **Restore from backup** and pick that file — machines, shifts,
+   rates and every stop come back (it merges, keeping the newest of each). A fresh
+   install also shows a **"Restore your data"** banner for one-tap recovery.
+2. **Make APK updates keep data automatically.** Android only preserves an app's
+   data across an update when every build is signed with the **same key**. Set up
+   the signing secret once (see [`SIGNING.md`](SIGNING.md)); after that, new APKs
+   install *over* the old one and keep everything. The one-time move to v0.4
+   changed the key, so uninstall/reinstall **once** for v0.4 — use a backup (step
+   1) to carry your data across that single reinstall.
+3. **Or run the server.** If you use the StopTrack server
+   ([`server/SETUP.md`](../server/SETUP.md)), config + stops live off-device, so a
+   fresh download just re-syncs — nothing to back up.
+
+---
+
 ## If something's not working
 
 - **Watch says "Phone offline"** — make sure the watch and phone are paired in the

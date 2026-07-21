@@ -587,6 +587,61 @@ const api = {
     try { await STORE.delete("inprogress:current", false); } catch { /* ignore */ }
   },
 
+  // --- full backup / restore (carry data across app versions) ---------------
+  // A downloaded index.html is a NEW browser origin (empty localStorage), and a
+  // re-signed APK reinstalls fresh — either way the old data is stranded. These
+  // export/import one portable JSON of EVERYTHING (shared config + personal prefs
+  // + all stops/production/sessions) so the supervisor can carry it over. Import
+  // merges last-write-wins, so restoring onto a populated app never clobbers
+  // newer records.
+  async exportAll() {
+    const [config, prefs, stops, production, sessions] = await Promise.all([
+      this.loadConfig(), this.loadPrefs(), this.loadStops(), this.loadProduction(), this.loadSessions(),
+    ]);
+    const strip = (arr) => (arr || []).map(({ key, ...rest }) => rest);
+    return {
+      app: "stoptrack", schema: 1, exportedAt: Date.now(),
+      config: config || null,
+      prefs: prefs || null,
+      stops: strip(stops.stops),
+      production: strip(production.records),
+      sessions: strip(sessions.records),
+    };
+  },
+  async importAll(data) {
+    if (!data || data.app !== "stoptrack") throw new Error("Not a StopTrack backup file.");
+    const counts = { stops: 0, production: 0, sessions: 0, configApplied: false };
+    // Config — last-write-wins on updatedAt.
+    if (data.config) {
+      const cur = await this.loadConfig();
+      if (!cur || (Number(data.config.updatedAt) || 0) >= (Number(cur.updatedAt) || 0)) {
+        await this.saveConfig(data.config);
+        counts.configApplied = true;
+      }
+    }
+    // Prefs — shallow-merge so restore brings back the shift cutoff / chosen
+    // shift / operator without wiping this device's dark-mode etc.
+    if (data.prefs) {
+      const cur = (await this.loadPrefs()) || {};
+      await this.savePrefs({ ...cur, ...data.prefs });
+    }
+    // Records — upsert by id, newest last-write stamp wins.
+    const mergeInto = async (incoming, existing, saver) => {
+      const local = new Map((existing || []).map((r) => [r.id, r]));
+      let n = 0;
+      for (const r of (incoming || [])) {
+        if (!r || !r.id) continue;
+        const cur = local.get(r.id);
+        if (!cur || stampOf(r) >= stampOf(cur)) { await saver(r); n++; }
+      }
+      return n;
+    };
+    counts.stops = await mergeInto(data.stops, (await this.loadStops()).stops, (r) => this.saveStop(r));
+    counts.production = await mergeInto(data.production, (await this.loadProduction()).records, (r) => this.saveProduction(r));
+    counts.sessions = await mergeInto(data.sessions, (await this.loadSessions()).records, (r) => this.saveSession(r));
+    return counts;
+  },
+
   // --- sync: config (device-local, NOT shared — bootstrap info per device) ---
   async loadSyncConfig() {
     try { const r = await STORE.get("config:sync", false); return r ? JSON.parse(r.value) : null; }
@@ -1015,6 +1070,10 @@ export default function App() {
   const [sessions, setSessions] = useState([]);
   // shift handover report dialog
   const [handoverOpen, setHandoverOpen] = useState(false);
+  // backup/restore: recovery banner on an empty install + a status message
+  const [needsRestore, setNeedsRestore] = useState(false);
+  const [restoreMsg, setRestoreMsg] = useState("");
+  const restoreInputRef = useRef(null);
 
   const t = useTheme(dark);
 
@@ -1148,6 +1207,10 @@ export default function App() {
       }
       const result = await api.loadStops();
       setStops(result.stops);
+      // Fresh/empty install (a newly downloaded file or re-signed APK starts
+      // blank): offer to restore a backup rather than silently showing empty
+      // settings. Only when there's truly nothing saved yet.
+      if (!cfg && result.stops.length === 0) setNeedsRestore(true);
       const prod = await api.loadProduction();
       setProduction(prod.records);
 
@@ -1311,6 +1374,35 @@ export default function App() {
   const updateRates = (next) => { setRates(next); persistConfig({ rates: next }); };
   const updateHandoverEmails = (next) => { setHandoverEmails(next); persistConfig({ handoverEmails: next }); };
   const toggleDark = () => { const n = !dark; setDark(n); persistPrefs({ dark: n }); };
+
+  // ---- backup / restore ----------------------------------------------------
+  // Download one portable JSON of everything, so it can be re-imported into a
+  // freshly downloaded app (new file = empty storage) or a reinstalled APK.
+  const downloadBackup = async () => {
+    try {
+      const data = await api.exportAll();
+      const d = new Date();
+      const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      downloadFile(JSON.stringify(data), `stoptrack-backup-${stamp}.json`, "application/json");
+      setRestoreMsg("");
+    } catch (e) {
+      setRestoreMsg("Couldn't create the backup. Try again.");
+    }
+  };
+  const pickRestore = () => { setRestoreMsg(""); restoreInputRef.current && restoreInputRef.current.click(); };
+  const handleRestoreFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ""; // allow re-picking the same file
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      await api.importAll(data);
+      // Reload so every view re-reads the restored data from storage.
+      if (typeof window !== "undefined" && window.location && window.location.reload) window.location.reload();
+    } catch (err) {
+      setRestoreMsg((err && err.message) || "Couldn't read that backup file.");
+    }
+  };
 
   // Set / change / clear the supervisor PIN. `pin` = null clears the gate.
   // Returns false if the current PIN is required but doesn't match.
@@ -1619,6 +1711,25 @@ export default function App() {
         </div>
       </header>
 
+      {/* Hidden picker used by both the recovery banner and Supervisor settings. */}
+      <input ref={restoreInputRef} type="file" accept="application/json,.json" className="hidden" onChange={handleRestoreFile} />
+
+      {/* Recovery banner on an empty install — turns a silent wipe into one tap. */}
+      {needsRestore && (
+        <div className="bg-amber-500/15 border-b border-amber-500/40 px-4 py-2.5">
+          <div className="max-w-3xl mx-auto flex items-center justify-between gap-3 flex-wrap">
+            <span className="text-sm">
+              <b>Fresh install?</b> Restore your machines, shifts &amp; stops from a backup file.
+            </span>
+            <div className="flex items-center gap-2">
+              <button onClick={pickRestore} className="bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-1.5 rounded-lg">Restore backup</button>
+              <button onClick={() => setNeedsRestore(false)} className={`text-sm ${t.sub} px-2 py-1.5`}>Not now</button>
+            </div>
+          </div>
+          {restoreMsg && <p className="max-w-3xl mx-auto text-xs text-red-500 mt-1">{restoreMsg}</p>}
+        </div>
+      )}
+
       <main className="max-w-3xl mx-auto p-4 pb-24">
         {view === "operator" ? (
           <OperatorView
@@ -1649,6 +1760,7 @@ export default function App() {
             syncCfg={syncCfg} updateSyncConfig={updateSyncConfig} syncStatus={sync.status} onSyncNow={sync.flush}
             rates={rates} updateRates={updateRates} production={production} sessions={sessions}
             handoverEmails={handoverEmails} updateHandoverEmails={updateHandoverEmails}
+            onDownloadBackup={downloadBackup} onRestore={pickRestore} restoreMsg={restoreMsg}
           />
         )}
       </main>
@@ -2092,7 +2204,7 @@ function ManualStopModal({ t, dark, machine, machines, reasons, quickStops, last
 /* ============================================================================
    SUPERVISOR VIEW
    ========================================================================== */
-function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quickStops, shifts, updateMachines, updateReasons, updateQuickStops, updateShifts, discardStop, deleteStop, hasPin, updatePin, syncCfg, updateSyncConfig, syncStatus, onSyncNow, rates, updateRates, production, sessions, handoverEmails, updateHandoverEmails }) {
+function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quickStops, shifts, updateMachines, updateReasons, updateQuickStops, updateShifts, discardStop, deleteStop, hasPin, updatePin, syncCfg, updateSyncConfig, syncStatus, onSyncNow, rates, updateRates, production, sessions, handoverEmails, updateHandoverEmails, onDownloadBackup, onRestore, restoreMsg }) {
   // Uptime/OEE assume a shift length; with several shifts the supervisor picks
   // which one frames the analytics (defaults to the first).
   const [analyticsShiftId, setAnalyticsShiftId] = useState(shifts?.[0]?.id);
@@ -2444,6 +2556,21 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
           <HandoverEmailsManager t={t} emails={handoverEmails} onChange={updateHandoverEmails} />
           <PinManager t={t} hasPin={hasPin} updatePin={updatePin} />
           <ServerSyncManager t={t} syncCfg={syncCfg} updateSyncConfig={updateSyncConfig} syncStatus={syncStatus} onSyncNow={onSyncNow} />
+
+          <div className={`${t.card} rounded-xl p-4`}>
+            <h3 className="font-bold mb-1 flex items-center gap-2"><Archive size={16} /> Backup &amp; Restore</h3>
+            <p className={`text-xs ${t.sub} mb-3`}>
+              Carry your data to a new version. <b>Download a backup before you update the app</b>, then
+              Restore it afterwards. Brings back machines, reasons, shifts, rates &amp; every logged stop.
+              Restore merges (keeps the newest of each record), so it's safe to run any time.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <button onClick={onDownloadBackup} className={`flex items-center gap-1.5 text-sm font-semibold ${t.accentBtn} px-3 py-2 rounded-lg`}><Download size={15} /> Download backup</button>
+              <button onClick={onRestore} className={`flex items-center gap-1.5 text-sm font-semibold ${t.chip} px-3 py-2 rounded-lg active:scale-95`}><RotateCcw size={15} /> Restore from backup</button>
+            </div>
+            {restoreMsg && <p className="text-xs text-red-500 mt-2">{restoreMsg}</p>}
+          </div>
+
           <p className={`text-center text-xs ${t.sub}`}>Machines, reasons &amp; quick stops sync to all operators in real time.</p>
         </div>
       )}
