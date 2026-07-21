@@ -144,6 +144,12 @@ the supervisor view. This was a real bug; the fix was `loggedAt`. Filter uses
   days) and **Delete permanently** (hard delete, confirmation required).
 - **Export CSV / JSON** — respects current filters, includes discarded rows and a
   timed/manual "Entry" column.
+- **Backup & Restore** (Settings) — `api.exportAll()` writes ONE portable JSON of
+  everything (config + prefs + all stops/production/sessions); `api.importAll()`
+  merges it back last-write-wins. This is how data carries across app versions,
+  since a freshly-downloaded `index.html` is a new storage origin (empty) and a
+  re-signed APK reinstalls blank. A recovery banner offers Restore on an empty
+  install.
 
 **Global**
 - Dark mode toggle (persisted).

@@ -694,6 +694,57 @@ const api = {
         }
         catch (_a) { }
     },
+    async exportAll() {
+        const [config, prefs, stops, production, sessions] = await Promise.all([
+            this.loadConfig(), this.loadPrefs(), this.loadStops(), this.loadProduction(), this.loadSessions(),
+        ]);
+        const strip = (arr) => (arr || []).map((_a) => {
+            var { key } = _a, rest = __rest(_a, ["key"]);
+            return rest;
+        });
+        return {
+            app: "stoptrack", schema: 1, exportedAt: Date.now(),
+            config: config || null,
+            prefs: prefs || null,
+            stops: strip(stops.stops),
+            production: strip(production.records),
+            sessions: strip(sessions.records),
+        };
+    },
+    async importAll(data) {
+        if (!data || data.app !== "stoptrack")
+            throw new Error("Not a StopTrack backup file.");
+        const counts = { stops: 0, production: 0, sessions: 0, configApplied: false };
+        if (data.config) {
+            const cur = await this.loadConfig();
+            if (!cur || (Number(data.config.updatedAt) || 0) >= (Number(cur.updatedAt) || 0)) {
+                await this.saveConfig(data.config);
+                counts.configApplied = true;
+            }
+        }
+        if (data.prefs) {
+            const cur = (await this.loadPrefs()) || {};
+            await this.savePrefs(Object.assign(Object.assign({}, cur), data.prefs));
+        }
+        const mergeInto = async (incoming, existing, saver) => {
+            const local = new Map((existing || []).map((r) => [r.id, r]));
+            let n = 0;
+            for (const r of (incoming || [])) {
+                if (!r || !r.id)
+                    continue;
+                const cur = local.get(r.id);
+                if (!cur || stampOf(r) >= stampOf(cur)) {
+                    await saver(r);
+                    n++;
+                }
+            }
+            return n;
+        };
+        counts.stops = await mergeInto(data.stops, (await this.loadStops()).stops, (r) => this.saveStop(r));
+        counts.production = await mergeInto(data.production, (await this.loadProduction()).records, (r) => this.saveProduction(r));
+        counts.sessions = await mergeInto(data.sessions, (await this.loadSessions()).records, (r) => this.saveSession(r));
+        return counts;
+    },
     async loadSyncConfig() {
         try {
             const r = await STORE.get("config:sync", false);
@@ -1087,6 +1138,9 @@ function App() {
     const [production, setProduction] = useState([]);
     const [sessions, setSessions] = useState([]);
     const [handoverOpen, setHandoverOpen] = useState(false);
+    const [needsRestore, setNeedsRestore] = useState(false);
+    const [restoreMsg, setRestoreMsg] = useState("");
+    const restoreInputRef = useRef(null);
     const t = useTheme(dark);
     const activeShift = useMemo(() => shifts.find((s) => s.id === shiftId) || shifts[0] || { id: "shift-1", name: "Shift", start: "06:00", end: "14:00", goal: 0 }, [shifts, shiftId]);
     const stopsRef = useRef(stops);
@@ -1215,6 +1269,8 @@ function App() {
             }
             const result = await api.loadStops();
             setStops(result.stops);
+            if (!cfg && result.stops.length === 0)
+                setNeedsRestore(true);
             const prod = await api.loadProduction();
             setProduction(prod.records);
             const sess = await api.loadSessions();
@@ -1358,6 +1414,34 @@ function App() {
     const updateRates = (next) => { setRates(next); persistConfig({ rates: next }); };
     const updateHandoverEmails = (next) => { setHandoverEmails(next); persistConfig({ handoverEmails: next }); };
     const toggleDark = () => { const n = !dark; setDark(n); persistPrefs({ dark: n }); };
+    const downloadBackup = async () => {
+        try {
+            const data = await api.exportAll();
+            const d = new Date();
+            const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+            downloadFile(JSON.stringify(data), `stoptrack-backup-${stamp}.json`, "application/json");
+            setRestoreMsg("");
+        }
+        catch (e) {
+            setRestoreMsg("Couldn't create the backup. Try again.");
+        }
+    };
+    const pickRestore = () => { setRestoreMsg(""); restoreInputRef.current && restoreInputRef.current.click(); };
+    const handleRestoreFile = async (e) => {
+        const file = e.target.files && e.target.files[0];
+        e.target.value = "";
+        if (!file)
+            return;
+        try {
+            const data = JSON.parse(await file.text());
+            await api.importAll(data);
+            if (typeof window !== "undefined" && window.location && window.location.reload)
+                window.location.reload();
+        }
+        catch (err) {
+            setRestoreMsg((err && err.message) || "Couldn't read that backup file.");
+        }
+    };
     const updatePin = useCallback(async (pin, currentPin) => {
         if (supervisorPinHash) {
             const curHash = await sha256Hex(currentPin || "");
@@ -1627,7 +1711,17 @@ function App() {
                     React.createElement("button", { onClick: () => setView("supervisor"), className: `px-3 py-1.5 rounded-md flex items-center gap-1 transition ${view === "supervisor" ? "bg-emerald-500 text-white font-semibold" : "text-slate-300"}` },
                         supervisorPinHash && React.createElement(Lock, { size: 12 }),
                         " Supervisor")))),
-        React.createElement("main", { className: "max-w-3xl mx-auto p-4 pb-24" }, view === "operator" ? (React.createElement(OperatorView, { t: t, operator: operator, setOperator: setOperator, machine: machine, setMachine: switchMachine, timer: timer, onStop: handleStop, pendingStop: pendingStop, reason: reason, setReason: setReason, notes: notes, setNotes: setNotes, onSave: handleSave, onDiscardPending: handleDiscardPending, saving: saving, saveError: saveError, myStops: myStops, machines: machines, reasons: reasons, quickStops: quickStops, applyQuickStop: applyQuickStop, lastReason: lastReason, shift: activeShift, shifts: shifts, shiftId: shiftId, onSelectShift: selectShift, clearedBefore: clearedBefore, onNewShift: () => setNewShiftOpen(true), showAll: showAll, onToggleShowAll: toggleShowAll, setupLocked: setupLocked, onLockSetup: lockSetup, onUnlockSetup: unlockSetup, onOpenManual: () => { setSaveError(""); setManualOpen(true); }, syncStatus: sync.status, syncOn: syncOn, rates: rates, myProduction: myProduction, onSaveProduction: handleSaveProduction, myShift: myShift, goalStatus: goalStatus, onOpenHandover: () => setHandoverOpen(true) })) : (supervisorPinHash && !supervisorUnlocked) ? (React.createElement(PinGate, { t: t, pinHash: supervisorPinHash, onUnlock: () => setSupervisorUnlocked(true) })) : (React.createElement(SupervisorView, { t: t, stops: stops, loading: loading, onRefresh: refreshStops, machines: machines, reasons: reasons, quickStops: quickStops, shifts: shifts, updateMachines: updateMachines, updateReasons: updateReasons, updateQuickStops: updateQuickStops, updateShifts: updateShifts, discardStop: discardStop, deleteStop: deleteStop, hasPin: !!supervisorPinHash, updatePin: updatePin, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: sync.status, onSyncNow: sync.flush, rates: rates, updateRates: updateRates, production: production, sessions: sessions, handoverEmails: handoverEmails, updateHandoverEmails: updateHandoverEmails }))),
+        React.createElement("input", { ref: restoreInputRef, type: "file", accept: "application/json,.json", className: "hidden", onChange: handleRestoreFile }),
+        needsRestore && (React.createElement("div", { className: "bg-amber-500/15 border-b border-amber-500/40 px-4 py-2.5" },
+            React.createElement("div", { className: "max-w-3xl mx-auto flex items-center justify-between gap-3 flex-wrap" },
+                React.createElement("span", { className: "text-sm" },
+                    React.createElement("b", null, "Fresh install?"),
+                    " Restore your machines, shifts & stops from a backup file."),
+                React.createElement("div", { className: "flex items-center gap-2" },
+                    React.createElement("button", { onClick: pickRestore, className: "bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-1.5 rounded-lg" }, "Restore backup"),
+                    React.createElement("button", { onClick: () => setNeedsRestore(false), className: `text-sm ${t.sub} px-2 py-1.5` }, "Not now"))),
+            restoreMsg && React.createElement("p", { className: "max-w-3xl mx-auto text-xs text-red-500 mt-1" }, restoreMsg))),
+        React.createElement("main", { className: "max-w-3xl mx-auto p-4 pb-24" }, view === "operator" ? (React.createElement(OperatorView, { t: t, operator: operator, setOperator: setOperator, machine: machine, setMachine: switchMachine, timer: timer, onStop: handleStop, pendingStop: pendingStop, reason: reason, setReason: setReason, notes: notes, setNotes: setNotes, onSave: handleSave, onDiscardPending: handleDiscardPending, saving: saving, saveError: saveError, myStops: myStops, machines: machines, reasons: reasons, quickStops: quickStops, applyQuickStop: applyQuickStop, lastReason: lastReason, shift: activeShift, shifts: shifts, shiftId: shiftId, onSelectShift: selectShift, clearedBefore: clearedBefore, onNewShift: () => setNewShiftOpen(true), showAll: showAll, onToggleShowAll: toggleShowAll, setupLocked: setupLocked, onLockSetup: lockSetup, onUnlockSetup: unlockSetup, onOpenManual: () => { setSaveError(""); setManualOpen(true); }, syncStatus: sync.status, syncOn: syncOn, rates: rates, myProduction: myProduction, onSaveProduction: handleSaveProduction, myShift: myShift, goalStatus: goalStatus, onOpenHandover: () => setHandoverOpen(true) })) : (supervisorPinHash && !supervisorUnlocked) ? (React.createElement(PinGate, { t: t, pinHash: supervisorPinHash, onUnlock: () => setSupervisorUnlocked(true) })) : (React.createElement(SupervisorView, { t: t, stops: stops, loading: loading, onRefresh: refreshStops, machines: machines, reasons: reasons, quickStops: quickStops, shifts: shifts, updateMachines: updateMachines, updateReasons: updateReasons, updateQuickStops: updateQuickStops, updateShifts: updateShifts, discardStop: discardStop, deleteStop: deleteStop, hasPin: !!supervisorPinHash, updatePin: updatePin, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: sync.status, onSyncNow: sync.flush, rates: rates, updateRates: updateRates, production: production, sessions: sessions, handoverEmails: handoverEmails, updateHandoverEmails: updateHandoverEmails, onDownloadBackup: downloadBackup, onRestore: pickRestore, restoreMsg: restoreMsg }))),
         recovered && (React.createElement("div", { className: "fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30" },
             React.createElement("div", { className: `${dark ? "bg-slate-900" : "bg-white"} rounded-xl shadow-xl p-5 max-w-sm w-full space-y-3` },
                 React.createElement("div", { className: "flex items-center gap-2 font-bold" },
@@ -1932,7 +2026,7 @@ function ManualStopModal({ t, dark, machine, machines, reasons, quickStops, last
                     " Save stop"),
                 React.createElement("button", { onClick: onClose, disabled: saving, className: `px-4 ${t.sub} hover:text-red-500 font-semibold` }, "Cancel")))));
 }
-function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quickStops, shifts, updateMachines, updateReasons, updateQuickStops, updateShifts, discardStop, deleteStop, hasPin, updatePin, syncCfg, updateSyncConfig, syncStatus, onSyncNow, rates, updateRates, production, sessions, handoverEmails, updateHandoverEmails }) {
+function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quickStops, shifts, updateMachines, updateReasons, updateQuickStops, updateShifts, discardStop, deleteStop, hasPin, updatePin, syncCfg, updateSyncConfig, syncStatus, onSyncNow, rates, updateRates, production, sessions, handoverEmails, updateHandoverEmails, onDownloadBackup, onRestore, restoreMsg }) {
     var _a;
     const [analyticsShiftId, setAnalyticsShiftId] = useState((_a = shifts === null || shifts === void 0 ? void 0 : shifts[0]) === null || _a === void 0 ? void 0 : _a.id);
     const shift = useMemo(() => (shifts === null || shifts === void 0 ? void 0 : shifts.find((s) => s.id === analyticsShiftId)) || (shifts === null || shifts === void 0 ? void 0 : shifts[0]) || { start: "06:00", end: "14:00" }, [shifts, analyticsShiftId]);
@@ -2293,6 +2387,22 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
             React.createElement(HandoverEmailsManager, { t: t, emails: handoverEmails, onChange: updateHandoverEmails }),
             React.createElement(PinManager, { t: t, hasPin: hasPin, updatePin: updatePin }),
             React.createElement(ServerSyncManager, { t: t, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: syncStatus, onSyncNow: onSyncNow }),
+            React.createElement("div", { className: `${t.card} rounded-xl p-4` },
+                React.createElement("h3", { className: "font-bold mb-1 flex items-center gap-2" },
+                    React.createElement(Archive, { size: 16 }),
+                    " Backup & Restore"),
+                React.createElement("p", { className: `text-xs ${t.sub} mb-3` },
+                    "Carry your data to a new version. ",
+                    React.createElement("b", null, "Download a backup before you update the app"),
+                    ", then Restore it afterwards. Brings back machines, reasons, shifts, rates & every logged stop. Restore merges (keeps the newest of each record), so it's safe to run any time."),
+                React.createElement("div", { className: "flex flex-wrap gap-2" },
+                    React.createElement("button", { onClick: onDownloadBackup, className: `flex items-center gap-1.5 text-sm font-semibold ${t.accentBtn} px-3 py-2 rounded-lg` },
+                        React.createElement(Download, { size: 15 }),
+                        " Download backup"),
+                    React.createElement("button", { onClick: onRestore, className: `flex items-center gap-1.5 text-sm font-semibold ${t.chip} px-3 py-2 rounded-lg active:scale-95` },
+                        React.createElement(RotateCcw, { size: 15 }),
+                        " Restore from backup")),
+                restoreMsg && React.createElement("p", { className: "text-xs text-red-500 mt-2" }, restoreMsg)),
             React.createElement("p", { className: `text-center text-xs ${t.sub}` }, "Machines, reasons & quick stops sync to all operators in real time."))),
         discardTarget && (React.createElement("div", { className: "fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-20", onClick: () => setDiscardTarget(null) },
             React.createElement("div", { className: `${t.card} rounded-xl p-5 max-w-sm w-full space-y-3`, onClick: (e) => e.stopPropagation() },

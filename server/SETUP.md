@@ -67,7 +67,10 @@ starts** → action **Start a program** → browse to your
 
 > **Where's the data?** In a **`data`** folder next to `server.js` — it holds
 > everything (your history + the auth token). Copy that folder somewhere safe
-> now and then and you can never lose your history.
+> now and then and you can never lose your history. Because the data lives on the
+> server, **updating or reinstalling the phone/watch app never loses anything** —
+> a fresh install just re-syncs from here. (Not using the server? Use the app's
+> **Supervisor → Settings → Backup & Restore** before updating instead.)
 
 > **Live logs:** the black window shows what's happening as it happens — e.g.
 > `saved 2 stop(s) from 192.168.1.30`, `settings updated by …`,
