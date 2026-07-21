@@ -11,6 +11,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
+import com.stoptrack.shared.FinishedStop
 import com.stoptrack.shared.StopTrackJson
 import com.stoptrack.shared.TimerState
 import kotlinx.coroutines.Dispatchers
@@ -41,7 +42,11 @@ class CompanionService : LifecycleService() {
 
     // --- quick-stop presence ---------------------------------------------------
     private val controller by lazy {
-        QuickStopController(store, prefs, lifecycleScope, onChanged = ::onTimerChanged)
+        QuickStopController(
+            store, prefs, lifecycleScope,
+            onChanged = ::onTimerChanged,
+            onPending = ::openApp,
+        )
     }
     private var overlay: OverlayController? = null
     private var tickJob: Job? = null
@@ -62,19 +67,23 @@ class CompanionService : LifecycleService() {
         super.onStartCommand(intent, flags, startId)
         // Notification-action taps arrive here as service intents.
         when (intent?.action) {
-            ACTION_START -> controller.start()
+            ACTION_START -> {
+                intent.getStringExtra(EXTRA_MACHINE)?.takeIf { it.isNotBlank() }
+                    ?.let { controller.machine = it }
+                controller.start()
+            }
             ACTION_PAUSE -> controller.pause()
             ACTION_RESUME -> controller.resume()
             ACTION_END -> controller.end()
+            // The operator picked a reason (in the app) for the pending stop, or
+            // dismissed it — record or drop it.
+            ACTION_DOCUMENT -> controller.documentPending(
+                intent.getStringExtra(EXTRA_REASON), intent.getStringExtra(EXTRA_NOTES),
+            )
+            ACTION_DISCARD -> controller.discardPending()
             // Re-check the overlay after the user grants "draw over other apps"
             // (granting doesn't change settings, so nothing else would re-run it).
             ACTION_REFRESH_OVERLAY -> lifecycleScope.launch { applyOverlay(prefs.snapshot()) }
-            // The web app reports when ITS timer is running so the native surfaces
-            // don't offer a second Start (which would double-count one stop).
-            ACTION_WEB_TIMER -> {
-                controller.webTimerActive = intent.getBooleanExtra(EXTRA_ACTIVE, false)
-                onTimerChanged()
-            }
         }
         return START_STICKY
     }
@@ -104,7 +113,7 @@ class CompanionService : LifecycleService() {
         controller.operator = s.operatorName
         if (controller.machine.isBlank()) controller.machine = s.lastMachine
 
-        // Resume a running stop after a service restart (once).
+        // Resume a running — or awaiting-a-reason — stop after a service restart (once).
         if (!restoredInProgress) {
             restoredInProgress = true
             if (s.inProgress.isNotBlank()) {
@@ -112,6 +121,12 @@ class CompanionService : LifecycleService() {
                     StopTrackJson.decodeFromString(TimerState.serializer(), s.inProgress)
                 }.getOrNull()
                 controller.restore(saved)
+            }
+            if (s.pendingStop.isNotBlank()) {
+                val saved = runCatching {
+                    StopTrackJson.decodeFromString(FinishedStop.serializer(), s.pendingStop)
+                }.getOrNull()
+                controller.restorePending(saved)
             }
         }
 
@@ -170,6 +185,17 @@ class CompanionService : LifecycleService() {
         lifecycleScope.launch { bridge.publishConfig(store.watchConfigJson()) }
     }
 
+    /** Bring the app forward so its reason picker can document a just-ended stop
+     *  (End can be tapped from the notification/bubble while the app is closed). */
+    private fun openApp() {
+        runCatching {
+            startActivity(
+                Intent(this, MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
+            )
+        }
+    }
+
     private fun startInForeground(text: String) {
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0
@@ -195,7 +221,7 @@ class CompanionService : LifecycleService() {
         val st = controller.state
         val now = System.currentTimeMillis()
         return when {
-            controller.webTimerActive -> "A stop is running in the app"
+            controller.pending != null -> "Stop ended — tap to add a reason"
             st.paused -> "Paused ${fmtElapsed(st.elapsed(now))} · ${st.machine}"
             st.running -> "Recording ${fmtElapsed(st.elapsed(now))} · ${st.machine}"
             else -> "Idle · tap Start to log a stop"
@@ -219,20 +245,20 @@ class CompanionService : LifecycleService() {
             .setContentIntent(openApp)
             .setPriority(NotificationCompat.PRIORITY_LOW)
 
-        // Timer actions — only when the app isn't itself running a stop.
-        if (!controller.webTimerActive) {
-            val st = controller.state
-            when {
-                st.running -> {
-                    b.addAction(0, "Pause", actionPI(ACTION_PAUSE, 12))
-                    b.addAction(0, "End", actionPI(ACTION_END, 13))
-                }
-                st.paused -> {
-                    b.addAction(0, "Resume", actionPI(ACTION_RESUME, 14))
-                    b.addAction(0, "End", actionPI(ACTION_END, 13))
-                }
-                else -> b.addAction(0, "Start stop", actionPI(ACTION_START, 11))
+        // Timer actions. While a stop awaits a reason, offer none — tapping the
+        // notification opens the app's reason picker.
+        val st = controller.state
+        when {
+            controller.pending != null -> { /* tap opens the app to add a reason */ }
+            st.running -> {
+                b.addAction(0, "Pause", actionPI(ACTION_PAUSE, 12))
+                b.addAction(0, "End", actionPI(ACTION_END, 13))
             }
+            st.paused -> {
+                b.addAction(0, "Resume", actionPI(ACTION_RESUME, 14))
+                b.addAction(0, "End", actionPI(ACTION_END, 13))
+            }
+            else -> b.addAction(0, "Start stop", actionPI(ACTION_START, 11))
         }
         return b.build()
     }
@@ -277,9 +303,12 @@ class CompanionService : LifecycleService() {
         const val ACTION_PAUSE = "com.stoptrack.mobile.PAUSE"
         const val ACTION_RESUME = "com.stoptrack.mobile.RESUME"
         const val ACTION_END = "com.stoptrack.mobile.END"
+        const val ACTION_DOCUMENT = "com.stoptrack.mobile.DOCUMENT"
+        const val ACTION_DISCARD = "com.stoptrack.mobile.DISCARD"
         const val ACTION_REFRESH_OVERLAY = "com.stoptrack.mobile.REFRESH_OVERLAY"
-        const val ACTION_WEB_TIMER = "com.stoptrack.mobile.WEB_TIMER"
-        const val EXTRA_ACTIVE = "active"
+        const val EXTRA_MACHINE = "machine"
+        const val EXTRA_REASON = "reason"
+        const val EXTRA_NOTES = "notes"
 
         fun start(context: android.content.Context) {
             val intent = Intent(context, CompanionService::class.java)

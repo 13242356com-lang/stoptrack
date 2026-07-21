@@ -256,7 +256,14 @@ Full details in `android/README.md`. Key facts for future sessions:
   Wear listener, optional `RemoteForwarder`, and the **quick-stop presence** —
   `QuickStopController` + notification actions + `OverlayController` floating
   bubble, so a stop can be logged from the notification/bubble without opening the
-  app; needs `SYSTEM_ALERT_WINDOW` for the overlay).
+  app; needs `SYSTEM_ALERT_WINDOW` for the overlay). **`QuickStopController` is the
+  single source of truth for the phone's stop timer** — the notification, the
+  bubble, and the in-app WebView all drive/mirror this one timer (the WebView via
+  the two-way `MainActivity.NativeBridge`: JS→native start/pause/resume/end/
+  document/discard, native→JS `window.StopTrackShell.onState(...)`). **End never
+  auto-records a default reason** — it stashes a `pending` `FinishedStop` and opens
+  the app's reason picker (`documentStop`). A plain browser has no shell and keeps
+  its own local `useTimer`, unchanged.
 - **Build reality:** needs the Android SDK + Android Studio; **can't be built or
   runtime-tested in the cloud/CI session** (no SDK, no watch). Only `:shared`
   and the wear timer/format logic are compile-verified. Build in Android Studio;

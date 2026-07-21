@@ -33,6 +33,11 @@ class MainActivity : ComponentActivity() {
     @Volatile
     private var syncPort: Int = Settings.DEFAULT_PORT
 
+    /** Last native timer/pending state pushed to the WebView, kept so a freshly
+     *  loaded page can pull the current state on demand (`requestState`). */
+    @Volatile
+    private var lastStatePayload: String = """{"timer":null,"pending":null}"""
+
     private val notifPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* best-effort */ }
 
@@ -48,9 +53,18 @@ class MainActivity : ComponentActivity() {
         // the watch. Guarded so a service hiccup can't stop the UI opening.
         runCatching { CompanionService.start(this) }
 
-        // Keep the port the JS bridge reports in step with settings.
+        // Keep the port the JS bridge reports in step with settings, and mirror the
+        // native timer/pending state into the WebView on every change (the native
+        // quick-stop timer is the single source of truth; the web UI is a view).
         lifecycleScope.launch {
-            Prefs(applicationContext).settings.collect { syncPort = it.localPort }
+            Prefs(applicationContext).settings.collect { s ->
+                syncPort = s.localPort
+                val timer = s.inProgress.ifBlank { "null" }
+                val pending = s.pendingStop.ifBlank { "null" }
+                val payload = "{\"timer\":$timer,\"pending\":$pending}"
+                lastStatePayload = payload
+                pushState(payload)
+            }
         }
 
         val web = try {
@@ -97,7 +111,32 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    /** Exposed to the web app as `window.StopTrackNative`. */
+    /** Deliver native timer/pending state to the web app's shell hook. */
+    private fun pushState(payload: String) {
+        runOnUiThread {
+            runCatching {
+                webView?.evaluateJavascript(
+                    "window.StopTrackShell && window.StopTrackShell.onState($payload);", null,
+                )
+            }
+        }
+    }
+
+    /** Fire a command to the always-on service (which owns the timer). */
+    private fun fire(action: String, extras: (Intent) -> Unit = {}) {
+        runCatching {
+            startService(
+                Intent(this, CompanionService::class.java).setAction(action).also(extras),
+            )
+        }
+    }
+
+    /**
+     * Exposed to the web app as `window.StopTrackNative`. Two-way: the timer
+     * controls (start/pause/resume/end/document/discard) drive the native
+     * quick-stop timer, and [requestState] pulls the current state so the WebView
+     * mirrors it. The native timer stays the single source of truth.
+     */
     private inner class NativeBridge {
         /** Tells the web app where the built-in bridge's sync server is. */
         @JavascriptInterface
@@ -107,19 +146,32 @@ class MainActivity : ComponentActivity() {
         @JavascriptInterface
         fun token(): String = ""
 
-        /** The web app reports when its own stop-timer is running/paused, so the
-         *  native notification + floating bubble suppress their Start and can't
-         *  double-count the same stop. */
+        /** Push the current native timer/pending state to the just-registered shell. */
         @JavascriptInterface
-        fun reportTimerActive(active: Boolean) {
-            runCatching {
-                startService(
-                    Intent(this@MainActivity, CompanionService::class.java)
-                        .setAction(CompanionService.ACTION_WEB_TIMER)
-                        .putExtra(CompanionService.EXTRA_ACTIVE, active),
-                )
+        fun requestState() = pushState(lastStatePayload)
+
+        @JavascriptInterface
+        fun startStop(machine: String?) =
+            fire(CompanionService.ACTION_START) { it.putExtra(CompanionService.EXTRA_MACHINE, machine ?: "") }
+
+        @JavascriptInterface
+        fun pauseStop() = fire(CompanionService.ACTION_PAUSE)
+
+        @JavascriptInterface
+        fun resumeStop() = fire(CompanionService.ACTION_RESUME)
+
+        @JavascriptInterface
+        fun endStop() = fire(CompanionService.ACTION_END)
+
+        @JavascriptInterface
+        fun documentStop(reason: String?, notes: String?) =
+            fire(CompanionService.ACTION_DOCUMENT) {
+                it.putExtra(CompanionService.EXTRA_REASON, reason ?: "")
+                it.putExtra(CompanionService.EXTRA_NOTES, notes ?: "")
             }
-        }
+
+        @JavascriptInterface
+        fun discardStop() = fire(CompanionService.ACTION_DISCARD)
     }
 
     private companion object {

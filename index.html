@@ -918,6 +918,11 @@ function useTheme(dark) {
         : { app: "bg-slate-100 text-slate-800", card: "bg-white shadow-sm", sub: "text-slate-500", input: "bg-white border-slate-300 text-slate-800 placeholder-slate-400", chip: "bg-slate-100", rowHover: "hover:bg-slate-50", thead: "bg-slate-50 text-slate-500", border: "border-slate-100", muted: "bg-slate-100", accentBtn: "bg-slate-700 hover:bg-slate-800 text-white" }, [dark]);
 }
 const emptyTimer = { running: false, paused: false, startTs: null, accumulated: 0, segStart: null };
+function nativeElapsed(s, now) {
+    if (!s)
+        return 0;
+    return s.paused ? s.accumulated : s.running ? s.accumulated + (now - s.segStart) : s.accumulated;
+}
 function useTimer({ operator, machine }) {
     const [state, setState] = useState(emptyTimer);
     const [now, setNow] = useState(Date.now());
@@ -1133,15 +1138,48 @@ function App() {
     const [machine, setMachine] = useState(DEFAULT_MACHINES[0]);
     const [setupLocked, setSetupLocked] = useState(false);
     const timer = useTimer({ operator, machine });
+    const nativeApi = (typeof window !== "undefined") ? window.StopTrackNative : null;
+    const inShell = !!(nativeApi && typeof nativeApi.startStop === "function");
+    const [nativeTimer, setNativeTimer] = useState(null);
+    const [nativePending, setNativePending] = useState(null);
+    const [nowTick, setNowTick] = useState(Date.now());
     useEffect(() => {
-        const n = (typeof window !== "undefined") ? window.StopTrackNative : null;
-        if (n && typeof n.reportTimerActive === "function") {
-            try {
-                n.reportTimerActive(!!(timer.state.running || timer.state.paused));
-            }
-            catch (e) { }
+        if (!inShell)
+            return;
+        window.StopTrackShell = {
+            onState(s) {
+                var _a, _b;
+                try {
+                    const d = (typeof s === "string") ? JSON.parse(s) : s;
+                    const ts = d && d.timer;
+                    setNativeTimer(ts ? {
+                        running: !!ts.running, paused: !!ts.paused, startTs: (_a = ts.startTs) !== null && _a !== void 0 ? _a : null,
+                        accumulated: ts.accumulatedMs || 0, segStart: (_b = ts.segStartMs) !== null && _b !== void 0 ? _b : null, machine: ts.machine || "",
+                    } : emptyTimer);
+                    const p = d && d.pending;
+                    setNativePending(p ? { start: p.start, end: p.end, duration: p.durationMs, machine: p.machine } : null);
+                }
+                catch (e) { }
+            },
+        };
+        try {
+            if (typeof nativeApi.requestState === "function")
+                nativeApi.requestState();
         }
-    }, [timer.state.running, timer.state.paused]);
+        catch (e) { }
+        return () => { try {
+            delete window.StopTrackShell;
+        }
+        catch (e) {
+            window.StopTrackShell = undefined;
+        } };
+    }, [inShell]);
+    useEffect(() => {
+        if (!inShell || !nativeTimer || !nativeTimer.running || nativeTimer.paused)
+            return;
+        const iv = setInterval(() => setNowTick(Date.now()), 250);
+        return () => clearInterval(iv);
+    }, [inShell, nativeTimer && nativeTimer.running, nativeTimer && nativeTimer.paused]);
     const [pendingStop, setPendingStop] = useState(null);
     const [reason, setReason] = useState(DEFAULT_REASONS[0]);
     const [notes, setNotes] = useState("");
@@ -1414,6 +1452,14 @@ function App() {
         setMachine(machines[0]); }, [machines, machine]);
     useEffect(() => { if (reasons.length && !reasons.includes(reason))
         setReason(reasons[0]); }, [reasons, reason]);
+    const nativePendingActive = !!nativePending;
+    useEffect(() => {
+        if (inShell && nativePendingActive) {
+            setReason(lastReason && reasons.includes(lastReason) ? lastReason : reasons[0]);
+            setNotes("");
+            setSaveError("");
+        }
+    }, [inShell, nativePendingActive]);
     const persistConfig = useCallback((patch) => {
         const updatedAt = Date.now();
         const merged = Object.assign({ machines, reasons, quickStops, shifts, supervisorPinHash, rates, handoverEmails }, patch);
@@ -1475,6 +1521,13 @@ function App() {
         return true;
     }, [supervisorPinHash, persistConfig]);
     const handleStop = () => {
+        if (inShell) {
+            try {
+                nativeApi.endStop();
+            }
+            catch (e) { }
+            return;
+        }
         const finished = timer.stop();
         setPendingStop(finished);
         setReason(lastReason && reasons.includes(lastReason) ? lastReason : reasons[0]);
@@ -1482,6 +1535,21 @@ function App() {
         setSaveError("");
     };
     const handleSave = async () => {
+        if (inShell) {
+            if (!nativePending)
+                return;
+            setSaving(true);
+            setSaveError("");
+            try {
+                nativeApi.documentStop(reason, notes.trim());
+            }
+            catch (e) { }
+            setLastReason(reason);
+            persistPrefs({ lastReason: reason });
+            sync.flush();
+            setSaving(false);
+            return;
+        }
         if (!pendingStop)
             return;
         setSaving(true);
@@ -1509,7 +1577,18 @@ function App() {
         }
         setSaving(false);
     };
-    const handleDiscardPending = () => { setPendingStop(null); setSaveError(""); };
+    const handleDiscardPending = () => {
+        if (inShell) {
+            try {
+                nativeApi.discardStop();
+            }
+            catch (e) { }
+            setSaveError("");
+            return;
+        }
+        setPendingStop(null);
+        setSaveError("");
+    };
     const applyQuickStop = (q) => {
         if (reasons.includes(q.reason))
             setReason(q.reason);
@@ -1719,6 +1798,23 @@ function App() {
             ratePerHour: rates === null || rates === void 0 ? void 0 : rates[machine], shiftEndMs: shiftEndAt(activeShift), now: Date.now(),
         });
     }, [myShift, activeShift, rates, machine, slowTick]);
+    const effectivePending = inShell ? nativePending : pendingStop;
+    const effectiveTimer = inShell ? {
+        state: nativeTimer || emptyTimer,
+        elapsed: nativeElapsed(nativeTimer, nowTick),
+        start: () => { try {
+            nativeApi.startStop(machine);
+        }
+        catch (e) { } },
+        pause: () => { try {
+            nativeApi.pauseStop();
+        }
+        catch (e) { } },
+        resume: () => { try {
+            nativeApi.resumeStop();
+        }
+        catch (e) { } },
+    } : timer;
     return (React.createElement("div", { className: `min-h-screen ${t.app} transition-colors` },
         React.createElement("header", { className: "bg-slate-900 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-10" },
             React.createElement("div", { className: "flex items-center gap-2" },
@@ -1744,7 +1840,7 @@ function App() {
                     React.createElement("button", { onClick: pickRestore, className: "bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-1.5 rounded-lg" }, "Restore backup"),
                     React.createElement("button", { onClick: () => setNeedsRestore(false), className: `text-sm ${t.sub} px-2 py-1.5` }, "Not now"))),
             restoreMsg && React.createElement("p", { className: "max-w-3xl mx-auto text-xs text-red-500 mt-1" }, restoreMsg))),
-        React.createElement("main", { className: "max-w-3xl mx-auto p-4 pb-24" }, view === "operator" ? (React.createElement(OperatorView, { t: t, operator: operator, setOperator: setOperator, machine: machine, setMachine: switchMachine, timer: timer, onStop: handleStop, pendingStop: pendingStop, reason: reason, setReason: setReason, notes: notes, setNotes: setNotes, onSave: handleSave, onDiscardPending: handleDiscardPending, saving: saving, saveError: saveError, myStops: myStops, machines: machines, reasons: reasons, quickStops: quickStops, applyQuickStop: applyQuickStop, lastReason: lastReason, shift: activeShift, shifts: shifts, shiftId: shiftId, onSelectShift: selectShift, clearedBefore: clearedBefore, onNewShift: () => setNewShiftOpen(true), showAll: showAll, onToggleShowAll: toggleShowAll, setupLocked: setupLocked, onLockSetup: lockSetup, onUnlockSetup: unlockSetup, onOpenManual: () => { setSaveError(""); setManualOpen(true); }, syncStatus: sync.status, syncOn: syncOn, rates: rates, myProduction: myProduction, onSaveProduction: handleSaveProduction, myShift: myShift, goalStatus: goalStatus, onOpenHandover: () => setHandoverOpen(true) })) : (supervisorPinHash && !supervisorUnlocked) ? (React.createElement(PinGate, { t: t, pinHash: supervisorPinHash, onUnlock: () => setSupervisorUnlocked(true) })) : (React.createElement(SupervisorView, { t: t, stops: stops, loading: loading, onRefresh: refreshStops, machines: machines, reasons: reasons, quickStops: quickStops, shifts: shifts, updateMachines: updateMachines, updateReasons: updateReasons, updateQuickStops: updateQuickStops, updateShifts: updateShifts, discardStop: discardStop, deleteStop: deleteStop, hasPin: !!supervisorPinHash, updatePin: updatePin, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: sync.status, onSyncNow: sync.flush, rates: rates, updateRates: updateRates, production: production, sessions: sessions, handoverEmails: handoverEmails, updateHandoverEmails: updateHandoverEmails, onDownloadBackup: downloadBackup, onRestore: pickRestore, restoreMsg: restoreMsg }))),
+        React.createElement("main", { className: "max-w-3xl mx-auto p-4 pb-24" }, view === "operator" ? (React.createElement(OperatorView, { t: t, operator: operator, setOperator: setOperator, machine: machine, setMachine: switchMachine, timer: effectiveTimer, onStop: handleStop, pendingStop: effectivePending, reason: reason, setReason: setReason, notes: notes, setNotes: setNotes, onSave: handleSave, onDiscardPending: handleDiscardPending, saving: saving, saveError: saveError, myStops: myStops, machines: machines, reasons: reasons, quickStops: quickStops, applyQuickStop: applyQuickStop, lastReason: lastReason, shift: activeShift, shifts: shifts, shiftId: shiftId, onSelectShift: selectShift, clearedBefore: clearedBefore, onNewShift: () => setNewShiftOpen(true), showAll: showAll, onToggleShowAll: toggleShowAll, setupLocked: setupLocked, onLockSetup: lockSetup, onUnlockSetup: unlockSetup, onOpenManual: () => { setSaveError(""); setManualOpen(true); }, syncStatus: sync.status, syncOn: syncOn, rates: rates, myProduction: myProduction, onSaveProduction: handleSaveProduction, myShift: myShift, goalStatus: goalStatus, onOpenHandover: () => setHandoverOpen(true) })) : (supervisorPinHash && !supervisorUnlocked) ? (React.createElement(PinGate, { t: t, pinHash: supervisorPinHash, onUnlock: () => setSupervisorUnlocked(true) })) : (React.createElement(SupervisorView, { t: t, stops: stops, loading: loading, onRefresh: refreshStops, machines: machines, reasons: reasons, quickStops: quickStops, shifts: shifts, updateMachines: updateMachines, updateReasons: updateReasons, updateQuickStops: updateQuickStops, updateShifts: updateShifts, discardStop: discardStop, deleteStop: deleteStop, hasPin: !!supervisorPinHash, updatePin: updatePin, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: sync.status, onSyncNow: sync.flush, rates: rates, updateRates: updateRates, production: production, sessions: sessions, handoverEmails: handoverEmails, updateHandoverEmails: updateHandoverEmails, onDownloadBackup: downloadBackup, onRestore: pickRestore, restoreMsg: restoreMsg }))),
         recovered && (React.createElement("div", { className: "fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30" },
             React.createElement("div", { className: `${dark ? "bg-slate-900" : "bg-white"} rounded-xl shadow-xl p-5 max-w-sm w-full space-y-3` },
                 React.createElement("div", { className: "flex items-center gap-2 font-bold" },

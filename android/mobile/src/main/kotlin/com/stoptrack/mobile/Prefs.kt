@@ -32,6 +32,10 @@ data class Settings(
     /** Serialized in-progress [com.stoptrack.shared.TimerState]; "" = none. Lets a
      *  running quick-stop survive a foreground-service restart. */
     val inProgress: String = "",
+    /** Serialized [com.stoptrack.shared.FinishedStop] awaiting a reason; "" = none.
+     *  Set when a quick-stop is ended from the notification/bubble so the app can
+     *  prompt for a reason instead of recording a default one. */
+    val pendingStop: String = "",
 ) {
     companion object {
         const val DEFAULT_PORT = 4000
@@ -59,6 +63,7 @@ class Prefs(context: Context) {
         val OVERLAY_X = intPreferencesKey("overlay_x")
         val OVERLAY_Y = intPreferencesKey("overlay_y")
         val IN_PROGRESS = stringPreferencesKey("in_progress")
+        val PENDING_STOP = stringPreferencesKey("pending_stop")
         val PUSH_CURSOR = longPreferencesKey("cursor_push")
         fun pullCursor(c: Collection) = longPreferencesKey("cursor_pull_${c.name.lowercase()}")
     }
@@ -76,6 +81,7 @@ class Prefs(context: Context) {
             overlayX = p[Keys.OVERLAY_X] ?: 0,
             overlayY = p[Keys.OVERLAY_Y] ?: 200,
             inProgress = p[Keys.IN_PROGRESS] ?: "",
+            pendingStop = p[Keys.PENDING_STOP] ?: "",
         )
     }
 
@@ -93,6 +99,7 @@ class Prefs(context: Context) {
         overlayX: Int? = null,
         overlayY: Int? = null,
         inProgress: String? = null,
+        pendingStop: String? = null,
     ) {
         store.edit { p ->
             localPort?.let { p[Keys.PORT] = it }
@@ -106,6 +113,7 @@ class Prefs(context: Context) {
             overlayX?.let { p[Keys.OVERLAY_X] = it }
             overlayY?.let { p[Keys.OVERLAY_Y] = it }
             inProgress?.let { p[Keys.IN_PROGRESS] = it }
+            pendingStop?.let { p[Keys.PENDING_STOP] = it }
         }
     }
 
