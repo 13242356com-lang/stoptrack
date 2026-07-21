@@ -31,11 +31,13 @@ const DEFAULT_QUICK_STOPS = [
   { label: "Cleaning", reason: "Cleaning" },
   { label: "Material jam", reason: "Material jam" },
 ];
-// Shifts: supervisor-defined time frames operators pick from. `goal` = optional
-// per-shift output target (units); 0 = no goal. Legacy single-shift configs
-// (`config.shift`) migrate into a one-entry list on load.
+// Shifts: supervisor-defined time frames operators pick from. `goals` = optional
+// per-machine output target ({ machine: units }); a machine with no entry has no
+// goal. Legacy single-shift configs (`config.shift`) migrate into a one-entry
+// list on load; a legacy shift-wide `goal` number migrates into `goals` for the
+// first machine it can (see normalizeShifts).
 const DEFAULT_SHIFTS = [
-  { id: "shift-1", name: "Day", start: "06:00", end: "14:00", goal: 0 },
+  { id: "shift-1", name: "Day", start: "06:00", end: "14:00", goals: {} },
 ];
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -93,17 +95,28 @@ function shiftEndAt(shift, now = Date.now()) {
 // Coerce a shifts array (or a legacy single `shift`) into a valid, non-empty list
 // of {id,name,start,end,goal}. Returns null if there's nothing usable.
 function normalizeShifts(shiftsArr, legacyShift) {
+  // A per-machine goals map: { machine: units } with positive integers only.
+  const cleanGoals = (raw) => {
+    const out = {};
+    if (raw && typeof raw === "object") {
+      for (const [m, v] of Object.entries(raw)) {
+        const n = Math.max(0, Math.round(Number(v) || 0));
+        if (m && n > 0) out[m] = n;
+      }
+    }
+    return out;
+  };
   const clean = Array.isArray(shiftsArr)
     ? shiftsArr.filter((s) => s && s.start && s.end).map((s, i) => ({
         id: s.id || `shift-${i + 1}`,
         name: s.name || `Shift ${i + 1}`,
         start: s.start, end: s.end,
-        goal: Math.max(0, Number(s.goal) || 0),
+        goals: cleanGoals(s.goals),
       }))
     : [];
   if (clean.length) return clean;
   if (legacyShift && legacyShift.start && legacyShift.end)
-    return [{ id: "shift-1", name: "Shift 1", start: legacyShift.start, end: legacyShift.end, goal: 0 }];
+    return [{ id: "shift-1", name: "Shift 1", start: legacyShift.start, end: legacyShift.end, goals: {} }];
   return null;
 }
 
@@ -155,18 +168,18 @@ const oeeAccent = (f) => (f == null ? "" : f > 0.85 ? "text-emerald-500" : f > 0
 //   risk  — reachable but little slack left
 //   missed— can't be reached even running flat-out for the rest of the shift
 //   na    — no goal or no machine rate set (can't project)
-function computeGoalStatus({ goal, produced, ratePerHour, shiftEndMs, now = Date.now() }) {
+function computeGoalStatus({ goal, produced, ratePerHour, shiftEndMs, machine, now = Date.now() }) {
   const g = Math.max(0, Number(goal) || 0);
   const made = Math.max(0, Number(produced) || 0);
   const rate = Number(ratePerHour) || 0;
-  if (g <= 0 || rate <= 0 || !shiftEndMs) return { state: "na", goal: g, produced: made };
+  if (g <= 0 || rate <= 0 || !shiftEndMs) return { state: "na", goal: g, produced: made, machine };
   const need = Math.max(0, g - made);
   const remainingMs = Math.max(0, shiftEndMs - now);
-  if (need === 0) return { state: "met", goal: g, produced: made, need, remainingMs, slackMs: remainingMs, ratePerHour: rate };
+  if (need === 0) return { state: "met", goal: g, produced: made, need, remainingMs, slackMs: remainingMs, ratePerHour: rate, machine };
   const requiredRunMs = (need / rate) * HOUR_MS;
   const slackMs = remainingMs - requiredRunMs;
   const state = slackMs < 0 ? "missed" : slackMs < 15 * 60 * 1000 ? "risk" : "track";
-  return { state, goal: g, produced: made, need, remainingMs, requiredRunMs, slackMs, ratePerHour: rate };
+  return { state, goal: g, produced: made, need, remainingMs, requiredRunMs, slackMs, ratePerHour: rate, machine };
 }
 const goalAccent = (state) =>
   state === "missed" ? "text-red-500" : state === "risk" ? "text-amber-500"
@@ -195,8 +208,9 @@ function buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, 
 // One-line human summary of a goal projection, shared by the report + the UI.
 function goalSummaryText(g) {
   if (!g || g.state === "na") return "";
-  if (g.state === "met") return `Goal ${g.goal} met (${g.produced} made)`;
-  const base = `Goal ${g.goal} · made ${g.produced}`;
+  const who = g.machine ? `${g.machine} ` : "";
+  if (g.state === "met") return `${who}goal ${g.goal} met (${g.produced} made)`;
+  const base = `${who}goal ${g.goal} · made ${g.produced}`;
   if (g.state === "missed") return `${base} · not achievable (short by ${g.need})`;
   const slack = g.slackMs != null ? `, up to ${fmtDur(g.slackMs)} more downtime OK` : "";
   return `${base} · ${g.state === "risk" ? "at risk" : "on track"} (need ${g.need}${slack})`;
@@ -1012,6 +1026,16 @@ export default function App() {
   const [setupLocked, setSetupLocked] = useState(false);
   const timer = useTimer({ operator, machine });
 
+  // In the native Android shell, tell the app when the in-app timer is
+  // running/paused so its notification + floating "quick stop" button don't offer
+  // a second Start (which would double-count the same stop). No-op in a browser.
+  useEffect(() => {
+    const n = (typeof window !== "undefined") ? window.StopTrackNative : null;
+    if (n && typeof n.reportTimerActive === "function") {
+      try { n.reportTimerActive(!!(timer.state.running || timer.state.paused)); } catch (e) { /* ignore */ }
+    }
+  }, [timer.state.running, timer.state.paused]);
+
   // documentation of a just-ended stop
   const [pendingStop, setPendingStop] = useState(null);
   const [reason, setReason] = useState(DEFAULT_REASONS[0]);
@@ -1654,12 +1678,13 @@ export default function App() {
   }, [sessions, myStops, production, rates, activeShift, clearedBefore, operator, machine, myProduction, slowTick]);
 
   // ---- shift output goal (achievability) -----------------------------------
-  // Units produced this shift (all machines worked) vs the active shift's goal,
-  // projected against the current machine's rate and time left in the shift.
+  // Per-machine: the current machine's units produced this shift vs that
+  // machine's goal, projected against its rate and time left in the shift.
   const goalStatus = useMemo(() => {
-    const produced = myShift.rows.reduce((a, r) => a + (r.units || 0), 0);
+    const goal = activeShift.goals?.[machine] || 0;
+    const produced = myShift.rows.find((r) => r.machine === machine)?.units || 0;
     return computeGoalStatus({
-      goal: activeShift.goal, produced,
+      goal, produced, machine,
       ratePerHour: rates?.[machine], shiftEndMs: shiftEndAt(activeShift), now: Date.now(),
     });
   }, [myShift, activeShift, rates, machine, slowTick]);
@@ -1851,6 +1876,7 @@ function OperatorView(props) {
                 {goalStatus.state === "met" ? "Goal met"
                   : goalStatus.state === "missed" ? "Goal not achievable"
                   : goalStatus.state === "risk" ? "Goal at risk" : "On track for goal"}
+                <span className={`font-normal ${t.sub}`}> · {machine}</span>
               </div>
               <div className={`text-[11px] ${t.sub}`}>
                 {goalStatus.produced} / {goalStatus.goal} units
@@ -2522,7 +2548,7 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
 
       {tab === "manage" && (
         <div className="space-y-4">
-          <ShiftsManager t={t} shifts={shifts} onChange={updateShifts} />
+          <ShiftsManager t={t} shifts={shifts} machines={machines} onChange={updateShifts} />
           <ListManager t={t} title="Machines" icon={<Factory size={16} />} items={machines} onChange={updateMachines} placeholder="e.g. Line 1 - Packaging" />
           <ListManager t={t} title="Stop reasons" icon={<AlertCircle size={16} />} items={reasons} onChange={updateReasons} placeholder="e.g. Sensor calibration" />
           <QuickStopManager t={t} quickStops={quickStops} reasons={reasons} onChange={updateQuickStops} />
@@ -2875,18 +2901,26 @@ function RatesManager({ t, machines, rates, onChange }) {
 }
 
 // Supervisor settings: the shifts operators pick from. Each has a name, time
-// frame, and an optional output goal (units) used for the achievability check.
-function ShiftsManager({ t, shifts, onChange }) {
+// frame, and a per-machine output goal ({ machine: units }) used for the
+// operator's achievability check.
+function ShiftsManager({ t, shifts, machines, onChange }) {
   const update = (id, patch) => onChange(shifts.map((s) => (s.id === id ? { ...s, ...patch } : s)));
   const remove = (id) => { if (shifts.length > 1) onChange(shifts.filter((s) => s.id !== id)); };
-  const add = () => onChange([...shifts, { id: `shift-${Date.now().toString(36)}`, name: `Shift ${shifts.length + 1}`, start: "06:00", end: "14:00", goal: 0 }]);
+  const add = () => onChange([...shifts, { id: `shift-${Date.now().toString(36)}`, name: `Shift ${shifts.length + 1}`, start: "06:00", end: "14:00", goals: {} }]);
+  // Set (or clear, when blank/0) one machine's goal within a shift.
+  const setGoal = (s, m, v) => {
+    const n = Math.max(0, Math.round(Number(v) || 0));
+    const goals = { ...(s.goals || {}) };
+    if (n > 0) goals[m] = n; else delete goals[m];
+    update(s.id, { goals });
+  };
   return (
     <div className={`${t.card} rounded-xl p-4`}>
       <h3 className="font-bold mb-1 flex items-center gap-2"><Clock size={16} /> Shifts</h3>
-      <p className={`text-xs ${t.sub} mb-3`}>Time frames operators pick from. Used for uptime %, operator pace, and each shift's output goal.</p>
+      <p className={`text-xs ${t.sub} mb-3`}>Time frames operators pick from. Used for uptime %, operator pace, and a per-machine output goal (units) that drives the operator's achievability check. Leave a machine blank for no goal.</p>
       <div className="space-y-3">
         {shifts.map((s) => (
-          <div key={s.id} className={`${t.muted} rounded-lg p-3 space-y-2`}>
+          <div key={s.id} className={`${t.muted} rounded-lg p-3 space-y-3`}>
             <div className="flex items-center gap-2">
               <input value={s.name} maxLength={24} onChange={(e) => update(s.id, { name: e.target.value })} placeholder="Shift name"
                 className={`flex-1 border rounded-lg px-3 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}`} />
@@ -2897,9 +2931,20 @@ function ShiftsManager({ t, shifts, onChange }) {
             <div className="flex items-center gap-3 flex-wrap">
               <label className="flex flex-col gap-1 text-xs"><span className={t.sub}>START</span><input type="time" value={s.start} onChange={(e) => update(s.id, { start: e.target.value })} className={`border rounded-lg px-3 py-2 ${t.input}`} /></label>
               <label className="flex flex-col gap-1 text-xs"><span className={t.sub}>END</span><input type="time" value={s.end} onChange={(e) => update(s.id, { end: e.target.value })} className={`border rounded-lg px-3 py-2 ${t.input}`} /></label>
-              <label className="flex flex-col gap-1 text-xs"><span className={t.sub}>GOAL (units)</span><input type="number" inputMode="numeric" min="0" value={s.goal || ""} onChange={(e) => update(s.id, { goal: Math.max(0, Number(e.target.value) || 0) })} placeholder="none"
-                className={`w-24 border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}`} /></label>
               <span className={`text-sm ${t.sub} self-end pb-2`}>= {fmtDur(shiftLengthMs(s))}</span>
+            </div>
+            <div>
+              <span className={`text-xs font-semibold ${t.sub}`}>OUTPUT GOALS (units per machine)</span>
+              <div className="mt-1 space-y-1.5">
+                {machines.map((m) => (
+                  <label key={m} className="flex items-center gap-2 text-sm">
+                    <span className="flex-1 truncate">{m}</span>
+                    <input type="number" inputMode="numeric" min="0" value={s.goals?.[m] ?? ""} onChange={(e) => setGoal(s, m, e.target.value)} placeholder="none"
+                      className={`w-24 border rounded-lg px-3 py-1.5 text-sm font-mono text-right focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}`} />
+                    <span className={`text-xs ${t.sub} w-10`}>units</span>
+                  </label>
+                ))}
+              </div>
             </div>
           </div>
         ))}

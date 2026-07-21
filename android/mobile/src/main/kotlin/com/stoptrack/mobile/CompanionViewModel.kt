@@ -53,6 +53,8 @@ class CompanionViewModel(app: Application) : AndroidViewModel(app) {
     fun setRemoteUrl(url: String) = viewModelScope.launch { prefs.update(remoteUrl = url) }
     fun setRemoteToken(token: String) = viewModelScope.launch { prefs.update(remoteToken = token) }
     fun setForwardEnabled(enabled: Boolean) = viewModelScope.launch { prefs.update(forwardEnabled = enabled) }
+    fun setOperatorName(name: String) = viewModelScope.launch { prefs.update(operatorName = name) }
+    fun setOverlayEnabled(enabled: Boolean) = viewModelScope.launch { prefs.update(overlayEnabled = enabled) }
 
     fun pushConfigToWatch() = viewModelScope.launch { bridge.publishConfig(store.watchConfigJson()) }
 

@@ -112,6 +112,38 @@ and a **domain name** added to it (any cheap one, ~$10/year — e.g.
 
 ---
 
+## Part B2 — Make it private (recommended if you use the tunnel)
+
+With Part B, the token is the only thing standing between the internet and your
+data. That's a decent lock, but the *address itself* is publicly reachable. For a
+proper front door, add **Cloudflare Access** — a free login gate that sits in
+front of the tunnel, so nobody even reaches the server until they've proven who
+they are (a one-time code emailed to them, or Google/Microsoft sign-in). You keep
+"edit from anywhere"; you just log in first.
+
+1. Cloudflare dashboard → **Zero Trust → Access → Applications → Add an
+   application** → **Self-hosted**.
+2. **Application domain:** `stoptrack` . `yourfactory.com` (the same hostname
+   from Part B).
+3. Add a **policy**: name it `Supervisors`, action **Allow**, and add a rule —
+   e.g. **Emails** → list the supervisor email addresses (or **Emails ending in**
+   → `@yourfactory.com`). Save.
+4. Done. Opening `https://stoptrack.yourfactory.com` now asks for a login first;
+   only the emails you listed get in, then the normal token screen appears.
+
+> **Watches / phones on cellular:** Cloudflare Access challenges the *browser*
+> nicely, but the watch/phone apps sync in the background and can't do a login
+> screen. Two easy ways to keep them working: (a) keep the watches syncing over
+> the **factory Wi-Fi / LAN** (`http://<PC-IP>:4000`, which Access doesn't touch),
+> or (b) add a **Service Token** in Cloudflare Access for the apps. If you want
+> route (b), ask and I'll wire the app's requests to send it.
+
+If you'd rather not run the tunnel at all, the server also works **LAN-only** —
+just don't do Part B, and it's only reachable on the factory network. (I can also
+add a `HOST` setting to bind it to a specific interface if you want it tighter.)
+
+---
+
 ## Part C — Connect everything (one-time per device)
 
 Use your **anywhere address** (`https://stoptrack.yourfactory.com`) if you set

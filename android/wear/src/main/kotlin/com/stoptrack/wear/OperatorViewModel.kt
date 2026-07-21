@@ -4,10 +4,13 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.stoptrack.shared.Collection
+import com.stoptrack.shared.FinishedStop
 import com.stoptrack.shared.QuickStop
 import com.stoptrack.shared.RemoteSyncClient
 import com.stoptrack.shared.StopRecord
 import com.stoptrack.shared.StopTrackJson
+import com.stoptrack.shared.Timer
+import com.stoptrack.shared.TimerState
 import com.stoptrack.shared.WatchConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job

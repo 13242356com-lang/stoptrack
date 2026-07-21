@@ -11,6 +11,8 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
+import com.stoptrack.shared.StopTrackJson
+import com.stoptrack.shared.TimerState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -18,10 +20,12 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
- * The always-on bridge. Keeps the local sync server (for the web app) and the
- * remote forwarder (optional) running whether or not the companion UI is open,
- * so a watch can hand off a stop at any time. Runs as a foreground service with a
- * persistent notification, as Android requires for this kind of long-lived work.
+ * The always-on bridge + operator presence. Keeps the local sync server (for the
+ * web app) and the optional remote forwarder running whether or not the UI is
+ * open, and hosts the native quick-stop timer surfaced in the persistent
+ * notification and the floating bubble — so a watch can hand off a stop and an
+ * operator can log one without opening the app. Runs as a foreground service, as
+ * Android requires for this long-lived work.
  */
 class CompanionService : LifecycleService() {
 
@@ -35,11 +39,20 @@ class CompanionService : LifecycleService() {
     private var forwardJob: Job? = null
     private var current: Settings = Settings()
 
+    // --- quick-stop presence ---------------------------------------------------
+    private val controller by lazy {
+        QuickStopController(store, prefs, lifecycleScope, onChanged = ::onTimerChanged)
+    }
+    private var overlay: OverlayController? = null
+    private var tickJob: Job? = null
+    private var restoredInProgress = false
+
     override fun onCreate() {
         super.onCreate()
         createChannel()
         startInForeground("Starting bridge…")
-        // React to every settings change: (re)bind the server, (re)start the forwarder.
+        // React to every settings change: (re)bind the server, (re)start the
+        // forwarder, sync operator/machine + the floating bubble.
         lifecycleScope.launch {
             prefs.settings.collect { applySettings(it) }
         }
@@ -47,6 +60,22 @@ class CompanionService : LifecycleService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
+        // Notification-action taps arrive here as service intents.
+        when (intent?.action) {
+            ACTION_START -> controller.start()
+            ACTION_PAUSE -> controller.pause()
+            ACTION_RESUME -> controller.resume()
+            ACTION_END -> controller.end()
+            // Re-check the overlay after the user grants "draw over other apps"
+            // (granting doesn't change settings, so nothing else would re-run it).
+            ACTION_REFRESH_OVERLAY -> lifecycleScope.launch { applyOverlay(prefs.snapshot()) }
+            // The web app reports when ITS timer is running so the native surfaces
+            // don't offer a second Start (which would double-count one stop).
+            ACTION_WEB_TIMER -> {
+                controller.webTimerActive = intent.getBooleanExtra(EXTRA_ACTIVE, false)
+                onTimerChanged()
+            }
+        }
         return START_STICKY
     }
 
@@ -70,13 +99,60 @@ class CompanionService : LifecycleService() {
 
         // Keep the watch's config current whenever settings change.
         lifecycleScope.launch { bridge.publishConfig(store.watchConfigJson()) }
+
+        // Operator + preferred machine for native quick-stops.
+        controller.operator = s.operatorName
+        if (controller.machine.isBlank()) controller.machine = s.lastMachine
+
+        // Resume a running stop after a service restart (once).
+        if (!restoredInProgress) {
+            restoredInProgress = true
+            if (s.inProgress.isNotBlank()) {
+                val saved = runCatching {
+                    StopTrackJson.decodeFromString(TimerState.serializer(), s.inProgress)
+                }.getOrNull()
+                controller.restore(saved)
+            }
+        }
+
+        applyOverlay(s)
+        onTimerChanged()
+    }
+
+    /** Show/hide the floating bubble to match the toggle + overlay permission. */
+    private fun applyOverlay(s: Settings) {
+        val canDraw = android.provider.Settings.canDrawOverlays(this)
+        if (s.overlayEnabled && canDraw) {
+            if (overlay == null) overlay = OverlayController(this, controller, prefs, lifecycleScope)
+            if (overlay?.isShowing != true) overlay?.show(s.overlayX, s.overlayY)
+        } else {
+            overlay?.hide()
+        }
+    }
+
+    /** Timer transitioned or ticked: refresh the notification + bubble, and run a
+     *  1-second tick only while a stop is active. */
+    private fun onTimerChanged() {
         updateNotification()
+        overlay?.update(controller.state)
+        if (controller.state.active) {
+            if (tickJob == null) {
+                tickJob = lifecycleScope.launch {
+                    while (isActive && controller.state.active) {
+                        updateNotification()
+                        overlay?.update(controller.state)
+                        delay(1000)
+                    }
+                    tickJob = null
+                }
+            }
+        } else {
+            tickJob?.cancel(); tickJob = null
+        }
     }
 
     private fun restartServer(port: Int, token: String?) {
         runCatching { server?.stop() }
-        // onConfigChanged fires when the web app saves supervisor settings (PUT
-        // /config); push the new machines/reasons/quick-stops to the watch at once.
         val srv = LocalSyncServer(
             store = store,
             token = token,
@@ -98,46 +174,87 @@ class CompanionService : LifecycleService() {
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0
         // Never let a foreground-start refusal crash the app; the UI must still open.
-        // Worst case the bridge runs as an ordinary service.
         runCatching { ServiceCompat.startForeground(this, NOTIF_ID, buildNotification(text), type) }
     }
 
     private fun updateNotification() {
+        val mgr = getSystemService(NotificationManager::class.java)
+        mgr.notify(NOTIF_ID, buildNotification(bridgeStatusLine()))
+    }
+
+    private fun bridgeStatusLine(): String {
         val running = server != null
-        val text = buildString {
-            append(if (running) "Serving http://127.0.0.1:$serverPort" else "Local server stopped")
+        return buildString {
+            append(if (running) "Bridge on :$serverPort" else "Local server stopped")
             append(" · ${store.count(com.stoptrack.shared.Collection.STOPS)} stops")
             if (current.forwardEnabled) append(" · forwarding")
         }
-        val mgr = getSystemService(NotificationManager::class.java)
-        mgr.notify(NOTIF_ID, buildNotification(text))
     }
 
-    private fun buildNotification(text: String): Notification {
+    private fun timerLine(): String {
+        val st = controller.state
+        val now = System.currentTimeMillis()
+        return when {
+            controller.webTimerActive -> "A stop is running in the app"
+            st.paused -> "Paused ${fmtElapsed(st.elapsed(now))} · ${st.machine}"
+            st.running -> "Recording ${fmtElapsed(st.elapsed(now))} · ${st.machine}"
+            else -> "Idle · tap Start to log a stop"
+        }
+    }
+
+    private fun buildNotification(bridgeLine: String): Notification {
         val openApp = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val openSettings = PendingIntent.getActivity(
-            this, 1, Intent(this, BridgeSettingsActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("StopTrack running")
-            .setContentText(text)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+        val timer = timerLine()
+        val b = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("StopTrack")
+            .setContentText(timer)
+            .setStyle(NotificationCompat.BigTextStyle().bigText("$timer\n$bridgeLine"))
+            .setSmallIcon(R.drawable.ic_stat_stoptrack)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setShowWhen(false)
             .setContentIntent(openApp)
-            .addAction(0, "Bridge settings", openSettings)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
+
+        // Timer actions — only when the app isn't itself running a stop.
+        if (!controller.webTimerActive) {
+            val st = controller.state
+            when {
+                st.running -> {
+                    b.addAction(0, "Pause", actionPI(ACTION_PAUSE, 12))
+                    b.addAction(0, "End", actionPI(ACTION_END, 13))
+                }
+                st.paused -> {
+                    b.addAction(0, "Resume", actionPI(ACTION_RESUME, 14))
+                    b.addAction(0, "End", actionPI(ACTION_END, 13))
+                }
+                else -> b.addAction(0, "Start stop", actionPI(ACTION_START, 11))
+            }
+        }
+        return b.build()
+    }
+
+    private fun actionPI(action: String, req: Int): PendingIntent = PendingIntent.getService(
+        this, req, Intent(this, CompanionService::class.java).setAction(action),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+
+    private fun fmtElapsed(ms: Long): String {
+        val s = ms / 1000
+        val h = s / 3600
+        val m = (s % 3600) / 60
+        val sec = s % 60
+        return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%d:%02d".format(m, sec)
     }
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID, getString(R.string.bridge_channel_name), NotificationManager.IMPORTANCE_LOW,
-            ).apply { description = "Keeps the StopTrack watch bridge running." }
+            ).apply { description = "Keeps the StopTrack bridge running and shows the stop timer." }
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
     }
@@ -145,6 +262,8 @@ class CompanionService : LifecycleService() {
     override fun onDestroy() {
         runCatching { server?.stop() }
         forwardJob?.cancel()
+        tickJob?.cancel()
+        overlay?.hide()
         super.onDestroy()
     }
 
@@ -153,6 +272,14 @@ class CompanionService : LifecycleService() {
         private const val NOTIF_ID = 1001
         private const val FORWARD_INTERVAL_MS = 25_000L
         private const val NanoHttpTimeoutMs = 5000
+
+        const val ACTION_START = "com.stoptrack.mobile.START"
+        const val ACTION_PAUSE = "com.stoptrack.mobile.PAUSE"
+        const val ACTION_RESUME = "com.stoptrack.mobile.RESUME"
+        const val ACTION_END = "com.stoptrack.mobile.END"
+        const val ACTION_REFRESH_OVERLAY = "com.stoptrack.mobile.REFRESH_OVERLAY"
+        const val ACTION_WEB_TIMER = "com.stoptrack.mobile.WEB_TIMER"
+        const val EXTRA_ACTIVE = "active"
 
         fun start(context: android.content.Context) {
             val intent = Intent(context, CompanionService::class.java)

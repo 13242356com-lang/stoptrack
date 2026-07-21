@@ -1,0 +1,12 @@
+<!-- Monochrome status-bar / notification small icon. Android tints it, so it's a
+     flat white silhouette (a stop octagon) — no fills, gradients, or colour. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M8.4,2 H15.6 L22,8.4 V15.6 L15.6,22 H8.4 L2,15.6 V8.4 Z" />
+</vector>

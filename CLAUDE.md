@@ -76,9 +76,9 @@ seam clean.
 ### Storage keys
 - `stop:<id>` — one record per stop
 - `config:lists` — machines / reasons / quickStops / shifts (each shift =
-  {id,name,start,end,goal}) / rates / handoverEmails. A legacy `shift`
-  {start,end} mirror of the first shift is written alongside for old clients /
-  the watch config.
+  {id,name,start,end,goals:{machine:units}}) / rates / handoverEmails. A legacy
+  `shift` {start,end} mirror of the first shift is written alongside for old
+  clients / the watch config.
 - `config:prefs` — dark mode, last reason, cleared-before cutoff, operator,
   machine, setupLocked, shiftId (the operator's chosen shift)
 - `inprogress:current` — live-timer autosave for recovery
@@ -138,8 +138,8 @@ the supervisor view. This was a real bug; the fix was `loggedAt`. Filter uses
 - Stat cards, search, machine filter, date-range filter (all / 7d / 30d / custom).
 - Log table with a **manual** badge on manually-reported stops.
 - Analytics: 7-day downtime trend, top problem machines, downtime by reason.
-- Settings: shifts (each with times + optional output goal), machines list,
-  reasons list, quick stops, machine rates.
+- Settings: shifts (each with times + optional per-machine output goals),
+  machines list, reasons list, quick stops, machine rates.
 - **Discard** (soft, requires explanation, kept in exports, auto-purged after 60
   days) and **Delete permanently** (hard delete, confirmation required).
 - **Export CSV / JSON** — respects current filters, includes discarded rows and a
@@ -249,10 +249,14 @@ Full details in `android/README.md`. Key facts for future sessions:
   sync** at `http://127.0.0.1:<port>` and watch stops appear in the supervisor
   view. (Needs CORS + Private Network Access headers — handled in
   `mobile/LocalSyncServer.kt`.)
-- **Modules:** `:shared` (record model + contract, pure Kotlin — the only piece
-  that must track the web record), `:wear` (Compose watch app; `TimerEngine` is
-  a port of `useTimer`), `:mobile` (bridge: `PhoneStore` mirrors `server.js`,
-  `LocalSyncServer`, Wear listener, optional `RemoteForwarder`).
+- **Modules:** `:shared` (record model + contract + **`TimerEngine`** = the
+  `Timer`/`TimerState` port of `useTimer`, pure Kotlin — the only piece that must
+  track the web record), `:wear` (Compose watch app; drives the shared `Timer`),
+  `:mobile` (full app + bridge: `PhoneStore` mirrors `server.js`, `LocalSyncServer`,
+  Wear listener, optional `RemoteForwarder`, and the **quick-stop presence** —
+  `QuickStopController` + notification actions + `OverlayController` floating
+  bubble, so a stop can be logged from the notification/bubble without opening the
+  app; needs `SYSTEM_ALERT_WINDOW` for the overlay).
 - **Build reality:** needs the Android SDK + Android Studio; **can't be built or
   runtime-tested in the cloud/CI session** (no SDK, no watch). Only `:shared`
   and the wear timer/format logic are compile-verified. Build in Android Studio;

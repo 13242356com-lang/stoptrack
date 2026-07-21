@@ -201,6 +201,62 @@ function readBody(req) {
   });
 }
 
+// --- rate limiting (in-memory, per client IP) -------------------------------
+// A tiny fixed-window limiter so one client can't flood the server or brute-
+// force the token. Two windows per IP: a generous OVERALL cap (normal multi-
+// device polling — ~4 req/15s per device — stays far under it) and a tight cap
+// on FAILED auth (slows token guessing; complements the constant-time check).
+// In-memory only: fine for a single-process factory server, and a restart just
+// clears it. Tune via env; RATE_LIMIT=0 disables the overall cap.
+//
+// Note: the client IP comes from CF-Connecting-IP / X-Forwarded-For when set
+// (see clientIp). Behind the Cloudflare tunnel that's the real per-device IP and
+// can't be spoofed by the client; don't put this raw behind an upstream that
+// forwards a client-controlled XFF (SETUP.md already says tunnel-only).
+const RL_WINDOW_MS = 60 * 1000;
+const RL_MAX = Number(process.env.RATE_LIMIT ?? 240);          // requests / min / IP (0 = off)
+const RL_AUTH_MAX = Number(process.env.RATE_LIMIT_AUTH ?? 20); // failed auths / min / IP (0 = off)
+const RL_MAX_IPS = 50000;                                      // hard cap on tracked IPs (memory bound)
+const rlHits = new Map(); // ip -> { count, resetAt }
+const rlAuth = new Map(); // ip -> { count, resetAt }
+
+// Count one hit for `ip` in `map`; return whether it's now over `max`.
+function rateBump(map, ip, max) {
+  if (!max || max <= 0) return { limited: false, retryAfter: 0 };
+  const now = Date.now();
+  let e = map.get(ip);
+  if (!e || now >= e.resetAt) {
+    if (map.size >= RL_MAX_IPS) map.clear(); // crude flood-of-unique-IPs guard
+    e = { count: 0, resetAt: now + RL_WINDOW_MS };
+    map.set(ip, e);
+  }
+  e.count++;
+  return e.count > max ? { limited: true, retryAfter: Math.ceil((e.resetAt - now) / 1000) } : { limited: false, retryAfter: 0 };
+}
+
+// Drop stale buckets periodically so the maps don't grow without bound.
+setInterval(() => {
+  const now = Date.now();
+  for (const map of [rlHits, rlAuth]) for (const [ip, e] of map) if (now >= e.resetAt) map.delete(ip);
+}, 5 * 60 * 1000).unref();
+
+function tooMany(res, retryAfter) {
+  res.writeHead(429, {
+    "Content-Type": "application/json",
+    "X-Content-Type-Options": "nosniff",
+    "Access-Control-Allow-Origin": "*",
+    "Retry-After": String(Math.max(1, retryAfter)),
+  });
+  res.end(JSON.stringify({ ok: false, error: "Too many requests" }));
+}
+
+// Handle a failed-auth response: throttle repeat offenders, else a plain 401.
+function denyAuth(res, ip, method, route) {
+  log(`unauthorized ${method} ${route} - ${ip} (wrong/missing token)`);
+  const rl = rateBump(rlAuth, ip, RL_AUTH_MAX);
+  return rl.limited ? tooMany(res, rl.retryAfter) : send(res, 401, { ok: false, error: "Unauthorized" });
+}
+
 // --- request routing --------------------------------------------------------
 const server = http.createServer(async (req, res) => {
   // CORS preflight
@@ -211,6 +267,15 @@ const server = http.createServer(async (req, res) => {
   const now = Date.now();
   const ip = clientIp(req);
   if (VERBOSE) log(`${req.method} ${route} - ${ip}`);
+
+  // Overall flood protection (per IP). OPTIONS preflights already returned above.
+  {
+    const rl = rateBump(rlHits, ip, RL_MAX);
+    if (rl.limited) {
+      if (VERBOSE) log(`rate-limited ${ip} (${req.method} ${route})`);
+      return tooMany(res, rl.retryAfter);
+    }
+  }
 
   // Serve the StopTrack app itself at "/" — the supervisor interface. The page
   // is public (same code as the deployed web app); all DATA stays behind the
@@ -238,14 +303,11 @@ const server = http.createServer(async (req, res) => {
   // /health is open so a device can test connectivity before it has the token
   // pasted in. It still requires the token when one is configured.
   if (route === "/health" && req.method === "GET") {
-    if (!authOk(req)) return send(res, 401, { ok: false, error: "Unauthorized" });
+    if (!authOk(req)) return denyAuth(res, ip, req.method, route);
     return send(res, 200, { ok: true, serverTime: now });
   }
 
-  if (!authOk(req)) {
-    log(`unauthorized ${req.method} ${route} - ${ip} (wrong/missing token)`);
-    return send(res, 401, { ok: false, error: "Unauthorized" });
-  }
+  if (!authOk(req)) return denyAuth(res, ip, req.method, route);
 
   try {
     if (route === "/stops" && req.method === "GET") {

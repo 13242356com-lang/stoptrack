@@ -2,6 +2,7 @@ package com.stoptrack.mobile
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.webkit.JavascriptInterface
@@ -105,6 +106,20 @@ class MainActivity : ComponentActivity() {
         /** Loopback needs no token. */
         @JavascriptInterface
         fun token(): String = ""
+
+        /** The web app reports when its own stop-timer is running/paused, so the
+         *  native notification + floating bubble suppress their Start and can't
+         *  double-count the same stop. */
+        @JavascriptInterface
+        fun reportTimerActive(active: Boolean) {
+            runCatching {
+                startService(
+                    Intent(this@MainActivity, CompanionService::class.java)
+                        .setAction(CompanionService.ACTION_WEB_TIMER)
+                        .putExtra(CompanionService.EXTRA_ACTIVE, active),
+                )
+            }
+        }
     }
 
     private companion object {

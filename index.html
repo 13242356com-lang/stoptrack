@@ -122,7 +122,7 @@ const DEFAULT_QUICK_STOPS = [
     { label: "Material jam", reason: "Material jam" },
 ];
 const DEFAULT_SHIFTS = [
-    { id: "shift-1", name: "Day", start: "06:00", end: "14:00", goal: 0 },
+    { id: "shift-1", name: "Day", start: "06:00", end: "14:00", goals: {} },
 ];
 const DAY = 24 * 60 * 60 * 1000;
 const RETENTION_MS = 60 * DAY;
@@ -177,18 +177,29 @@ function shiftEndAt(shift, now = Date.now()) {
     return end;
 }
 function normalizeShifts(shiftsArr, legacyShift) {
+    const cleanGoals = (raw) => {
+        const out = {};
+        if (raw && typeof raw === "object") {
+            for (const [m, v] of Object.entries(raw)) {
+                const n = Math.max(0, Math.round(Number(v) || 0));
+                if (m && n > 0)
+                    out[m] = n;
+            }
+        }
+        return out;
+    };
     const clean = Array.isArray(shiftsArr)
         ? shiftsArr.filter((s) => s && s.start && s.end).map((s, i) => ({
             id: s.id || `shift-${i + 1}`,
             name: s.name || `Shift ${i + 1}`,
             start: s.start, end: s.end,
-            goal: Math.max(0, Number(s.goal) || 0),
+            goals: cleanGoals(s.goals),
         }))
         : [];
     if (clean.length)
         return clean;
     if (legacyShift && legacyShift.start && legacyShift.end)
-        return [{ id: "shift-1", name: "Shift 1", start: legacyShift.start, end: legacyShift.end, goal: 0 }];
+        return [{ id: "shift-1", name: "Shift 1", start: legacyShift.start, end: legacyShift.end, goals: {} }];
     return null;
 }
 const legacyShiftOf = (shifts) => shifts && shifts[0] ? { start: shifts[0].start, end: shifts[0].end } : { start: "06:00", end: "14:00" };
@@ -212,20 +223,20 @@ function computeOEE({ plannedMs, downtimeMs, unitsProduced, scrapCount, ratePerH
 }
 const pct = (f) => (f == null ? "—" : `${(f * 100).toFixed(1)}%`);
 const oeeAccent = (f) => (f == null ? "" : f > 0.85 ? "text-emerald-500" : f > 0.6 ? "text-amber-500" : "text-red-500");
-function computeGoalStatus({ goal, produced, ratePerHour, shiftEndMs, now = Date.now() }) {
+function computeGoalStatus({ goal, produced, ratePerHour, shiftEndMs, machine, now = Date.now() }) {
     const g = Math.max(0, Number(goal) || 0);
     const made = Math.max(0, Number(produced) || 0);
     const rate = Number(ratePerHour) || 0;
     if (g <= 0 || rate <= 0 || !shiftEndMs)
-        return { state: "na", goal: g, produced: made };
+        return { state: "na", goal: g, produced: made, machine };
     const need = Math.max(0, g - made);
     const remainingMs = Math.max(0, shiftEndMs - now);
     if (need === 0)
-        return { state: "met", goal: g, produced: made, need, remainingMs, slackMs: remainingMs, ratePerHour: rate };
+        return { state: "met", goal: g, produced: made, need, remainingMs, slackMs: remainingMs, ratePerHour: rate, machine };
     const requiredRunMs = (need / rate) * HOUR_MS;
     const slackMs = remainingMs - requiredRunMs;
     const state = slackMs < 0 ? "missed" : slackMs < 15 * 60 * 1000 ? "risk" : "track";
-    return { state, goal: g, produced: made, need, remainingMs, requiredRunMs, slackMs, ratePerHour: rate };
+    return { state, goal: g, produced: made, need, remainingMs, requiredRunMs, slackMs, ratePerHour: rate, machine };
 }
 const goalAccent = (state) => state === "missed" ? "text-red-500" : state === "risk" ? "text-amber-500"
     : state === "met" || state === "track" ? "text-emerald-500" : "";
@@ -248,9 +259,10 @@ function buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, 
 function goalSummaryText(g) {
     if (!g || g.state === "na")
         return "";
+    const who = g.machine ? `${g.machine} ` : "";
     if (g.state === "met")
-        return `Goal ${g.goal} met (${g.produced} made)`;
-    const base = `Goal ${g.goal} · made ${g.produced}`;
+        return `${who}goal ${g.goal} met (${g.produced} made)`;
+    const base = `${who}goal ${g.goal} · made ${g.produced}`;
     if (g.state === "missed")
         return `${base} · not achievable (short by ${g.need})`;
     const slack = g.slackMs != null ? `, up to ${fmtDur(g.slackMs)} more downtime OK` : "";
@@ -1121,6 +1133,15 @@ function App() {
     const [machine, setMachine] = useState(DEFAULT_MACHINES[0]);
     const [setupLocked, setSetupLocked] = useState(false);
     const timer = useTimer({ operator, machine });
+    useEffect(() => {
+        const n = (typeof window !== "undefined") ? window.StopTrackNative : null;
+        if (n && typeof n.reportTimerActive === "function") {
+            try {
+                n.reportTimerActive(!!(timer.state.running || timer.state.paused));
+            }
+            catch (e) { }
+        }
+    }, [timer.state.running, timer.state.paused]);
     const [pendingStop, setPendingStop] = useState(null);
     const [reason, setReason] = useState(DEFAULT_REASONS[0]);
     const [notes, setNotes] = useState("");
@@ -1690,9 +1711,11 @@ function App() {
         return { rows, overall, hasSessions };
     }, [sessions, myStops, production, rates, activeShift, clearedBefore, operator, machine, myProduction, slowTick]);
     const goalStatus = useMemo(() => {
-        const produced = myShift.rows.reduce((a, r) => a + (r.units || 0), 0);
+        var _a, _b;
+        const goal = ((_a = activeShift.goals) === null || _a === void 0 ? void 0 : _a[machine]) || 0;
+        const produced = ((_b = myShift.rows.find((r) => r.machine === machine)) === null || _b === void 0 ? void 0 : _b.units) || 0;
         return computeGoalStatus({
-            goal: activeShift.goal, produced,
+            goal, produced, machine,
             ratePerHour: rates === null || rates === void 0 ? void 0 : rates[machine], shiftEndMs: shiftEndAt(activeShift), now: Date.now(),
         });
     }, [myShift, activeShift, rates, machine, slowTick]);
@@ -1786,9 +1809,13 @@ function OperatorView(props) {
             React.createElement("div", { className: "flex items-center gap-2 min-w-0" },
                 React.createElement(Target, { size: 18, className: goalAccent(goalStatus.state) }),
                 React.createElement("div", { className: "min-w-0" },
-                    React.createElement("div", { className: "text-sm font-semibold" }, goalStatus.state === "met" ? "Goal met"
-                        : goalStatus.state === "missed" ? "Goal not achievable"
-                            : goalStatus.state === "risk" ? "Goal at risk" : "On track for goal"),
+                    React.createElement("div", { className: "text-sm font-semibold" },
+                        goalStatus.state === "met" ? "Goal met"
+                            : goalStatus.state === "missed" ? "Goal not achievable"
+                                : goalStatus.state === "risk" ? "Goal at risk" : "On track for goal",
+                        React.createElement("span", { className: `font-normal ${t.sub}` },
+                            " \u00B7 ",
+                            machine)),
                     React.createElement("div", { className: `text-[11px] ${t.sub}` },
                         goalStatus.produced,
                         " / ",
@@ -2379,7 +2406,7 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
                 shift.end,
                 " shift."))),
         tab === "manage" && (React.createElement("div", { className: "space-y-4" },
-            React.createElement(ShiftsManager, { t: t, shifts: shifts, onChange: updateShifts }),
+            React.createElement(ShiftsManager, { t: t, shifts: shifts, machines: machines, onChange: updateShifts }),
             React.createElement(ListManager, { t: t, title: "Machines", icon: React.createElement(Factory, { size: 16 }), items: machines, onChange: updateMachines, placeholder: "e.g. Line 1 - Packaging" }),
             React.createElement(ListManager, { t: t, title: "Stop reasons", icon: React.createElement(AlertCircle, { size: 16 }), items: reasons, onChange: updateReasons, placeholder: "e.g. Sensor calibration" }),
             React.createElement(QuickStopManager, { t: t, quickStops: quickStops, reasons: reasons, onChange: updateQuickStops }),
@@ -2741,17 +2768,26 @@ function RatesManager({ t, machines, rates, onChange }) {
                 React.createElement("span", { className: `text-xs ${t.sub} w-16` }, "units/h")));
         }))));
 }
-function ShiftsManager({ t, shifts, onChange }) {
+function ShiftsManager({ t, shifts, machines, onChange }) {
     const update = (id, patch) => onChange(shifts.map((s) => (s.id === id ? Object.assign(Object.assign({}, s), patch) : s)));
     const remove = (id) => { if (shifts.length > 1)
         onChange(shifts.filter((s) => s.id !== id)); };
-    const add = () => onChange([...shifts, { id: `shift-${Date.now().toString(36)}`, name: `Shift ${shifts.length + 1}`, start: "06:00", end: "14:00", goal: 0 }]);
+    const add = () => onChange([...shifts, { id: `shift-${Date.now().toString(36)}`, name: `Shift ${shifts.length + 1}`, start: "06:00", end: "14:00", goals: {} }]);
+    const setGoal = (s, m, v) => {
+        const n = Math.max(0, Math.round(Number(v) || 0));
+        const goals = Object.assign({}, (s.goals || {}));
+        if (n > 0)
+            goals[m] = n;
+        else
+            delete goals[m];
+        update(s.id, { goals });
+    };
     return (React.createElement("div", { className: `${t.card} rounded-xl p-4` },
         React.createElement("h3", { className: "font-bold mb-1 flex items-center gap-2" },
             React.createElement(Clock, { size: 16 }),
             " Shifts"),
-        React.createElement("p", { className: `text-xs ${t.sub} mb-3` }, "Time frames operators pick from. Used for uptime %, operator pace, and each shift's output goal."),
-        React.createElement("div", { className: "space-y-3" }, shifts.map((s) => (React.createElement("div", { key: s.id, className: `${t.muted} rounded-lg p-3 space-y-2` },
+        React.createElement("p", { className: `text-xs ${t.sub} mb-3` }, "Time frames operators pick from. Used for uptime %, operator pace, and a per-machine output goal (units) that drives the operator's achievability check. Leave a machine blank for no goal."),
+        React.createElement("div", { className: "space-y-3" }, shifts.map((s) => (React.createElement("div", { key: s.id, className: `${t.muted} rounded-lg p-3 space-y-3` },
             React.createElement("div", { className: "flex items-center gap-2" },
                 React.createElement("input", { value: s.name, maxLength: 24, onChange: (e) => update(s.id, { name: e.target.value }), placeholder: "Shift name", className: `flex-1 border rounded-lg px-3 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
                 shifts.length > 1 && (React.createElement("button", { onClick: () => remove(s.id), className: "text-red-500 hover:text-red-600 p-1", title: "Remove shift" },
@@ -2763,12 +2799,18 @@ function ShiftsManager({ t, shifts, onChange }) {
                 React.createElement("label", { className: "flex flex-col gap-1 text-xs" },
                     React.createElement("span", { className: t.sub }, "END"),
                     React.createElement("input", { type: "time", value: s.end, onChange: (e) => update(s.id, { end: e.target.value }), className: `border rounded-lg px-3 py-2 ${t.input}` })),
-                React.createElement("label", { className: "flex flex-col gap-1 text-xs" },
-                    React.createElement("span", { className: t.sub }, "GOAL (units)"),
-                    React.createElement("input", { type: "number", inputMode: "numeric", min: "0", value: s.goal || "", onChange: (e) => update(s.id, { goal: Math.max(0, Number(e.target.value) || 0) }), placeholder: "none", className: `w-24 border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` })),
                 React.createElement("span", { className: `text-sm ${t.sub} self-end pb-2` },
                     "= ",
-                    fmtDur(shiftLengthMs(s)))))))),
+                    fmtDur(shiftLengthMs(s)))),
+            React.createElement("div", null,
+                React.createElement("span", { className: `text-xs font-semibold ${t.sub}` }, "OUTPUT GOALS (units per machine)"),
+                React.createElement("div", { className: "mt-1 space-y-1.5" }, machines.map((m) => {
+                    var _a, _b;
+                    return (React.createElement("label", { key: m, className: "flex items-center gap-2 text-sm" },
+                        React.createElement("span", { className: "flex-1 truncate" }, m),
+                        React.createElement("input", { type: "number", inputMode: "numeric", min: "0", value: (_b = (_a = s.goals) === null || _a === void 0 ? void 0 : _a[m]) !== null && _b !== void 0 ? _b : "", onChange: (e) => setGoal(s, m, e.target.value), placeholder: "none", className: `w-24 border rounded-lg px-3 py-1.5 text-sm font-mono text-right focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
+                        React.createElement("span", { className: `text-xs ${t.sub} w-10` }, "units")));
+                }))))))),
         React.createElement("button", { onClick: add, className: `mt-3 w-full flex items-center justify-center gap-2 text-sm font-semibold py-2 rounded-lg ${t.chip} active:scale-95` },
             React.createElement(Plus, { size: 16 }),
             " Add shift")));
