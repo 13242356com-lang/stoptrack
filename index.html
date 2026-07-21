@@ -1082,6 +1082,15 @@ function App() {
     const [machine, setMachine] = useState(DEFAULT_MACHINES[0]);
     const [setupLocked, setSetupLocked] = useState(false);
     const timer = useTimer({ operator, machine });
+    useEffect(() => {
+        const n = (typeof window !== "undefined") ? window.StopTrackNative : null;
+        if (n && typeof n.reportTimerActive === "function") {
+            try {
+                n.reportTimerActive(!!(timer.state.running || timer.state.paused));
+            }
+            catch (e) { }
+        }
+    }, [timer.state.running, timer.state.paused]);
     const [pendingStop, setPendingStop] = useState(null);
     const [reason, setReason] = useState(DEFAULT_REASONS[0]);
     const [notes, setNotes] = useState("");

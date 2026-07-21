@@ -1,14 +1,17 @@
-package com.stoptrack.wear
+package com.stoptrack.shared
 
 import kotlinx.serialization.Serializable
 
 /**
- * The watch stopwatch, a direct port of the web app's `useTimer` (see
+ * The StopTrack stopwatch, a direct port of the web app's `useTimer` (see
  * ../../StopTrack.tsx). Same invariant: elapsed is DERIVED from
  * `accumulated + (now - segStart)`, never stored, so it can't drift. Pause banks
  * the current segment into `accumulated` exactly once; resume opens a new
  * segment. The machine is snapshotted at Start so switching machines mid-stop
  * doesn't re-attribute the running stop.
+ *
+ * Lives in :shared so both the watch (:wear) and the phone quick-timer (:mobile)
+ * drive one identical timer.
  */
 @Serializable
 data class TimerState(
