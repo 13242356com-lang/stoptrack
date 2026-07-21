@@ -21,6 +21,11 @@ model, some behaviours are deliberate accepted tradeoffs (below).
   logged server-side only; clients get generic messages.
 - **HTTP hardening**: `X-Content-Type-Options: nosniff` and request/header/idle
   timeouts (basic slowloris mitigation).
+- **Rate limiting** (`server/server.js`): per-IP fixed-window limits — a generous
+  overall cap (`RATE_LIMIT`, default 240/min) plus a tight cap on *failed* auth
+  (`RATE_LIMIT_AUTH`, default 20/min) that throttles token guessing. Over the
+  limit returns `429` with `Retry-After`. In-memory (per process), IP from
+  `CF-Connecting-IP`/`X-Forwarded-For` behind the tunnel.
 
 ## Accepted tradeoffs (documented, safe under the trusted-LAN model)
 - **Plain HTTP on the LAN** sends the bearer token in cleartext, so anyone
@@ -35,6 +40,12 @@ model, some behaviours are deliberate accepted tradeoffs (below).
 - **Any token-holder is fully trusted**: the API has one shared token; a holder
   can read/write all data and overwrite config. That's the intended model for a
   single-factory deployment.
+- **Publicly reachable when tunneled**: with the Cloudflare tunnel the endpoint is
+  on the internet, gated only by the token (now rate-limited). To make it truly
+  private without losing remote access, put **Cloudflare Access** (Zero Trust) in
+  front of the tunnel so an identity check precedes the token — see
+  `server/SETUP.md` Part B2. Recommended for tunnel deployments; not required on a
+  LAN-only setup.
 
 ## Known residual hardening (deferred — revisit before any hostile-network use)
 These are defense-in-depth items on the **phone app**, only verifiable on real

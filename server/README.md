@@ -43,6 +43,8 @@ Environment variables:
 | `DATA_FILE` | `<DATA_DIR>/stoptrack-data.json` | Override just the records file path if needed. |
 | `TOKEN_FILE` | `<DATA_DIR>/stoptrack-token.txt` | Override just the token file path if needed. |
 | `LOG_VERBOSE` | *(off)* | `1` logs every request (noisy — devices poll often). Default logs only meaningful activity (saves, settings changes, unauthorized attempts). |
+| `RATE_LIMIT` | `240` | Max requests per minute per client IP (overall flood cap). Normal polling (~16/min per device) stays far under it; raise it if many devices share one NAT IP, or set `0` to disable. Over the limit → `429` with `Retry-After`. |
+| `RATE_LIMIT_AUTH` | `20` | Max **failed**-auth attempts per minute per IP before `429` (throttles token guessing). Valid-token requests are never counted. `0` disables. |
 
 On first run the server auto-creates `data/`, moves any pre-existing
 `stoptrack-data.json` / `stoptrack-token.txt` into it, and logs activity to the
