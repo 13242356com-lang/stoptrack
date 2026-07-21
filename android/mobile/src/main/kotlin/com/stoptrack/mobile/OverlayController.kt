@@ -125,7 +125,6 @@ class OverlayController(
         val v = bubble ?: return
         runCatching { windowManager.removeView(v) }
         bubble = null
-        params = null
     }
 
     private fun overlayType(): Int =
