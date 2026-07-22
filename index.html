@@ -1549,7 +1549,7 @@ function App() {
             setSaving(true);
             setSaveError("");
             try {
-                nativeApi.documentStop(reason, notes.trim());
+                nativeApi.documentStop(reason, notes.trim(), operator.trim() || "Unnamed");
             }
             catch (e) { }
             setLastReason(reason);

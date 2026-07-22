@@ -109,15 +109,17 @@ class QuickStopController(
     }
 
     /** Record the pending stop with the operator-chosen reason (from the app's
-     *  reason picker), then clear it. */
+     *  reason picker), then clear it. [operator] is the name the app supplies at
+     *  document time — the web operator field, authoritative like the web's
+     *  handleSave — falling back to the native [operator] if the app sends none. */
     @Synchronized
-    fun documentPending(reason: String?, notes: String?) {
+    fun documentPending(reason: String?, notes: String?, operator: String? = null) {
         val finished = pending ?: return
         val chosen = reason?.trim().takeUnless { it.isNullOrBlank() }
             ?: reasons().firstOrNull() ?: "Other"
         val record = StopRecord.create(
             machine = finished.machine,
-            operator = operator,
+            operator = operator ?: this.operator,
             start = finished.start,
             end = finished.end,
             durationMs = finished.durationMs,

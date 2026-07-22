@@ -78,7 +78,9 @@ class CompanionService : LifecycleService() {
             // The operator picked a reason (in the app) for the pending stop, or
             // dismissed it — record or drop it.
             ACTION_DOCUMENT -> controller.documentPending(
-                intent.getStringExtra(EXTRA_REASON), intent.getStringExtra(EXTRA_NOTES),
+                intent.getStringExtra(EXTRA_REASON),
+                intent.getStringExtra(EXTRA_NOTES),
+                intent.getStringExtra(EXTRA_OPERATOR),
             )
             ACTION_DISCARD -> controller.discardPending()
             // Re-check the overlay after the user grants "draw over other apps"
@@ -309,6 +311,7 @@ class CompanionService : LifecycleService() {
         const val EXTRA_MACHINE = "machine"
         const val EXTRA_REASON = "reason"
         const val EXTRA_NOTES = "notes"
+        const val EXTRA_OPERATOR = "operator"
 
         fun start(context: android.content.Context) {
             val intent = Intent(context, CompanionService::class.java)

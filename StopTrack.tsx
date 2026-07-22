@@ -1491,7 +1491,9 @@ export default function App() {
     if (inShell) {
       if (!nativePending) return;
       setSaving(true); setSaveError("");
-      try { nativeApi.documentStop(reason, notes.trim()); } catch (e) { /* ignore */ }
+      // Pass the web operator field so native records the stop under the same name
+      // the web app's handleSave would (its own field, not the native settings one).
+      try { nativeApi.documentStop(reason, notes.trim(), operator.trim() || "Unnamed"); } catch (e) { /* ignore */ }
       setLastReason(reason); persistPrefs({ lastReason: reason });
       sync.flush();
       setSaving(false);

@@ -247,10 +247,11 @@ class MainActivity : ComponentActivity() {
         fun endStop() = fire(CompanionService.ACTION_END)
 
         @JavascriptInterface
-        fun documentStop(reason: String?, notes: String?) =
+        fun documentStop(reason: String?, notes: String?, operator: String?) =
             fire(CompanionService.ACTION_DOCUMENT) {
                 it.putExtra(CompanionService.EXTRA_REASON, reason ?: "")
                 it.putExtra(CompanionService.EXTRA_NOTES, notes ?: "")
+                it.putExtra(CompanionService.EXTRA_OPERATOR, operator ?: "")
             }
 
         @JavascriptInterface
