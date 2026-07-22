@@ -27,8 +27,8 @@ android {
         // Wear OS 3 (Galaxy Watch 4 and newer) = API 30.
         minSdk = 30
         targetSdk = 34
-        versionCode = 7
-        versionName = "0.5.2"
+        versionCode = 8
+        versionName = "0.5.3"
     }
 
     signingConfigs {
