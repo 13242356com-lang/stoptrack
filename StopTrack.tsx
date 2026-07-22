@@ -1084,6 +1084,9 @@ export default function App() {
 
   // documentation of a just-ended stop
   const [pendingStop, setPendingStop] = useState(null);
+  // Signature of the last stop saved, to dedupe a double-tap on Save in the shell
+  // (whose reason picker is native-owned and clears a moment after recording).
+  const lastSavedSigRef = useRef(null);
   const [reason, setReason] = useState(DEFAULT_REASONS[0]);
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
@@ -1486,36 +1489,37 @@ export default function App() {
   };
 
   const handleSave = async () => {
-    // Shell: hand the chosen reason to native, which records the stop (it then
-    // syncs back into the web store via the local server) and clears the pending.
-    if (inShell) {
-      if (!nativePending) return;
-      setSaving(true); setSaveError("");
-      // Pass the web operator field so native records the stop under the same name
-      // the web app's handleSave would (its own field, not the native settings one).
-      try { nativeApi.documentStop(reason, notes.trim(), operator.trim() || "Unnamed"); } catch (e) { /* ignore */ }
-      setLastReason(reason); persistPrefs({ lastReason: reason });
-      sync.flush();
-      setSaving(false);
-      return;
-    }
-    if (!pendingStop) return;
+    // The finished stop comes from the native timer in the shell, or the local
+    // useTimer in a browser — same shape either way ({start,end,duration,machine}).
+    // Recording is ALWAYS done here, locally + immediately (api.saveStop + setStops),
+    // so the stop shows in the operator list the instant it's saved — no dependence
+    // on a sync round-trip. In the shell we then tell native to drop its pending
+    // (the web owns the record). This is the proven v0.5 recording path.
+    const finished = inShell ? nativePending : pendingStop;
+    if (!finished) return;
+    // Guard a double-tap: the shell's reason picker is native-owned and clears a
+    // beat after save, so block re-recording the same finished stop.
+    const sig = `${finished.start}-${finished.end}-${finished.duration}`;
+    if (lastSavedSigRef.current === sig) return;
     setSaving(true); setSaveError("");
-    const id = `${pendingStop.start}-${Math.floor(Math.random() * 1e6)}`;
+    const id = `${finished.start}-${Math.floor(Math.random() * 1e6)}`;
     const record = {
       id,
-      machine: pendingStop.machine || machine, // pinned at Start; falls back for old recoveries
+      machine: finished.machine || machine, // pinned at Start; falls back for old recoveries
       operator: operator.trim() || "Unnamed",
-      start: pendingStop.start, end: pendingStop.end, duration: pendingStop.duration,
+      start: finished.start, end: finished.end, duration: finished.duration,
       reason, notes: notes.trim(), discarded: false,
       loggedAt: Date.now(), // when the record was created; drives shift membership
       updatedAt: Date.now(), // last-write-wins clock for sync
     };
     const res = await api.saveStop(record);
     if (res.ok) {
+      lastSavedSigRef.current = sig;
       setStops((prev) => [record, ...prev]);
       setLastReason(reason); persistPrefs({ lastReason: reason });
       setPendingStop(null);
+      // Native recorded nothing; just clear its pending now the web has the record.
+      if (inShell) { try { nativeApi.discardStop(); } catch (e) { /* ignore */ } }
       sync.flush();
     } else {
       setSaveError(res.error || "The stop didn't save. Try again.");

@@ -1189,6 +1189,7 @@ function App() {
         return () => clearInterval(iv);
     }, [inShell, nativeTimer && nativeTimer.running, nativeTimer && nativeTimer.paused]);
     const [pendingStop, setPendingStop] = useState(null);
+    const lastSavedSigRef = useRef(null);
     const [reason, setReason] = useState(DEFAULT_REASONS[0]);
     const [notes, setNotes] = useState("");
     const [saving, setSaving] = useState(false);
@@ -1543,41 +1544,37 @@ function App() {
         setSaveError("");
     };
     const handleSave = async () => {
-        if (inShell) {
-            if (!nativePending)
-                return;
-            setSaving(true);
-            setSaveError("");
-            try {
-                nativeApi.documentStop(reason, notes.trim(), operator.trim() || "Unnamed");
-            }
-            catch (e) { }
-            setLastReason(reason);
-            persistPrefs({ lastReason: reason });
-            sync.flush();
-            setSaving(false);
+        const finished = inShell ? nativePending : pendingStop;
+        if (!finished)
             return;
-        }
-        if (!pendingStop)
+        const sig = `${finished.start}-${finished.end}-${finished.duration}`;
+        if (lastSavedSigRef.current === sig)
             return;
         setSaving(true);
         setSaveError("");
-        const id = `${pendingStop.start}-${Math.floor(Math.random() * 1e6)}`;
+        const id = `${finished.start}-${Math.floor(Math.random() * 1e6)}`;
         const record = {
             id,
-            machine: pendingStop.machine || machine,
+            machine: finished.machine || machine,
             operator: operator.trim() || "Unnamed",
-            start: pendingStop.start, end: pendingStop.end, duration: pendingStop.duration,
+            start: finished.start, end: finished.end, duration: finished.duration,
             reason, notes: notes.trim(), discarded: false,
             loggedAt: Date.now(),
             updatedAt: Date.now(),
         };
         const res = await api.saveStop(record);
         if (res.ok) {
+            lastSavedSigRef.current = sig;
             setStops((prev) => [record, ...prev]);
             setLastReason(reason);
             persistPrefs({ lastReason: reason });
             setPendingStop(null);
+            if (inShell) {
+                try {
+                    nativeApi.discardStop();
+                }
+                catch (e) { }
+            }
             sync.flush();
         }
         else {
