@@ -292,6 +292,28 @@ Full details in `android/README.md`. Key facts for future sessions:
   verify Data Layer pairing + the loopback bridge on real hardware.
 - **Keep `:shared` in step** with the web stop record if the data model changes.
 
+## Two-agent workflow (writer + reviewer)
+
+This repo is set up so one agent writes and a second, independent agent checks —
+the guard that would have caught the stop-report regression before it shipped.
+
+- **`.claude/agents/implementer.md`** — the writer. Makes the change, rebuilds
+  `index.html`, runs `npm test`, commits. (For most work the main session already
+  IS the writer; you don't need to spawn this unless you want a pure orchestrator.)
+- **`.claude/agents/reviewer.md`** — the checker (read-only, model: opus). Reviews
+  the working diff for regressions/correctness/missing tests and RUNS `npm test`
+  itself. Spawn it after implementing, before calling anything done; treat its
+  Blocker/Major findings as required fixes.
+- **`.claude/hooks/test-gate.sh`** (wired via `.claude/settings.json` as a `Stop`
+  hook) — the automated backstop. If `StopTrack.tsx`/`test/` have uncommitted
+  changes, a turn can't END until `npm test` passes. It's conservative: no-op when
+  nothing web-facing changed or when deps aren't installed. Disable by removing the
+  hook from `.claude/settings.json`. (Claude Code asks you to approve the hook the
+  first time — it won't run unapproved.)
+
+**The loop:** writer implements → `npm test` → spawn `reviewer` → fix its findings
+→ `npm test` → commit. The Stop hook makes the "tests ran" step non-skippable.
+
 ## Working style that fits this project
 
 - **Edit the smallest surface.** Change the two functions involved, not the whole
