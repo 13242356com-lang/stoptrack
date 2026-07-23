@@ -32,6 +32,9 @@ android {
         targetSdk = 34
         versionCode = 8
         versionName = "0.5.3"
+
+        // Instrumented (emulator) tests — a boot/smoke check on real hardware.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -101,6 +104,14 @@ dependencies {
     implementation(libs.nanohttpd)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
+
+    // Instrumented smoke test (runs on an emulator in CI). Direct coordinates so
+    // it needs no version-catalog entries.
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:core:1.6.1")
+    androidTestImplementation("androidx.test:core-ktx:1.6.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:rules:1.6.1")
 }
 
 // ---------------------------------------------------------------------------

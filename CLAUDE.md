@@ -225,6 +225,28 @@ Where `build_src.tsx` = [inline icon definitions] + [the App body from
 > hand-writing `React.createElement` — hand-conversion of 1000+ lines is
 > error-prone.
 
+### Tests — run these, don't just eyeball the diff
+Two automated layers now guard behaviour (added after a stop-reporting regression
+slipped through a compile-only check):
+
+- **Web e2e (`npm test` → `test/web-e2e.mjs`)** — renders the REAL `index.html` in
+  headless Chromium (Playwright), fulfilling the React/Tailwind CDN scripts from
+  local `node_modules` so it works offline. It injects a **mock
+  `window.StopTrackNative`** to exercise the Android shell path, then drives
+  Start→End→reason→Save and asserts the stop is **recorded immediately** (reads
+  `localStorage`), with correct operator attribution. This runs in the cloud
+  session — **run it after any `StopTrack.tsx` change.** CI: `.github/workflows/web-test.yml`.
+- **Emulator smoke test (CI only)** — `android/mobile/src/androidTest/.../SmokeTest.kt`
+  boots the app on a real emulator and asserts it launches and stays RESUMED (no
+  boot crash), and uploads a screenshot of the live UI. Can't run in the cloud
+  session (no SDK/emulator); it runs in CI via `.github/workflows/android-emulator.yml`
+  (`reactivecircus/android-emulator-runner`). This is the "Claude can check the
+  running APK" path — asynchronously, through CI.
+
+The lesson: a green **compile** is not a passing **run**. The web layer (where the
+operator stop-flow lives) is fully runnable here — use the web e2e, not just the
+build gate.
+
 ---
 
 ## The Wear OS companion (`android/`)
