@@ -253,6 +253,14 @@ function formatReportText(r) {
 }
 
 function downloadFile(content, filename, type) {
+  // In the Android shell a blob/anchor download is silently dropped by the WebView
+  // (no DownloadListener, and blob: URLs never reach it). Hand the bytes to native,
+  // which writes the file to the Downloads folder. Falls back to the browser path.
+  const n = (typeof window !== "undefined") ? window.StopTrackNative : null;
+  if (n && typeof n.saveFile === "function") {
+    try { n.saveFile(filename, type || "application/octet-stream", String(content)); return; }
+    catch (e) { /* fall through to the browser download */ }
+  }
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -777,6 +785,13 @@ function useTheme(dark) {
    ========================================================================== */
 const emptyTimer = { running: false, paused: false, startTs: null, accumulated: 0, segStart: null };
 
+// Derived elapsed for a web-shaped timer state (used by the native-shell mirror).
+// Same rule as useTimer's `elapsed`, so the display can't disagree with the state.
+function nativeElapsed(s, now) {
+  if (!s) return 0;
+  return s.paused ? s.accumulated : s.running ? s.accumulated + (now - s.segStart) : s.accumulated;
+}
+
 function useTimer({ operator, machine }) {
   const [state, setState] = useState(emptyTimer);
   const [now, setNow] = useState(Date.now());
@@ -1026,18 +1041,52 @@ export default function App() {
   const [setupLocked, setSetupLocked] = useState(false);
   const timer = useTimer({ operator, machine });
 
-  // In the native Android shell, tell the app when the in-app timer is
-  // running/paused so its notification + floating "quick stop" button don't offer
-  // a second Start (which would double-count the same stop). No-op in a browser.
+  // --- Native Android shell -------------------------------------------------
+  // On the phone app the NATIVE quick-stop timer (notification + floating bubble)
+  // is the single source of truth: the same one timer that logs a stop when the
+  // app is closed. Here the operator timer becomes a view/controller over it —
+  // buttons drive native, the display mirrors native, and End routes the finished
+  // stop into the existing reason picker (below). In a plain browser `nativeApi`
+  // is null and every branch here stays inert; the local useTimer path is unchanged.
+  const nativeApi = (typeof window !== "undefined") ? window.StopTrackNative : null;
+  const inShell = !!(nativeApi && typeof nativeApi.startStop === "function");
+  const [nativeTimer, setNativeTimer] = useState(null);     // web-shaped timer state
+  const [nativePending, setNativePending] = useState(null); // finished stop awaiting a reason
+  const [nowTick, setNowTick] = useState(Date.now());
+
+  // Receive native state pushes; keep the timer + pending state in React.
   useEffect(() => {
-    const n = (typeof window !== "undefined") ? window.StopTrackNative : null;
-    if (n && typeof n.reportTimerActive === "function") {
-      try { n.reportTimerActive(!!(timer.state.running || timer.state.paused)); } catch (e) { /* ignore */ }
-    }
-  }, [timer.state.running, timer.state.paused]);
+    if (!inShell) return;
+    window.StopTrackShell = {
+      onState(s) {
+        try {
+          const d = (typeof s === "string") ? JSON.parse(s) : s;
+          const ts = d && d.timer;
+          setNativeTimer(ts ? {
+            running: !!ts.running, paused: !!ts.paused, startTs: ts.startTs ?? null,
+            accumulated: ts.accumulatedMs || 0, segStart: ts.segStartMs ?? null, machine: ts.machine || "",
+          } : emptyTimer);
+          const p = d && d.pending;
+          setNativePending(p ? { start: p.start, end: p.end, duration: p.durationMs, machine: p.machine } : null);
+        } catch (e) { /* ignore malformed pushes */ }
+      },
+    };
+    try { if (typeof nativeApi.requestState === "function") nativeApi.requestState(); } catch (e) { /* ignore */ }
+    return () => { try { delete window.StopTrackShell; } catch (e) { window.StopTrackShell = undefined; } };
+  }, [inShell]);
+
+  // Live re-render while a native stop is actively running (elapsed is derived).
+  useEffect(() => {
+    if (!inShell || !nativeTimer || !nativeTimer.running || nativeTimer.paused) return;
+    const iv = setInterval(() => setNowTick(Date.now()), 250);
+    return () => clearInterval(iv);
+  }, [inShell, nativeTimer && nativeTimer.running, nativeTimer && nativeTimer.paused]);
 
   // documentation of a just-ended stop
   const [pendingStop, setPendingStop] = useState(null);
+  // Signature of the last stop saved, to dedupe a double-tap on Save in the shell
+  // (whose reason picker is native-owned and clears a moment after recording).
+  const lastSavedSigRef = useRef(null);
   const [reason, setReason] = useState(DEFAULT_REASONS[0]);
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
@@ -1344,6 +1393,16 @@ export default function App() {
   useEffect(() => { if (machines.length && !machines.includes(machine)) setMachine(machines[0]); }, [machines, machine]);
   useEffect(() => { if (reasons.length && !reasons.includes(reason)) setReason(reasons[0]); }, [reasons, reason]);
 
+  // In the shell, when the native timer hands back a stop awaiting a reason, seed
+  // the reason picker exactly like handleStop does in the browser.
+  const nativePendingActive = !!nativePending;
+  useEffect(() => {
+    if (inShell && nativePendingActive) {
+      setReason(lastReason && reasons.includes(lastReason) ? lastReason : reasons[0]);
+      setNotes(""); setSaveError("");
+    }
+  }, [inShell, nativePendingActive]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ---- config + prefs writers ---------------------------------------------
   // Shared config carries an updatedAt so config sync can resolve LWW. Bumped on
   // every edit; the new value is returned so callers can push it immediately.
@@ -1419,6 +1478,9 @@ export default function App() {
 
   // ---- stop lifecycle ------------------------------------------------------
   const handleStop = () => {
+    // In the shell End goes to native, which stashes the finished stop and pushes
+    // it back as `nativePending` — the reason picker then shows via the same UI.
+    if (inShell) { try { nativeApi.endStop(); } catch (e) { /* ignore */ } return; }
     const finished = timer.stop();
     setPendingStop(finished);
     setReason(lastReason && reasons.includes(lastReason) ? lastReason : reasons[0]);
@@ -1427,23 +1489,37 @@ export default function App() {
   };
 
   const handleSave = async () => {
-    if (!pendingStop) return;
+    // The finished stop comes from the native timer in the shell, or the local
+    // useTimer in a browser — same shape either way ({start,end,duration,machine}).
+    // Recording is ALWAYS done here, locally + immediately (api.saveStop + setStops),
+    // so the stop shows in the operator list the instant it's saved — no dependence
+    // on a sync round-trip. In the shell we then tell native to drop its pending
+    // (the web owns the record). This is the proven v0.5 recording path.
+    const finished = inShell ? nativePending : pendingStop;
+    if (!finished) return;
+    // Guard a double-tap: the shell's reason picker is native-owned and clears a
+    // beat after save, so block re-recording the same finished stop.
+    const sig = `${finished.start}-${finished.end}-${finished.duration}`;
+    if (lastSavedSigRef.current === sig) return;
     setSaving(true); setSaveError("");
-    const id = `${pendingStop.start}-${Math.floor(Math.random() * 1e6)}`;
+    const id = `${finished.start}-${Math.floor(Math.random() * 1e6)}`;
     const record = {
       id,
-      machine: pendingStop.machine || machine, // pinned at Start; falls back for old recoveries
+      machine: finished.machine || machine, // pinned at Start; falls back for old recoveries
       operator: operator.trim() || "Unnamed",
-      start: pendingStop.start, end: pendingStop.end, duration: pendingStop.duration,
+      start: finished.start, end: finished.end, duration: finished.duration,
       reason, notes: notes.trim(), discarded: false,
       loggedAt: Date.now(), // when the record was created; drives shift membership
       updatedAt: Date.now(), // last-write-wins clock for sync
     };
     const res = await api.saveStop(record);
     if (res.ok) {
+      lastSavedSigRef.current = sig;
       setStops((prev) => [record, ...prev]);
       setLastReason(reason); persistPrefs({ lastReason: reason });
       setPendingStop(null);
+      // Native recorded nothing; just clear its pending now the web has the record.
+      if (inShell) { try { nativeApi.discardStop(); } catch (e) { /* ignore */ } }
       sync.flush();
     } else {
       setSaveError(res.error || "The stop didn't save. Try again.");
@@ -1451,7 +1527,10 @@ export default function App() {
     setSaving(false);
   };
 
-  const handleDiscardPending = () => { setPendingStop(null); setSaveError(""); };
+  const handleDiscardPending = () => {
+    if (inShell) { try { nativeApi.discardStop(); } catch (e) { /* ignore */ } setSaveError(""); return; }
+    setPendingStop(null); setSaveError("");
+  };
 
   const applyQuickStop = (q) => {
     if (reasons.includes(q.reason)) setReason(q.reason);
@@ -1689,6 +1768,17 @@ export default function App() {
     });
   }, [myShift, activeShift, rates, machine, slowTick]);
 
+  // In the shell the operator timer is a view over the native timer: display from
+  // the pushed state, buttons drive native. In a browser it's the local useTimer.
+  const effectivePending = inShell ? nativePending : pendingStop;
+  const effectiveTimer = inShell ? {
+    state: nativeTimer || emptyTimer,
+    elapsed: nativeElapsed(nativeTimer, nowTick),
+    start: () => { try { nativeApi.startStop(machine); } catch (e) { /* ignore */ } },
+    pause: () => { try { nativeApi.pauseStop(); } catch (e) { /* ignore */ } },
+    resume: () => { try { nativeApi.resumeStop(); } catch (e) { /* ignore */ } },
+  } : timer;
+
   return (
     <div className={`min-h-screen ${t.app} transition-colors`}>
       <header className="bg-slate-900 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-10">
@@ -1734,8 +1824,8 @@ export default function App() {
         {view === "operator" ? (
           <OperatorView
             t={t} operator={operator} setOperator={setOperator} machine={machine} setMachine={switchMachine}
-            timer={timer} onStop={handleStop}
-            pendingStop={pendingStop} reason={reason} setReason={setReason} notes={notes} setNotes={setNotes}
+            timer={effectiveTimer} onStop={handleStop}
+            pendingStop={effectivePending} reason={reason} setReason={setReason} notes={notes} setNotes={setNotes}
             onSave={handleSave} onDiscardPending={handleDiscardPending} saving={saving} saveError={saveError}
             myStops={myStops} machines={machines} reasons={reasons} quickStops={quickStops}
             applyQuickStop={applyQuickStop} lastReason={lastReason}

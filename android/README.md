@@ -49,19 +49,35 @@ the watch to the existing StopTrack web app.
 
 ### Quick-stop presence (notification + floating bubble)
 So an operator can log a stop **without opening the app**, `CompanionService`
-hosts a native quick-timer (`QuickStopController`, reusing the shared `Timer`):
+hosts the native quick-timer (`QuickStopController`, reusing the shared `Timer`).
+This is the **single source of truth** for the phone's stop timer: the
+notification, the floating bubble, **and** the in-app WebView all drive and mirror
+this one timer, so they can never disagree.
 - The **persistent notification** shows the live stop timer (Idle / Recording
   mm:ss / Paused) with a monochrome status-bar icon and **Start / Pause / End**
-  actions. On End it writes a `StopRecord` straight into `PhoneStore`, which the
-  web app + supervisor pick up via the running loopback sync — works with the app
-  backgrounded or closed.
+  actions — works with the app backgrounded or closed.
+- On **End** the stop is *not* auto-recorded with a default reason. It becomes a
+  `pending` `FinishedStop`, and the app is brought forward to its existing **reason
+  picker**; picking a reason (`documentStop`) writes the `StopRecord` into
+  `PhoneStore`, which the web app + supervisor pick up via the loopback sync.
 - The **floating "Shazam-style" bubble** (`OverlayController`, a draggable
   `WindowManager` overlay) mirrors + toggles the same timer over other apps. It
   needs the one-time **Display over other apps** permission (`SYSTEM_ALERT_WINDOW`),
   toggled in Bridge settings → *Quick stop*.
-- To avoid double-counting, the web app reports its own timer via
-  `NativeBridge.reportTimerActive(...)`; while an in-app stop runs, the native
-  surfaces hide their Start.
+- The WebView is wired to native through the two-way `MainActivity.NativeBridge`:
+  JS→native `startStop/pauseStop/resumeStop/endStop/documentStop/discardStop`, and
+  native→JS state pushes via `window.StopTrackShell.onState(...)`. In a plain
+  browser (no shell) the web app falls back to its own local timer, unchanged.
+
+### Backup & Restore inside the WebView
+A WebView doesn't do browser-style downloads or `<input type=file>` pickers on its
+own, so the phone app wires both:
+- **Download backup / CSV / JSON** → `NativeBridge.saveFile(...)` writes the file
+  to the device **Downloads** folder (MediaStore on API 29+, the app's external
+  Downloads dir below that). The web `downloadFile` helper calls this when the
+  shell is present and falls back to a blob download in a plain browser.
+- **Restore from backup** → a `WebChromeClient.onShowFileChooser` routes the file
+  input to the system document picker.
 
 ---
 

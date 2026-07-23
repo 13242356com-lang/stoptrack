@@ -33,7 +33,12 @@ data class TimerState(
     }
 }
 
-/** The finished stop handed to the documentation step (start/end/duration + machine). */
+/**
+ * The finished stop handed to the documentation step (start/end/duration +
+ * machine). Serializable so the phone can persist it as a "pending" stop —
+ * awaiting the operator's reason — across a foreground-service restart.
+ */
+@Serializable
 data class FinishedStop(
     val start: Long,
     val end: Long,

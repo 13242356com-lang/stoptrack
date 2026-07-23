@@ -2,13 +2,20 @@ package com.stoptrack.mobile
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ContentValues
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
 import android.webkit.JavascriptInterface
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
@@ -33,8 +40,25 @@ class MainActivity : ComponentActivity() {
     @Volatile
     private var syncPort: Int = Settings.DEFAULT_PORT
 
+    /** Last native timer/pending state pushed to the WebView, kept so a freshly
+     *  loaded page can pull the current state on demand (`requestState`). */
+    @Volatile
+    private var lastStatePayload: String = """{"timer":null,"pending":null}"""
+
     private val notifPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* best-effort */ }
+
+    /** Pending `<input type=file>` callback (Restore-from-backup picker), fed by
+     *  [fileChooserLauncher]. */
+    private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
+
+    /** System document picker for the web app's file inputs (Restore from backup).
+     *  A WebView shows no picker without a WebChromeClient wired to one. */
+    private val fileChooserLauncher =
+        registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+            fileChooserCallback?.onReceiveValue(if (uri != null) arrayOf(uri) else null)
+            fileChooserCallback = null
+        }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -48,9 +72,18 @@ class MainActivity : ComponentActivity() {
         // the watch. Guarded so a service hiccup can't stop the UI opening.
         runCatching { CompanionService.start(this) }
 
-        // Keep the port the JS bridge reports in step with settings.
+        // Keep the port the JS bridge reports in step with settings, and mirror the
+        // native timer/pending state into the WebView on every change (the native
+        // quick-stop timer is the single source of truth; the web UI is a view).
         lifecycleScope.launch {
-            Prefs(applicationContext).settings.collect { syncPort = it.localPort }
+            Prefs(applicationContext).settings.collect { s ->
+                syncPort = s.localPort
+                val timer = s.inProgress.ifBlank { "null" }
+                val pending = s.pendingStop.ifBlank { "null" }
+                val payload = "{\"timer\":$timer,\"pending\":$pending}"
+                lastStatePayload = payload
+                pushState(payload)
+            }
         }
 
         val web = try {
@@ -88,6 +121,25 @@ class MainActivity : ComponentActivity() {
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         }
         webViewClient = WebViewClient()
+        // Without a WebChromeClient the web app's <input type=file> (Restore from
+        // backup) opens nothing — route it to the system document picker.
+        webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(
+                view: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                params: FileChooserParams?,
+            ): Boolean {
+                fileChooserCallback?.onReceiveValue(null) // cancel any earlier request
+                fileChooserCallback = filePathCallback
+                return try {
+                    fileChooserLauncher.launch("*/*")
+                    true
+                } catch (e: Exception) {
+                    fileChooserCallback = null
+                    false
+                }
+            }
+        }
         addJavascriptInterface(NativeBridge(), "StopTrackNative")
     }
 
@@ -97,7 +149,60 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    /** Exposed to the web app as `window.StopTrackNative`. */
+    /** Deliver native timer/pending state to the web app's shell hook. */
+    private fun pushState(payload: String) {
+        runOnUiThread {
+            runCatching {
+                webView?.evaluateJavascript(
+                    "window.StopTrackShell && window.StopTrackShell.onState($payload);", null,
+                )
+            }
+        }
+    }
+
+    /**
+     * Write [content] to the device's Downloads. API 29+ uses MediaStore (no
+     * permission, lands in the shared Downloads folder); older devices fall back
+     * to the app's external Downloads dir. Returns a human-readable location, or
+     * null on failure.
+     */
+    private fun writeToDownloads(filename: String, mimeType: String, content: String): String? {
+        val bytes = content.toByteArray(Charsets.UTF_8)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, filename)
+                put(MediaStore.Downloads.MIME_TYPE, mimeType)
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val resolver = contentResolver
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
+            resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: return null
+            values.clear()
+            values.put(MediaStore.Downloads.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+            return "Downloads/$filename"
+        }
+        val dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: filesDir
+        val file = java.io.File(dir, filename)
+        file.outputStream().use { it.write(bytes) }
+        return file.absolutePath
+    }
+
+    /** Fire a command to the always-on service (which owns the timer). */
+    private fun fire(action: String, extras: (Intent) -> Unit = {}) {
+        runCatching {
+            startService(
+                Intent(this, CompanionService::class.java).setAction(action).also(extras),
+            )
+        }
+    }
+
+    /**
+     * Exposed to the web app as `window.StopTrackNative`. Two-way: the timer
+     * controls (start/pause/resume/end/document/discard) drive the native
+     * quick-stop timer, and [requestState] pulls the current state so the WebView
+     * mirrors it. The native timer stays the single source of truth.
+     */
     private inner class NativeBridge {
         /** Tells the web app where the built-in bridge's sync server is. */
         @JavascriptInterface
@@ -107,19 +212,50 @@ class MainActivity : ComponentActivity() {
         @JavascriptInterface
         fun token(): String = ""
 
-        /** The web app reports when its own stop-timer is running/paused, so the
-         *  native notification + floating bubble suppress their Start and can't
-         *  double-count the same stop. */
+        /** Save a file (backup / CSV / JSON export) to the Downloads folder. A blob
+         *  download from the WebView is silently dropped, so the web app hands the
+         *  bytes here instead. */
         @JavascriptInterface
-        fun reportTimerActive(active: Boolean) {
-            runCatching {
-                startService(
-                    Intent(this@MainActivity, CompanionService::class.java)
-                        .setAction(CompanionService.ACTION_WEB_TIMER)
-                        .putExtra(CompanionService.EXTRA_ACTIVE, active),
-                )
+        fun saveFile(filename: String, mimeType: String?, content: String) {
+            val loc = runCatching {
+                writeToDownloads(filename, mimeType?.ifBlank { null } ?: "application/octet-stream", content)
+            }.getOrNull()
+            runOnUiThread {
+                Toast.makeText(
+                    this@MainActivity,
+                    if (loc != null) "Saved: $loc" else "Couldn't save $filename",
+                    Toast.LENGTH_LONG,
+                ).show()
             }
         }
+
+        /** Push the current native timer/pending state to the just-registered shell. */
+        @JavascriptInterface
+        fun requestState() = pushState(lastStatePayload)
+
+        @JavascriptInterface
+        fun startStop(machine: String?) =
+            fire(CompanionService.ACTION_START) { it.putExtra(CompanionService.EXTRA_MACHINE, machine ?: "") }
+
+        @JavascriptInterface
+        fun pauseStop() = fire(CompanionService.ACTION_PAUSE)
+
+        @JavascriptInterface
+        fun resumeStop() = fire(CompanionService.ACTION_RESUME)
+
+        @JavascriptInterface
+        fun endStop() = fire(CompanionService.ACTION_END)
+
+        @JavascriptInterface
+        fun documentStop(reason: String?, notes: String?, operator: String?) =
+            fire(CompanionService.ACTION_DOCUMENT) {
+                it.putExtra(CompanionService.EXTRA_REASON, reason ?: "")
+                it.putExtra(CompanionService.EXTRA_NOTES, notes ?: "")
+                it.putExtra(CompanionService.EXTRA_OPERATOR, operator ?: "")
+            }
+
+        @JavascriptInterface
+        fun discardStop() = fire(CompanionService.ACTION_DISCARD)
     }
 
     private companion object {

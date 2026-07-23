@@ -225,6 +225,28 @@ Where `build_src.tsx` = [inline icon definitions] + [the App body from
 > hand-writing `React.createElement` — hand-conversion of 1000+ lines is
 > error-prone.
 
+### Tests — run these, don't just eyeball the diff
+Two automated layers now guard behaviour (added after a stop-reporting regression
+slipped through a compile-only check):
+
+- **Web e2e (`npm test` → `test/web-e2e.mjs`)** — renders the REAL `index.html` in
+  headless Chromium (Playwright), fulfilling the React/Tailwind CDN scripts from
+  local `node_modules` so it works offline. It injects a **mock
+  `window.StopTrackNative`** to exercise the Android shell path, then drives
+  Start→End→reason→Save and asserts the stop is **recorded immediately** (reads
+  `localStorage`), with correct operator attribution. This runs in the cloud
+  session — **run it after any `StopTrack.tsx` change.** CI: `.github/workflows/web-test.yml`.
+- **Emulator smoke test (CI only)** — `android/mobile/src/androidTest/.../SmokeTest.kt`
+  boots the app on a real emulator and asserts it launches and stays RESUMED (no
+  boot crash), and uploads a screenshot of the live UI. Can't run in the cloud
+  session (no SDK/emulator); it runs in CI via `.github/workflows/android-emulator.yml`
+  (`reactivecircus/android-emulator-runner`). This is the "Claude can check the
+  running APK" path — asynchronously, through CI.
+
+The lesson: a green **compile** is not a passing **run**. The web layer (where the
+operator stop-flow lives) is fully runnable here — use the web e2e, not just the
+build gate.
+
 ---
 
 ## The Wear OS companion (`android/`)
@@ -256,12 +278,41 @@ Full details in `android/README.md`. Key facts for future sessions:
   Wear listener, optional `RemoteForwarder`, and the **quick-stop presence** —
   `QuickStopController` + notification actions + `OverlayController` floating
   bubble, so a stop can be logged from the notification/bubble without opening the
-  app; needs `SYSTEM_ALERT_WINDOW` for the overlay).
+  app; needs `SYSTEM_ALERT_WINDOW` for the overlay). **`QuickStopController` is the
+  single source of truth for the phone's stop timer** — the notification, the
+  bubble, and the in-app WebView all drive/mirror this one timer (the WebView via
+  the two-way `MainActivity.NativeBridge`: JS→native start/pause/resume/end/
+  document/discard, native→JS `window.StopTrackShell.onState(...)`). **End never
+  auto-records a default reason** — it stashes a `pending` `FinishedStop` and opens
+  the app's reason picker (`documentStop`). A plain browser has no shell and keeps
+  its own local `useTimer`, unchanged.
 - **Build reality:** needs the Android SDK + Android Studio; **can't be built or
   runtime-tested in the cloud/CI session** (no SDK, no watch). Only `:shared`
   and the wear timer/format logic are compile-verified. Build in Android Studio;
   verify Data Layer pairing + the loopback bridge on real hardware.
 - **Keep `:shared` in step** with the web stop record if the data model changes.
+
+## Two-agent workflow (writer + reviewer)
+
+This repo is set up so one agent writes and a second, independent agent checks —
+the guard that would have caught the stop-report regression before it shipped.
+
+- **`.claude/agents/implementer.md`** — the writer. Makes the change, rebuilds
+  `index.html`, runs `npm test`, commits. (For most work the main session already
+  IS the writer; you don't need to spawn this unless you want a pure orchestrator.)
+- **`.claude/agents/reviewer.md`** — the checker (read-only, model: opus). Reviews
+  the working diff for regressions/correctness/missing tests and RUNS `npm test`
+  itself. Spawn it after implementing, before calling anything done; treat its
+  Blocker/Major findings as required fixes.
+- **`.claude/hooks/test-gate.sh`** (wired via `.claude/settings.json` as a `Stop`
+  hook) — the automated backstop. If `StopTrack.tsx`/`test/` have uncommitted
+  changes, a turn can't END until `npm test` passes. It's conservative: no-op when
+  nothing web-facing changed or when deps aren't installed. Disable by removing the
+  hook from `.claude/settings.json`. (Claude Code asks you to approve the hook the
+  first time — it won't run unapproved.)
+
+**The loop:** writer implements → `npm test` → spawn `reviewer` → fix its findings
+→ `npm test` → commit. The Stop hook makes the "tests ran" step non-skippable.
 
 ## Working style that fits this project
 
