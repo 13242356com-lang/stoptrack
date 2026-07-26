@@ -30,8 +30,8 @@ android {
         applicationId = "com.stoptrack"
         minSdk = 26
         targetSdk = 34
-        versionCode = 8
-        versionName = "0.5.3"
+        versionCode = 9
+        versionName = "0.6"
 
         // Instrumented (emulator) tests — a boot/smoke check on real hardware.
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
