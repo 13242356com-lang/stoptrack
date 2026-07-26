@@ -71,6 +71,20 @@
             </intent-filter>
         </service>
 
+        <!-- Hands the shift-handout PNG to the system share sheet. Android won't
+             accept a file:// URI in an ACTION_SEND, so the image is written to
+             the private cache and shared as a content:// URI with a temporary
+             read grant. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
     </application>
 
 </manifest>

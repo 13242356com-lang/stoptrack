@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Base64
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -20,6 +21,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import com.stoptrack.mobile.ui.CompanionTheme
 import com.stoptrack.mobile.ui.StartupError
@@ -166,8 +168,10 @@ class MainActivity : ComponentActivity() {
      * to the app's external Downloads dir. Returns a human-readable location, or
      * null on failure.
      */
-    private fun writeToDownloads(filename: String, mimeType: String, content: String): String? {
-        val bytes = content.toByteArray(Charsets.UTF_8)
+    private fun writeToDownloads(filename: String, mimeType: String, content: String): String? =
+        writeToDownloads(filename, mimeType, content.toByteArray(Charsets.UTF_8))
+
+    private fun writeToDownloads(filename: String, mimeType: String, bytes: ByteArray): String? {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, filename)
@@ -226,6 +230,46 @@ class MainActivity : ComponentActivity() {
                     if (loc != null) "Saved: $loc" else "Couldn't save $filename",
                     Toast.LENGTH_LONG,
                 ).show()
+            }
+        }
+
+        /** Save the shift-handout PNG (base64 from the web app's canvas) to Downloads. */
+        @JavascriptInterface
+        fun saveImage(filename: String, base64: String) {
+            val loc = runCatching {
+                writeToDownloads(filename, "image/png", Base64.decode(base64, Base64.DEFAULT))
+            }.getOrNull()
+            runOnUiThread {
+                Toast.makeText(
+                    this@MainActivity,
+                    if (loc != null) "Saved: $loc" else "Couldn't save $filename",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+        }
+
+        /** Hand the shift handout to the system share sheet (WhatsApp, Teams, mail…). */
+        @JavascriptInterface
+        fun shareImage(filename: String, base64: String, text: String?) {
+            val ok = runCatching {
+                val dir = java.io.File(cacheDir, "shared").apply { mkdirs() }
+                val file = java.io.File(dir, filename)
+                file.outputStream().use { it.write(Base64.decode(base64, Base64.DEFAULT)) }
+                val uri = FileProvider.getUriForFile(
+                    this@MainActivity, "$packageName.fileprovider", file,
+                )
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = "image/png"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    if (!text.isNullOrBlank()) putExtra(Intent.EXTRA_TEXT, text)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                startActivity(Intent.createChooser(send, "Share shift handout").apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                })
+            }.isSuccess
+            if (!ok) runOnUiThread {
+                Toast.makeText(this@MainActivity, "Couldn't share the handout", Toast.LENGTH_LONG).show()
             }
         }
 

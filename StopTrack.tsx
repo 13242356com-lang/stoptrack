@@ -3,6 +3,7 @@ import {
   Play, Square, Pause, Clock, Factory, AlertCircle, BarChart3, List, User,
   RefreshCw, Trash2, CheckCircle, Settings, Plus, X, Download, Search,
   Moon, Sun, TrendingUp, RotateCcw, Zap, Archive, Sparkles, Lock, Unlock, PencilLine, Target,
+  Share2,
 } from "lucide-react";
 
 /* ============================================================================
@@ -188,7 +189,7 @@ const goalAccent = (state) =>
 // ---------- Shift handover report -------------------------------------------
 // Snapshot of the operator's current shift, for the handover modal / email.
 // Roaming-aware: machines-worked breakdown and shift-wide OEE come from myShift.
-function buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, activeShift, goalStatus }) {
+function buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, activeShift, goalStatus, note, flags }) {
   const downtimeMs = myStops.reduce((a, s) => a + s.duration, 0);
   const byReason = {};
   myStops.forEach((s) => { byReason[s.reason] = (byReason[s.reason] || 0) + s.duration; });
@@ -202,6 +203,9 @@ function buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, 
     machines: myShift.rows, hasSessions: myShift.hasSessions,
     oee: myShift.overall, goal: goalStatus || null,
     notes: myStops.filter((s) => s.notes).map((s) => ({ reason: s.reason, notes: s.notes })),
+    // The human layer, written by the operator at handover time.
+    note: (note || "").trim(),
+    flags: (flags || []).filter((f) => f && f.text && f.text.trim()),
   };
 }
 
@@ -249,7 +253,341 @@ function formatReportText(r) {
     lines.push("Notes:");
     r.notes.slice(0, 8).forEach((n) => lines.push(`  - [${n.reason}] ${n.notes}`));
   }
+  // The operator's own handover message + carry-forward flags go last: they're
+  // what the next shift actually acts on.
+  if (r.note) { lines.push(""); lines.push("For the next shift:"); lines.push(`  ${r.note}`); }
+  if (r.flags && r.flags.length) {
+    lines.push("");
+    lines.push("Flagged:");
+    r.flags.forEach((f) => lines.push(`  - [${FLAG_LEVELS[f.level]?.word || "Note"}] ${f.text}`));
+  }
   return lines.join("\n");
+}
+
+/* ============================================================================
+   SHIFT HANDOUT — the shareable card.
+   ----------------------------------------------------------------------------
+   The handover leaves the app as ONE image (that's how operators actually send
+   it), so the card is drawn straight onto a <canvas>: no library, works offline
+   and inside the APK's WebView, and the preview shown in the modal IS the PNG
+   that gets shared — one source of truth, no HTML/canvas drift.
+   ========================================================================== */
+
+// Operator-chosen severity for a flag. The operator writes the words; the level
+// only decides the colour so a supervisor can triage at a glance.
+const FLAG_LEVELS = {
+  fix:   { word: "Fix",   label: "Fix",   ink: "#f39a9a", bg: "rgba(239,68,68,.13)",  line: "rgba(239,68,68,.34)",  mark: "⚑" },
+  watch: { word: "Watch", label: "Watch", ink: "#f6c265", bg: "rgba(245,158,11,.14)", line: "rgba(245,158,11,.34)", mark: "⚠" },
+  info:  { word: "Info",  label: "Info",  ink: "#c2cbe0", bg: "rgba(148,163,208,.12)", line: "#26324a",             mark: "●" },
+};
+const FLAG_ORDER = ["watch", "fix", "info"];
+
+const HANDOUT = {
+  W: 440, PAD: 24, PADR: 20,
+  bg1: "#0d1524", bg2: "#0b1220", surf2: "#0f1826", line: "#26324a",
+  ink: "#f2f6fc", ink2: "#aeb9cd", ink3: "#6b7690",
+  brand: "#10b981", down: "#ef4444", warn: "#f59e0b",
+  sans: '-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif',
+  mono: 'ui-monospace,"SF Mono",Menlo,Consolas,monospace',
+};
+
+// Compact time/duration just for the card: a handout is read at a glance, so
+// "23:03" and "22m" beat "Jul 26, 11:03:41 PM" and "22m 0s".
+function shortTime(ms) {
+  try { return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }); }
+  catch { return fmtTime(ms); }
+}
+function shortDur(ms) {
+  const s = Math.max(0, Math.round((ms || 0) / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  if (h) return m ? `${h}h ${m}m` : `${h}h`;
+  if (m) return sec >= 30 ? `${m}m` : `${m}m`;
+  return `${sec}s`;
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
+
+// Greedy word wrap. Returns the lines that fit `maxW` at the ctx's current font.
+function wrapText(ctx, text, maxW) {
+  const out = [];
+  String(text || "").split(/\n+/).forEach((para) => {
+    let line = "";
+    para.split(/\s+/).filter(Boolean).forEach((word) => {
+      const test = line ? `${line} ${word}` : word;
+      if (ctx.measureText(test).width <= maxW || !line) line = test;
+      else { out.push(line); line = word; }
+    });
+    if (line) out.push(line);
+  });
+  return out;
+}
+
+// Lay flag chips out into rows that fit the content width.
+function layoutFlags(ctx, flags, maxW) {
+  ctx.font = `600 11.5px ${HANDOUT.sans}`;
+  const rows = [];
+  let row = [], rowW = 0;
+  (flags || []).forEach((f) => {
+    const lv = FLAG_LEVELS[f.level] || FLAG_LEVELS.info;
+    const w = ctx.measureText(`${lv.mark}  ${f.text}`).width + 22;
+    if (row.length && rowW + w + 7 > maxW) { rows.push(row); row = []; rowW = 0; }
+    row.push({ ...f, w, lv });
+    rowW += w + 7;
+  });
+  if (row.length) rows.push(row);
+  return rows;
+}
+
+/**
+ * Draw the handout and return { dataUrl, width, height }.
+ * `scale` is the pixel density of the exported PNG (2.5 → ~1100px wide, which
+ * looks crisp in a chat app without being a huge file).
+ */
+function drawHandout(r, scale = 2.5) {
+  const H = HANDOUT;
+  const contentW = H.W - H.PAD - H.PADR;
+  const meas = document.createElement("canvas").getContext("2d");
+
+  // ---- measure the variable blocks so the canvas is exactly tall enough -----
+  meas.font = `13.5px ${H.sans}`;
+  const noteLines = r.note ? wrapText(meas, r.note, contentW - 32) : [];
+  const flagRows = r.flags && r.flags.length ? layoutFlags(meas, r.flags, contentW - 32) : [];
+  const reasons = (r.topReasons || []).slice(0, 5);
+
+  const hHeader = 74, hWho = 40, hTiles = 2 * 74 + 1, hGoal = 92;
+  const hReasons = reasons.length ? 34 + reasons.length * 23 + (r.longest ? 22 : 0) + 12 : 0;
+  const hNoteBox = (noteLines.length || flagRows.length)
+    ? 16 + 24 + noteLines.length * 19 + (flagRows.length ? 8 + flagRows.length * 27 : 0) + 14
+    : 0;
+  const hNote = hNoteBox ? hNoteBox + 26 : 0;
+  const hFoot = 42;
+  const total = hHeader + hWho + hTiles + hGoal + hReasons + hNote + hFoot;
+
+  const cv = document.createElement("canvas");
+  cv.width = Math.round(H.W * scale);
+  cv.height = Math.round(total * scale);
+  const c = cv.getContext("2d");
+  c.scale(scale, scale);
+  c.textBaseline = "alphabetic";
+
+  const goalState = (r.goal && r.goal.state) || "na";
+  const health = goalState === "missed" ? H.down : goalState === "risk" ? H.warn : H.brand;
+  const goalColor = health;
+
+  // ---- ground ---------------------------------------------------------------
+  const grad = c.createLinearGradient(0, 0, 0, total);
+  grad.addColorStop(0, H.bg1); grad.addColorStop(0.4, H.bg2); grad.addColorStop(1, H.bg2);
+  c.fillStyle = grad; c.fillRect(0, 0, H.W, total);
+  c.fillStyle = health; c.fillRect(0, 0, 5, total);   // health stripe
+
+  const rule = (y) => { c.fillStyle = H.line; c.fillRect(0, y, H.W, 1); };
+  const label = (txt, x, y, color) => {
+    c.font = `700 10.5px ${H.sans}`; c.fillStyle = color || H.ink3;
+    c.fillText(String(txt).toUpperCase(), x, y);
+  };
+  let y = 0;
+
+  // ---- header ---------------------------------------------------------------
+  c.fillStyle = "rgba(16,185,129,.16)";
+  roundRect(c, H.PAD, 18, 38, 38, 11); c.fill();
+  c.strokeStyle = H.brand; c.lineWidth = 2.2; c.lineJoin = "round"; c.lineCap = "round";
+  c.beginPath();                                     // little factory glyph
+  c.moveTo(H.PAD + 9, 45); c.lineTo(H.PAD + 29, 45);
+  c.moveTo(H.PAD + 11, 45); c.lineTo(H.PAD + 11, 30); c.lineTo(H.PAD + 17, 34);
+  c.lineTo(H.PAD + 17, 30); c.lineTo(H.PAD + 23, 34); c.lineTo(H.PAD + 23, 27);
+  c.lineTo(H.PAD + 29, 31); c.lineTo(H.PAD + 29, 45);
+  c.stroke();
+  label("StopTrack", H.PAD + 49, 32);
+  c.font = `800 19px ${H.sans}`; c.fillStyle = H.ink;
+  c.fillText("Shift Handout", H.PAD + 49, 51);
+  // Date + shift window sit on their own right-hand column; the window uses
+  // 24h times so it can never grow into the title.
+  c.textAlign = "right";
+  c.font = `700 12.5px ${H.sans}`; c.fillStyle = H.ink;
+  c.fillText(r.dateLabel || "", H.W - H.PADR, 34);
+  c.font = `11.5px ${H.sans}`; c.fillStyle = H.ink2;
+  c.fillText(r.shiftLabel || "", H.W - H.PADR, 51);
+  c.textAlign = "left";
+  y = hHeader;
+
+  // ---- who → who ------------------------------------------------------------
+  const av = H.PAD + 13;
+  c.fillStyle = H.brand; c.beginPath(); c.arc(av, y + 13, 13, 0, Math.PI * 2); c.fill();
+  c.font = `800 12px ${H.sans}`; c.fillStyle = "#04140e"; c.textAlign = "center";
+  c.fillText((r.operator || "?").trim().charAt(0).toUpperCase(), av, y + 17);
+  c.textAlign = "left";
+  let x = H.PAD + 34;
+  c.font = `700 14px ${H.sans}`; c.fillStyle = H.ink;
+  c.fillText(r.operator, x, y + 18); x += c.measureText(r.operator).width + 8;
+  c.font = `700 14px ${H.sans}`; c.fillStyle = H.brand; c.fillText("→", x, y + 18); x += 18;
+  c.font = `14px ${H.sans}`; c.fillStyle = H.ink2; c.fillText("next shift", x, y + 18);
+  { // machine pill, right-aligned
+    const mt = r.machineLabel || r.machine || "";
+    c.font = `11.5px ${H.sans}`;
+    const w = c.measureText(mt).width + 28;
+    const px = H.W - H.PADR - w;
+    c.fillStyle = H.surf2; roundRect(c, px, y + 2, w, 24, 12); c.fill();
+    c.strokeStyle = H.line; c.lineWidth = 1; c.stroke();
+    c.fillStyle = H.brand; c.beginPath(); c.arc(px + 12, y + 14, 3, 0, Math.PI * 2); c.fill();
+    c.fillStyle = H.ink2; c.fillText(mt, px + 20, y + 18);
+  }
+  y += hWho;
+
+  // ---- 2×2 metric tiles -----------------------------------------------------
+  rule(y);
+  const tiles = r.tiles || [];
+  const colW = H.W / 2;
+  tiles.slice(0, 4).forEach((tl, i) => {
+    const tx = (i % 2 === 0 ? H.PAD : colW + 16);
+    const ty = y + 1 + Math.floor(i / 2) * 74;
+    label(tl.lab, tx, ty + 22);
+    c.font = `600 27px ${H.mono}`; c.fillStyle = tl.color || H.ink;
+    c.fillText(tl.val, tx, ty + 52);
+    if (tl.unit) {
+      const w = c.measureText(tl.val).width;
+      c.font = `500 14px ${H.mono}`; c.fillStyle = H.ink2; c.fillText(tl.unit, tx + w + 3, ty + 52);
+    }
+    if (tl.sub) { c.font = `11px ${H.sans}`; c.fillStyle = H.ink3; c.fillText(tl.sub, tx, ty + 67); }
+  });
+  c.fillStyle = H.line;
+  c.fillRect(colW, y + 1, 1, hTiles - 2);            // vertical divider
+  c.fillRect(0, y + 1 + 74, H.W, 1);                 // horizontal divider
+  y += hTiles; rule(y);
+
+  // ---- goal -----------------------------------------------------------------
+  if (r.goalPct != null) {
+    label("Goal", H.PAD, y + 24);
+    const cx = H.PAD + 23, cy = y + 56, rad = 15;
+    c.lineWidth = 5; c.strokeStyle = H.surf2;
+    c.beginPath(); c.arc(cx, cy, rad, 0, Math.PI * 2); c.stroke();
+    c.strokeStyle = goalColor; c.lineCap = "round";
+    c.beginPath(); c.arc(cx, cy, rad, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.max(0.001, r.goalPct / 100)); c.stroke();
+    c.font = `600 11px ${H.mono}`; c.fillStyle = H.ink; c.textAlign = "center";
+    c.fillText(`${Math.round(r.goalPct)}%`, cx, cy + 4); c.textAlign = "left";
+    const gx = H.PAD + 52;
+    { // status pill
+      c.font = `700 11px ${H.sans}`;
+      const w = c.measureText(r.goalLabel).width + 18;
+      c.fillStyle = goalState === "missed" ? "rgba(239,68,68,.15)" : goalState === "risk" ? "rgba(245,158,11,.15)" : "rgba(16,185,129,.15)";
+      roundRect(c, gx, y + 34, w, 20, 10); c.fill();
+      c.fillStyle = goalState === "missed" ? "#fb8a8a" : goalState === "risk" ? "#facc6b" : "#4ee0af";
+      c.fillText(r.goalLabel, gx + 9, y + 48);
+      c.font = `600 13px ${H.mono}`; c.fillStyle = H.ink;
+      c.fillText(r.goalNum || "", gx + w + 8, y + 48);
+    }
+    if (r.goalSlack) { c.font = `11.5px ${H.sans}`; c.fillStyle = H.ink3; c.fillText(r.goalSlack, gx, y + 64); }
+    const bw = H.W - H.PADR - gx;
+    c.fillStyle = H.surf2; roundRect(c, gx, y + 72, bw, 8, 4); c.fill();
+    c.fillStyle = goalColor; roundRect(c, gx, y + 72, Math.max(3, bw * Math.min(1, r.goalPct / 100)), 8, 4); c.fill();
+    y += hGoal; rule(y);
+  }
+
+  // ---- downtime by reason ---------------------------------------------------
+  if (reasons.length) {
+    label("Downtime by reason", H.PAD, y + 24);
+    const max = reasons[0][1] || 1;
+    const nameW = 112, valW = 50;
+    const barX = H.PAD + nameW + 10;
+    const barW = H.W - H.PADR - valW - 8 - barX;
+    reasons.forEach(([name, ms], i) => {
+      const ry = y + 34 + i * 23;
+      c.font = `12.5px ${H.sans}`; c.fillStyle = H.ink;
+      let nm = name;
+      while (c.measureText(nm).width > nameW && nm.length > 3) nm = nm.slice(0, -2);
+      if (nm !== name) nm += "…";
+      c.fillText(nm, H.PAD, ry + 11);
+      c.fillStyle = H.surf2; roundRect(c, barX, ry, barW, 14, 4); c.fill();
+      c.strokeStyle = H.line; c.lineWidth = 1; c.stroke();
+      const w = Math.max(3, barW * (ms / max));
+      const g2 = c.createLinearGradient(barX, 0, barX + w, 0);
+      g2.addColorStop(0, "#b23636"); g2.addColorStop(1, H.down);
+      c.fillStyle = g2; roundRect(c, barX, ry, w, 14, 4); c.fill();
+      c.font = `12px ${H.mono}`; c.fillStyle = H.ink2; c.textAlign = "right";
+      c.fillText(shortDur(ms), H.W - H.PADR, ry + 11); c.textAlign = "left";
+    });
+    if (r.longest) {
+      const ly = y + 34 + reasons.length * 23 + 12;
+      c.font = `12px ${H.sans}`; c.fillStyle = H.ink2;
+      c.fillText(`Longest: ${r.longest.reason} · ${shortDur(r.longest.duration)} · ${shortTime(r.longest.start)}`, H.PAD, ly);
+    }
+    y += hReasons; rule(y);
+  }
+
+  // ---- the operator's message + flags ---------------------------------------
+  if (hNoteBox) {
+    const bx = H.PAD, bw = H.W - H.PADR - H.PAD, by = y + 14;
+    c.fillStyle = "rgba(16,185,129,.055)";
+    roundRect(c, bx, by, bw, hNoteBox, 14); c.fill();
+    c.strokeStyle = "rgba(16,185,129,.28)"; c.lineWidth = 1; c.stroke();
+    label("For the next shift", bx + 16, by + 24, "#5fd8ac");
+    let ny = by + 24;
+    c.font = `13.5px ${H.sans}`; c.fillStyle = H.ink;
+    noteLines.forEach((ln) => { ny += 19; c.fillText(ln, bx + 16, ny); });
+    if (flagRows.length) {
+      ny += 8;
+      flagRows.forEach((row) => {
+        ny += 27;
+        let fx = bx + 16;
+        row.forEach((f) => {
+          c.fillStyle = f.lv.bg; roundRect(c, fx, ny - 15, f.w, 21, 7); c.fill();
+          c.strokeStyle = f.lv.line; c.lineWidth = 1; c.stroke();
+          c.font = `600 11.5px ${H.sans}`; c.fillStyle = f.lv.ink;
+          c.fillText(`${f.lv.mark}  ${f.text}`, fx + 11, ny);
+          fx += f.w + 7;
+        });
+      });
+    }
+    y += hNote;
+  }
+
+  // ---- footer ---------------------------------------------------------------
+  rule(y);
+  c.font = `11px ${H.sans}`; c.fillStyle = H.ink3;
+  c.fillText(`Generated ${shortTime(r.windowEnd)} · via StopTrack`, H.PAD, y + 26);
+
+  return { dataUrl: cv.toDataURL("image/png"), width: cv.width, height: cv.height };
+}
+
+// Shape the raw report into the handout's display fields (tiles, labels, goal).
+function handoutViewModel(r) {
+  const a = r.oee || {};
+  const goal = r.goal && r.goal.state !== "na" ? r.goal : null;
+  const produced = goal ? goal.produced : null;
+  const tiles = [
+    { lab: "Stops", val: String(r.stopCount) },
+    { lab: "Downtime", val: shortDur(r.downtimeMs), color: r.downtimeMs ? HANDOUT.down : HANDOUT.ink },
+    { lab: "Availability", val: a.a != null ? String(Math.round(a.a * 100)) : "—", unit: a.a != null ? "%" : "",
+      color: a.a == null ? HANDOUT.ink : a.a >= 0.9 ? HANDOUT.brand : a.a >= 0.75 ? HANDOUT.warn : HANDOUT.down,
+      sub: `OEE ${a.partial ? "partial · " : ""}${pct(a.oee)}` },
+    goal
+      ? { lab: "Output", val: String(produced), unit: ` / ${goal.goal}`, sub: "units",
+          color: goal.state === "met" ? HANDOUT.brand : goal.state === "missed" ? HANDOUT.down : HANDOUT.warn }
+      : { lab: "Machines", val: String((r.machines || []).length || 1), sub: (r.machines || []).map((m) => m.machine).join(", ").slice(0, 30) },
+  ];
+  const goalPct = goal && goal.goal ? Math.max(0, Math.min(100, (goal.produced / goal.goal) * 100)) : null;
+  const goalLabel = !goal ? "" : goal.state === "met" ? "Goal met" : goal.state === "missed" ? "Goal not achievable"
+    : goal.state === "risk" ? "Goal at risk" : "On track for goal";
+  return {
+    ...r,
+    tiles,
+    dateLabel: new Date(r.windowEnd).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }),
+    shiftLabel: `${r.shiftName ? `${r.shiftName} · ` : ""}${r.windowStart ? shortTime(r.windowStart) : "start"}–${shortTime(r.windowEnd)}`,
+    machineLabel: (r.machines || []).length > 1 ? `${r.machines.length} machines` : ((r.machines || [])[0]?.machine || r.machine),
+    goalPct, goalLabel,
+    goalNum: goal ? `${goal.produced} / ${goal.goal}` : "",
+    goalSlack: !goal ? ""
+      : goal.state === "met" ? "Goal met for this shift"
+      : `Need ${goal.need} more${goal.slackMs != null ? ` · up to ${shortDur(goal.slackMs)} more downtime OK` : ""}`,
+  };
 }
 
 function downloadFile(content, filename, type) {
@@ -266,6 +604,53 @@ function downloadFile(content, filename, type) {
   const a = document.createElement("a");
   a.href = url; a.download = filename; a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// --- sharing an image (the shift handout) -----------------------------------
+// A handout is sent, not filed, so "Share" is the primary action: the Android
+// shell opens the system share sheet (WhatsApp / Teams / email), a modern browser
+// uses the Web Share API, and anything else falls back to a plain download.
+const dataUrlToBase64 = (dataUrl) => String(dataUrl || "").split(",")[1] || "";
+
+function dataUrlToBlob(dataUrl) {
+  const b64 = dataUrlToBase64(dataUrl);
+  const bin = atob(b64);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  return new Blob([buf], { type: "image/png" });
+}
+
+async function shareImage(dataUrl, filename, text) {
+  const n = (typeof window !== "undefined") ? window.StopTrackNative : null;
+  if (n && typeof n.shareImage === "function") {
+    try { n.shareImage(filename, dataUrlToBase64(dataUrl), text || ""); return { ok: true, how: "native" }; }
+    catch (e) { /* fall through */ }
+  }
+  try {
+    const file = new File([dataUrlToBlob(dataUrl)], filename, { type: "image/png" });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], text: text || "" });
+      return { ok: true, how: "web-share" };
+    }
+  } catch (e) {
+    if (e && e.name === "AbortError") return { ok: true, how: "cancelled" }; // user dismissed
+  }
+  return saveImage(dataUrl, filename);
+}
+
+function saveImage(dataUrl, filename) {
+  const n = (typeof window !== "undefined") ? window.StopTrackNative : null;
+  if (n && typeof n.saveImage === "function") {
+    try { n.saveImage(filename, dataUrlToBase64(dataUrl)); return { ok: true, how: "native" }; }
+    catch (e) { /* fall through */ }
+  }
+  try {
+    const url = URL.createObjectURL(dataUrlToBlob(dataUrl));
+    const a = document.createElement("a");
+    a.href = url; a.download = filename; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return { ok: true, how: "download" };
+  } catch (e) { return { ok: false, error: "Couldn't save the image." }; }
 }
 
 // The last-write-wins clock for a stop record. Newer records were mutated more
@@ -549,6 +934,40 @@ const api = {
     } catch { return { ok: false }; }
   },
 
+  // --- shift handovers -------------------------------------------------------
+  // Each handout is kept as a record so the supervisor gets a history and the
+  // next operator can carry forward whatever was still open. Local-only for now
+  // (the sync contract has no /handovers route yet) but shaped like the other
+  // collections, so wiring it to the server later is the same one-line seam.
+  async loadHandovers() {
+    try {
+      const res = await STORE.list("hand:", SHARED);
+      const keys = res?.keys || [];
+      const items = await Promise.all(keys.map(async (k) => {
+        try { const r = await STORE.get(k, SHARED); return r ? { key: k, ...JSON.parse(r.value) } : null; }
+        catch { return null; }
+      }));
+      const now = Date.now();
+      const survivors = [];
+      for (const h of items.filter(Boolean)) {
+        if (h.createdAt && now - h.createdAt > RETENTION_MS) {
+          try { await STORE.delete(h.key, SHARED); } catch { /* ignore */ }
+        } else survivors.push(h);
+      }
+      survivors.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      return { ok: true, records: survivors };
+    } catch { return { ok: false, records: [] }; }
+  },
+
+  async saveHandover(record) {
+    const key = `hand:${record.id}`;
+    try {
+      try { await STORE.set(key, JSON.stringify(record), SHARED); }
+      catch { await STORE.set(key, JSON.stringify(record)); }
+      return { ok: true, record };
+    } catch (e) { return { ok: false, error: e?.message || "Couldn't save the handover." }; }
+  },
+
   // Read any record straight from storage by its full key (used by the sync
   // push loop to assemble outbox payloads without depending on React state).
   async getRecordByKey(key) {
@@ -603,8 +1022,9 @@ const api = {
   // merges last-write-wins, so restoring onto a populated app never clobbers
   // newer records.
   async exportAll() {
-    const [config, prefs, stops, production, sessions] = await Promise.all([
+    const [config, prefs, stops, production, sessions, handovers] = await Promise.all([
       this.loadConfig(), this.loadPrefs(), this.loadStops(), this.loadProduction(), this.loadSessions(),
+      this.loadHandovers(),
     ]);
     const strip = (arr) => (arr || []).map(({ key, ...rest }) => rest);
     return {
@@ -614,6 +1034,7 @@ const api = {
       stops: strip(stops.stops),
       production: strip(production.records),
       sessions: strip(sessions.records),
+      handovers: strip(handovers.records),
     };
   },
   async importAll(data) {
@@ -647,6 +1068,7 @@ const api = {
     counts.stops = await mergeInto(data.stops, (await this.loadStops()).stops, (r) => this.saveStop(r));
     counts.production = await mergeInto(data.production, (await this.loadProduction()).records, (r) => this.saveProduction(r));
     counts.sessions = await mergeInto(data.sessions, (await this.loadSessions()).records, (r) => this.saveSession(r));
+    counts.handovers = await mergeInto(data.handovers, (await this.loadHandovers()).records, (r) => this.saveHandover(r));
     return counts;
   },
 
@@ -1117,8 +1539,9 @@ export default function App() {
   const [production, setProduction] = useState([]);
   // machine sessions (operator presence spans) — synced like stops.
   const [sessions, setSessions] = useState([]);
-  // shift handover report dialog
+  // shift handover report dialog + the log of handouts already given
   const [handoverOpen, setHandoverOpen] = useState(false);
+  const [handovers, setHandovers] = useState([]);
   // backup/restore: recovery banner on an empty install + a status message
   const [needsRestore, setNeedsRestore] = useState(false);
   const [restoreMsg, setRestoreMsg] = useState("");
@@ -1262,6 +1685,11 @@ export default function App() {
       if (!cfg && result.stops.length === 0) setNeedsRestore(true);
       const prod = await api.loadProduction();
       setProduction(prod.records);
+
+      // Past handouts — newest first, so the handover dialog can offer the last
+      // shift's still-open flags for carry-forward.
+      const hand = await api.loadHandovers();
+      setHandovers(hand.records);
 
       // Sessions: close the dangling span this device left behind (reload /
       // crash), and any stale open span with no heartbeat for 15+ minutes.
@@ -1893,8 +2321,10 @@ export default function App() {
       {handoverOpen && (
         <ShiftHandoverModal
           t={t} dark={dark}
-          report={buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, activeShift, goalStatus })}
+          reportBase={buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, activeShift, goalStatus })}
           handoverEmails={handoverEmails} syncCfg={syncCfg}
+          lastHandover={handovers[0] || null}
+          onSaved={(rec) => setHandovers((prev) => [rec, ...prev])}
           onClose={() => setHandoverOpen(false)}
         />
       )}
@@ -3069,11 +3499,80 @@ function HandoverEmailsManager({ t, emails, onChange }) {
   );
 }
 
-function ShiftHandoverModal({ t, dark, report, handoverEmails, syncCfg, onClose }) {
+function ShiftHandoverModal({ t, dark, reportBase, handoverEmails, syncCfg, lastHandover, onSaved, onClose }) {
   const [copied, setCopied] = useState(false);
   const [mailState, setMailState] = useState(null); // null | "sending" | "sent" | error string
+  const [busy, setBusy] = useState("");             // "" | "share" | "save"
+  const [shot, setShot] = useState(null);           // the rendered PNG
+  const [err, setErr] = useState("");
+
+  // The operator writes the handover: a message plus their own flags. Nothing
+  // here is preset — the words are theirs; the level only picks the colour.
+  const [note, setNote] = useState("");
+  const [flags, setFlags] = useState([]);
+  const [flagText, setFlagText] = useState("");
+  const [level, setLevel] = useState("watch");
+
+  const addFlag = (text, lvl) => {
+    const v = String(text || "").trim().slice(0, 60);
+    if (!v) return;
+    setFlags((prev) => (prev.some((f) => f.text.toLowerCase() === v.toLowerCase())
+      ? prev : [...prev, { text: v, level: lvl || level }]));
+    setFlagText("");
+  };
+  const removeFlag = (i) => setFlags((prev) => prev.filter((_, n) => n !== i));
+
+  const report = useMemo(
+    () => handoutViewModel({ ...reportBase, note, flags }),
+    [reportBase, note, flags],
+  );
   const text = formatReportText(report);
   const canEmail = !!(syncCfg && syncCfg.enabled && syncCfg.url) && (handoverEmails || []).length > 0;
+  const fileName = `stoptrack-handover-${report.operator.replace(/\s+/g, "-").toLowerCase()}-${new Date(report.windowEnd).toISOString().slice(0, 10)}.png`;
+
+  // Re-draw the card as the operator types (debounced — drawing is cheap, but
+  // toDataURL on every keystroke isn't).
+  useEffect(() => {
+    const id = setTimeout(() => {
+      try { setShot(drawHandout(report)); setErr(""); }
+      catch (e) { setErr("Couldn't render the handout image."); }
+    }, 180);
+    return () => clearTimeout(id);
+  }, [report]);
+
+  // Persist the handout so the supervisor keeps a history and the next shift can
+  // carry forward what's still open. Called whenever it's actually sent/saved.
+  const persist = async () => {
+    const rec = {
+      id: `${report.windowEnd}-${Math.floor(Math.random() * 1e6)}`,
+      operator: report.operator, machine: report.machineLabel || report.machine,
+      shiftName: report.shiftName || null,
+      windowStart: report.windowStart, windowEnd: report.windowEnd,
+      stopCount: report.stopCount, downtimeMs: report.downtimeMs,
+      note: report.note, flags: report.flags,
+      createdAt: Date.now(), updatedAt: Date.now(),
+    };
+    await api.saveHandover(rec);
+    if (onSaved) onSaved(rec);
+  };
+
+  const doShare = async () => {
+    if (!shot) return;
+    setBusy("share"); setErr("");
+    const res = await shareImage(shot.dataUrl, fileName, text);
+    if (!res.ok) setErr(res.error || "Couldn't share the handout.");
+    else await persist();
+    setBusy("");
+  };
+
+  const doSave = async () => {
+    if (!shot) return;
+    setBusy("save"); setErr("");
+    const res = saveImage(shot.dataUrl, fileName);
+    if (!res.ok) setErr(res.error || "Couldn't save the image.");
+    else await persist();
+    setBusy("");
+  };
 
   const copy = async () => {
     try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 2500); }
@@ -3093,32 +3592,118 @@ function ShiftHandoverModal({ t, dark, report, handoverEmails, syncCfg, onClose 
     setMailState("sending");
     const res = await api.sendReport({
       to: handoverEmails,
-      subject: `StopTrack handover — ${report.machine} — ${report.operator}`,
+      subject: `StopTrack handover — ${report.machineLabel || report.machine} — ${report.operator}`,
       text,
     }, syncCfg);
     setMailState(res.ok ? "sent" : (res.error || "Send failed"));
+    if (res.ok) await persist();
   };
+
+  // Anything the previous shift flagged, offered as one-tap carry-forward.
+  const carryForward = ((lastHandover && lastHandover.flags) || [])
+    .filter((f) => !flags.some((x) => x.text.toLowerCase() === String(f.text || "").toLowerCase()));
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30" onClick={onClose}>
-      <div className={`${dark ? "bg-slate-900" : "bg-white"} rounded-xl shadow-xl p-5 max-w-md w-full space-y-3 max-h-[85vh] overflow-auto`} onClick={(e) => e.stopPropagation()}>
+      <div className={`${dark ? "bg-slate-900" : "bg-white"} rounded-xl shadow-xl p-5 max-w-md w-full space-y-4 max-h-[88vh] overflow-auto`} onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 font-bold"><PencilLine size={18} className="text-emerald-500" /> Shift handover</div>
           <button onClick={onClose} aria-label="Close" className={`${t.sub} hover:text-red-500 p-1`}><X size={18} /></button>
         </div>
-        <pre className={`${t.muted} rounded-lg p-3 text-xs whitespace-pre-wrap font-mono leading-relaxed`}>{text}</pre>
+
+        {/* --- what the operator writes ------------------------------------- */}
+        <label className="flex flex-col gap-1">
+          <span className={`text-xs font-semibold ${t.sub}`}>MESSAGE FOR THE NEXT SHIFT</span>
+          <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3} maxLength={600}
+            placeholder="What does the next operator need to know? e.g. infeed guide rail looks worn — jammed twice."
+            className={`border rounded-lg px-3 py-2.5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}`} />
+        </label>
+
         <div className="flex flex-col gap-2">
-          <button onClick={copy} className="flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 rounded-lg">
-            {copied ? <><CheckCircle size={17} /> Copied</> : <><PencilLine size={17} /> Copy summary</>}
+          <span className={`text-xs font-semibold ${t.sub}`}>FLAGS — YOUR OWN WORDS</span>
+          <div className="flex gap-1.5">
+            {FLAG_ORDER.map((lv) => (
+              <button key={lv} onClick={() => setLevel(lv)} aria-pressed={level === lv}
+                className={`flex-1 text-xs font-bold py-2 rounded-lg border transition ${level === lv
+                  ? (lv === "fix" ? "bg-red-500/15 border-red-400 text-red-400"
+                    : lv === "watch" ? "bg-amber-500/15 border-amber-400 text-amber-500"
+                    : "bg-slate-400/15 border-slate-400 text-slate-400")
+                  : `${t.chip} border-transparent opacity-70`}`}>
+                {FLAG_LEVELS[lv].mark} {FLAG_LEVELS[lv].label}
+              </button>
+            ))}
+          </div>
+          <div className="flex gap-2">
+            <input value={flagText} onChange={(e) => setFlagText(e.target.value)} maxLength={60}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addFlag(flagText); } }}
+              placeholder="e.g. Asla 2 coolant low"
+              className={`flex-1 border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}`} />
+            <button onClick={() => addFlag(flagText)} disabled={!flagText.trim()}
+              className="flex items-center gap-1 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-white font-bold px-4 rounded-lg active:scale-95 transition">
+              <Plus size={16} /> Add
+            </button>
+          </div>
+          {!!flags.length && (
+            <div className="flex flex-wrap gap-2">
+              {flags.map((f, i) => (
+                <span key={i} className={`flex items-center gap-2 text-xs font-semibold px-2.5 py-1.5 rounded-lg border ${f.level === "fix"
+                  ? "bg-red-500/10 border-red-500/40 text-red-400"
+                  : f.level === "watch" ? "bg-amber-500/10 border-amber-500/40 text-amber-500"
+                  : "bg-slate-400/10 border-slate-400/40 text-slate-400"}`}>
+                  {FLAG_LEVELS[f.level]?.mark} {f.text}
+                  <button onClick={() => removeFlag(i)} aria-label={`Remove ${f.text}`} className="opacity-70 hover:opacity-100"><X size={12} /></button>
+                </span>
+              ))}
+            </div>
+          )}
+          {!!carryForward.length && (
+            <div className="flex flex-wrap gap-2 items-center">
+              <span className={`text-[11px] ${t.sub}`}>Still open from last shift:</span>
+              {carryForward.map((f, i) => (
+                <button key={i} onClick={() => addFlag(f.text, f.level)}
+                  className={`flex items-center gap-1 text-xs font-semibold ${t.chip} px-2.5 py-1.5 rounded-lg hover:opacity-80`}>
+                  <Plus size={11} /> {f.text}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* --- the handout itself: this image is exactly what gets sent ------ */}
+        <div className="flex flex-col gap-1">
+          <span className={`text-xs font-semibold ${t.sub}`}>HANDOUT PREVIEW</span>
+          {shot
+            ? <img src={shot.dataUrl} alt="Shift handout" className="w-full rounded-xl shadow-lg" />
+            : <div className={`${t.muted} rounded-xl h-40 flex items-center justify-center text-sm ${t.sub}`}><RefreshCw size={16} className="animate-spin mr-2" /> Rendering…</div>}
+        </div>
+
+        {/* --- send it ------------------------------------------------------- */}
+        <div className="flex flex-col gap-2">
+          <button onClick={doShare} disabled={!shot || busy === "share"}
+            className="flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white font-bold py-3.5 rounded-lg active:scale-95 transition">
+            {busy === "share" ? <RefreshCw size={17} className="animate-spin" /> : <Share2 size={17} />} Share handout
           </button>
-          <button onClick={email} disabled={!canEmail || mailState === "sending" || mailState === "sent"}
-            className={`flex items-center justify-center gap-2 ${t.accentBtn} disabled:opacity-40 font-bold py-3 rounded-lg`}>
-            {mailState === "sending" ? <><RefreshCw size={17} className="animate-spin" /> Sending…</>
-              : mailState === "sent" ? <><CheckCircle size={17} /> Sent</>
-              : <><RefreshCw size={17} /> Email report{(handoverEmails || []).length ? ` (${handoverEmails.length})` : ""}</>}
-          </button>
-          {!canEmail && <p className={`text-[11px] ${t.sub} text-center`}>Email needs Server sync enabled and recipients set in Supervisor → Settings. Copy works offline.</p>}
-          {mailState && mailState !== "sending" && mailState !== "sent" && <p className="text-xs text-red-500 text-center flex items-center justify-center gap-1"><AlertCircle size={13} /> {mailState}</p>}
+          <div className="flex gap-2">
+            <button onClick={doSave} disabled={!shot || busy === "save"}
+              className={`flex-1 flex items-center justify-center gap-2 ${t.chip} disabled:opacity-50 font-semibold py-3 rounded-lg active:scale-95 transition`}>
+              <Download size={16} /> Save image
+            </button>
+            <button onClick={copy} className={`flex-1 flex items-center justify-center gap-2 ${t.chip} font-semibold py-3 rounded-lg active:scale-95 transition`}>
+              {copied ? <><CheckCircle size={16} /> Copied</> : <><PencilLine size={16} /> Copy text</>}
+            </button>
+          </div>
+          {canEmail && (
+            <button onClick={email} disabled={mailState === "sending" || mailState === "sent"}
+              className={`flex items-center justify-center gap-2 ${t.accentBtn} disabled:opacity-40 font-bold py-3 rounded-lg`}>
+              {mailState === "sending" ? <><RefreshCw size={17} className="animate-spin" /> Sending…</>
+                : mailState === "sent" ? <><CheckCircle size={17} /> Sent</>
+                : <><RefreshCw size={17} /> Email report ({handoverEmails.length})</>}
+            </button>
+          )}
+          {!canEmail && <p className={`text-[11px] ${t.sub} text-center`}>Share works offline. Email needs Server sync + recipients in Supervisor → Settings.</p>}
+          {(err || (mailState && mailState !== "sending" && mailState !== "sent")) && (
+            <p className="text-xs text-red-500 text-center flex items-center justify-center gap-1"><AlertCircle size={13} /> {err || mailState}</p>
+          )}
         </div>
       </div>
     </div>
