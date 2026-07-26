@@ -352,7 +352,7 @@ function shortDur(ms) {
     if (h)
         return m ? `${h}h ${m}m` : `${h}h`;
     if (m)
-        return sec >= 30 ? `${m}m` : `${m}m`;
+        return `${sec >= 30 ? m + 1 : m}m`;
     return `${sec}s`;
 }
 function roundRect(ctx, x, y, w, h, r) {
@@ -365,17 +365,37 @@ function roundRect(ctx, x, y, w, h, r) {
     ctx.arcTo(x, y, x + w, y, rr);
     ctx.closePath();
 }
+function ellipsize(ctx, text, maxW) {
+    let s = String(text || "");
+    if (ctx.measureText(s).width <= maxW)
+        return s;
+    while (s.length > 1 && ctx.measureText(`${s}…`).width > maxW)
+        s = s.slice(0, -1);
+    return `${s}…`;
+}
 function wrapText(ctx, text, maxW) {
     const out = [];
     String(text || "").split(/\n+/).forEach((para) => {
         let line = "";
         para.split(/\s+/).filter(Boolean).forEach((word) => {
-            const test = line ? `${line} ${word}` : word;
+            let w = word;
+            while (ctx.measureText(w).width > maxW && w.length > 1) {
+                let cut = w.length;
+                while (cut > 1 && ctx.measureText(w.slice(0, cut)).width > maxW)
+                    cut--;
+                if (line) {
+                    out.push(line);
+                    line = "";
+                }
+                out.push(w.slice(0, cut));
+                w = w.slice(cut);
+            }
+            const test = line ? `${line} ${w}` : w;
             if (ctx.measureText(test).width <= maxW || !line)
                 line = test;
             else {
                 out.push(line);
-                line = word;
+                line = w;
             }
         });
         if (line)
@@ -389,13 +409,14 @@ function layoutFlags(ctx, flags, maxW) {
     let row = [], rowW = 0;
     (flags || []).forEach((f) => {
         const lv = FLAG_LEVELS[f.level] || FLAG_LEVELS.info;
-        const w = ctx.measureText(`${lv.mark}  ${f.text}`).width + 22;
+        const text = ellipsize(ctx, f.text, maxW - 22 - ctx.measureText(`${lv.mark}  `).width);
+        const w = ctx.measureText(`${lv.mark}  ${text}`).width + 22;
         if (row.length && rowW + w + 7 > maxW) {
             rows.push(row);
             row = [];
             rowW = 0;
         }
-        row.push(Object.assign(Object.assign({}, f), { w, lv }));
+        row.push({ text, w, lv });
         rowW += w + 7;
     });
     if (row.length)
@@ -410,7 +431,8 @@ function drawHandout(r, scale = 2.5) {
     const noteLines = r.note ? wrapText(meas, r.note, contentW - 32) : [];
     const flagRows = r.flags && r.flags.length ? layoutFlags(meas, r.flags, contentW - 32) : [];
     const reasons = (r.topReasons || []).slice(0, 5);
-    const hHeader = 74, hWho = 40, hTiles = 2 * 74 + 1, hGoal = 92;
+    const showGoal = r.goalPct != null;
+    const hHeader = 74, hWho = 40, hTiles = 2 * 74 + 1, hGoal = showGoal ? 92 : 0;
     const hReasons = reasons.length ? 34 + reasons.length * 23 + (r.longest ? 22 : 0) + 12 : 0;
     const hNoteBox = (noteLines.length || flagRows.length)
         ? 16 + 24 + noteLines.length * 19 + (flagRows.length ? 8 + flagRows.length * 27 : 0) + 14
@@ -484,35 +506,44 @@ function drawHandout(r, scale = 2.5) {
     c.textAlign = "center";
     c.fillText((r.operator || "?").trim().charAt(0).toUpperCase(), av, y + 17);
     c.textAlign = "left";
-    let x = H.PAD + 34;
-    c.font = `700 14px ${H.sans}`;
-    c.fillStyle = H.ink;
-    c.fillText(r.operator, x, y + 18);
-    x += c.measureText(r.operator).width + 8;
-    c.font = `700 14px ${H.sans}`;
-    c.fillStyle = H.brand;
-    c.fillText("→", x, y + 18);
-    x += 18;
-    c.font = `14px ${H.sans}`;
-    c.fillStyle = H.ink2;
-    c.fillText("next shift", x, y + 18);
+    const nameX = H.PAD + 34;
+    let pillX = H.W - H.PADR;
     {
-        const mt = r.machineLabel || r.machine || "";
         c.font = `11.5px ${H.sans}`;
+        const mt = ellipsize(c, r.machineLabel || r.machine || "", 150);
         const w = c.measureText(mt).width + 28;
-        const px = H.W - H.PADR - w;
+        pillX = H.W - H.PADR - w;
         c.fillStyle = H.surf2;
-        roundRect(c, px, y + 2, w, 24, 12);
+        roundRect(c, pillX, y + 2, w, 24, 12);
         c.fill();
         c.strokeStyle = H.line;
         c.lineWidth = 1;
         c.stroke();
         c.fillStyle = H.brand;
         c.beginPath();
-        c.arc(px + 12, y + 14, 3, 0, Math.PI * 2);
+        c.arc(pillX + 12, y + 14, 3, 0, Math.PI * 2);
         c.fill();
         c.fillStyle = H.ink2;
-        c.fillText(mt, px + 20, y + 18);
+        c.fillText(mt, pillX + 20, y + 18);
+    }
+    {
+        const budget = pillX - 10 - nameX;
+        c.font = `14px ${H.sans}`;
+        const tailW = c.measureText(" →  next shift").width;
+        c.font = `700 14px ${H.sans}`;
+        c.fillStyle = H.ink;
+        const showTail = c.measureText(r.operator).width + tailW <= budget;
+        const name = ellipsize(c, r.operator, showTail ? budget - tailW : budget);
+        c.fillText(name, nameX, y + 18);
+        if (showTail) {
+            let x = nameX + c.measureText(name).width + 8;
+            c.fillStyle = H.brand;
+            c.fillText("→", x, y + 18);
+            x += 18;
+            c.font = `14px ${H.sans}`;
+            c.fillStyle = H.ink2;
+            c.fillText("next shift", x, y + 18);
+        }
     }
     y += hWho;
     rule(y);
@@ -542,7 +573,7 @@ function drawHandout(r, scale = 2.5) {
     c.fillRect(0, y + 1 + 74, H.W, 1);
     y += hTiles;
     rule(y);
-    if (r.goalPct != null) {
+    if (showGoal) {
         label("Goal", H.PAD, y + 24);
         const cx = H.PAD + 23, cy = y + 56, rad = 15;
         c.lineWidth = 5;
@@ -739,7 +770,7 @@ async function shareImage(dataUrl, filename, text) {
     }
     catch (e) {
         if (e && e.name === "AbortError")
-            return { ok: true, how: "cancelled" };
+            return { ok: true, cancelled: true };
     }
     return saveImage(dataUrl, filename);
 }
@@ -2335,7 +2366,7 @@ function App() {
                     React.createElement("button", { onClick: pickRestore, className: "bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-1.5 rounded-lg" }, "Restore backup"),
                     React.createElement("button", { onClick: () => setNeedsRestore(false), className: `text-sm ${t.sub} px-2 py-1.5` }, "Not now"))),
             restoreMsg && React.createElement("p", { className: "max-w-3xl mx-auto text-xs text-red-500 mt-1" }, restoreMsg))),
-        React.createElement("main", { className: "max-w-3xl mx-auto p-4 pb-24" }, view === "operator" ? (React.createElement(OperatorView, { t: t, operator: operator, setOperator: setOperator, machine: machine, setMachine: switchMachine, timer: effectiveTimer, onStop: handleStop, pendingStop: effectivePending, reason: reason, setReason: setReason, notes: notes, setNotes: setNotes, onSave: handleSave, onDiscardPending: handleDiscardPending, saving: saving, saveError: saveError, myStops: myStops, machines: machines, reasons: reasons, quickStops: quickStops, applyQuickStop: applyQuickStop, lastReason: lastReason, shift: activeShift, shifts: shifts, shiftId: shiftId, onSelectShift: selectShift, clearedBefore: clearedBefore, onNewShift: () => setNewShiftOpen(true), showAll: showAll, onToggleShowAll: toggleShowAll, setupLocked: setupLocked, onLockSetup: lockSetup, onUnlockSetup: unlockSetup, onOpenManual: () => { setSaveError(""); setManualOpen(true); }, syncStatus: sync.status, syncOn: syncOn, rates: rates, myProduction: myProduction, onSaveProduction: handleSaveProduction, myShift: myShift, goalStatus: goalStatus, onOpenHandover: () => setHandoverOpen(true) })) : (supervisorPinHash && !supervisorUnlocked) ? (React.createElement(PinGate, { t: t, pinHash: supervisorPinHash, onUnlock: () => setSupervisorUnlocked(true) })) : (React.createElement(SupervisorView, { t: t, stops: stops, loading: loading, onRefresh: refreshStops, machines: machines, reasons: reasons, quickStops: quickStops, shifts: shifts, updateMachines: updateMachines, updateReasons: updateReasons, updateQuickStops: updateQuickStops, updateShifts: updateShifts, discardStop: discardStop, deleteStop: deleteStop, hasPin: !!supervisorPinHash, updatePin: updatePin, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: sync.status, onSyncNow: sync.flush, rates: rates, updateRates: updateRates, production: production, sessions: sessions, handoverEmails: handoverEmails, updateHandoverEmails: updateHandoverEmails, onDownloadBackup: downloadBackup, onRestore: pickRestore, restoreMsg: restoreMsg }))),
+        React.createElement("main", { className: "max-w-3xl mx-auto p-4 pb-24" }, view === "operator" ? (React.createElement(OperatorView, { t: t, operator: operator, setOperator: setOperator, machine: machine, setMachine: switchMachine, timer: effectiveTimer, onStop: handleStop, pendingStop: effectivePending, reason: reason, setReason: setReason, notes: notes, setNotes: setNotes, onSave: handleSave, onDiscardPending: handleDiscardPending, saving: saving, saveError: saveError, myStops: myStops, machines: machines, reasons: reasons, quickStops: quickStops, applyQuickStop: applyQuickStop, lastReason: lastReason, shift: activeShift, shifts: shifts, shiftId: shiftId, onSelectShift: selectShift, clearedBefore: clearedBefore, onNewShift: () => setNewShiftOpen(true), showAll: showAll, onToggleShowAll: toggleShowAll, setupLocked: setupLocked, onLockSetup: lockSetup, onUnlockSetup: unlockSetup, onOpenManual: () => { setSaveError(""); setManualOpen(true); }, syncStatus: sync.status, syncOn: syncOn, rates: rates, myProduction: myProduction, onSaveProduction: handleSaveProduction, myShift: myShift, goalStatus: goalStatus, onOpenHandover: () => setHandoverOpen(true) })) : (supervisorPinHash && !supervisorUnlocked) ? (React.createElement(PinGate, { t: t, pinHash: supervisorPinHash, onUnlock: () => setSupervisorUnlocked(true) })) : (React.createElement(SupervisorView, { t: t, stops: stops, loading: loading, onRefresh: refreshStops, machines: machines, reasons: reasons, quickStops: quickStops, shifts: shifts, updateMachines: updateMachines, updateReasons: updateReasons, updateQuickStops: updateQuickStops, updateShifts: updateShifts, discardStop: discardStop, deleteStop: deleteStop, hasPin: !!supervisorPinHash, updatePin: updatePin, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: sync.status, onSyncNow: sync.flush, rates: rates, updateRates: updateRates, production: production, sessions: sessions, handovers: handovers, handoverEmails: handoverEmails, updateHandoverEmails: updateHandoverEmails, onDownloadBackup: downloadBackup, onRestore: pickRestore, restoreMsg: restoreMsg }))),
         recovered && (React.createElement("div", { className: "fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30" },
             React.createElement("div", { className: `${dark ? "bg-slate-900" : "bg-white"} rounded-xl shadow-xl p-5 max-w-sm w-full space-y-3` },
                 React.createElement("div", { className: "flex items-center gap-2 font-bold" },
@@ -2361,7 +2392,7 @@ function App() {
                     React.createElement("button", { onClick: startNewShift, className: "flex-1 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 rounded-lg" }, "Start new shift"),
                     React.createElement("button", { onClick: () => setNewShiftOpen(false), className: `px-4 ${t.sub} font-semibold` }, "Cancel"))))),
         manualOpen && (React.createElement(ManualStopModal, { t: t, dark: dark, machine: machine, machines: machines, reasons: reasons, quickStops: quickStops, lastReason: lastReason, saving: saving, saveError: saveError, onSave: handleManualSave, onClose: () => setManualOpen(false) })),
-        handoverOpen && (React.createElement(ShiftHandoverModal, { t: t, dark: dark, reportBase: buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, activeShift, goalStatus }), handoverEmails: handoverEmails, syncCfg: syncCfg, lastHandover: handovers[0] || null, onSaved: (rec) => setHandovers((prev) => [rec, ...prev]), onClose: () => setHandoverOpen(false) }))));
+        handoverOpen && (React.createElement(ShiftHandoverModal, { t: t, dark: dark, reportBase: buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, activeShift, goalStatus }), handoverEmails: handoverEmails, syncCfg: syncCfg, lastHandover: handovers[0] || null, onSaved: (rec) => setHandovers((prev) => [rec, ...prev.filter((h) => h.id !== rec.id)]), onClose: () => setHandoverOpen(false) }))));
 }
 function OperatorView(props) {
     const { t, operator, setOperator, machine, setMachine, timer, onStop, pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError, myStops, machines, reasons, quickStops, applyQuickStop, lastReason, shift, shifts, shiftId, onSelectShift, clearedBefore, onNewShift, showAll, onToggleShowAll, setupLocked, onLockSetup, onUnlockSetup, onOpenManual, syncStatus, syncOn, rates, myProduction, onSaveProduction, myShift, goalStatus, onOpenHandover, } = props;
@@ -2644,7 +2675,7 @@ function ManualStopModal({ t, dark, machine, machines, reasons, quickStops, last
                     " Save stop"),
                 React.createElement("button", { onClick: onClose, disabled: saving, className: `px-4 ${t.sub} hover:text-red-500 font-semibold` }, "Cancel")))));
 }
-function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quickStops, shifts, updateMachines, updateReasons, updateQuickStops, updateShifts, discardStop, deleteStop, hasPin, updatePin, syncCfg, updateSyncConfig, syncStatus, onSyncNow, rates, updateRates, production, sessions, handoverEmails, updateHandoverEmails, onDownloadBackup, onRestore, restoreMsg }) {
+function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quickStops, shifts, updateMachines, updateReasons, updateQuickStops, updateShifts, discardStop, deleteStop, hasPin, updatePin, syncCfg, updateSyncConfig, syncStatus, onSyncNow, rates, updateRates, production, sessions, handovers, handoverEmails, updateHandoverEmails, onDownloadBackup, onRestore, restoreMsg }) {
     var _a;
     const [analyticsShiftId, setAnalyticsShiftId] = useState((_a = shifts === null || shifts === void 0 ? void 0 : shifts[0]) === null || _a === void 0 ? void 0 : _a.id);
     const shift = useMemo(() => (shifts === null || shifts === void 0 ? void 0 : shifts.find((s) => s.id === analyticsShiftId)) || (shifts === null || shifts === void 0 ? void 0 : shifts[0]) || { start: "06:00", end: "14:00" }, [shifts, analyticsShiftId]);
@@ -3002,6 +3033,7 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
             React.createElement(ListManager, { t: t, title: "Stop reasons", icon: React.createElement(AlertCircle, { size: 16 }), items: reasons, onChange: updateReasons, placeholder: "e.g. Sensor calibration" }),
             React.createElement(QuickStopManager, { t: t, quickStops: quickStops, reasons: reasons, onChange: updateQuickStops }),
             React.createElement(RatesManager, { t: t, machines: machines, rates: rates, onChange: updateRates }),
+            React.createElement(HandoverLog, { t: t, handovers: handovers }),
             React.createElement(HandoverEmailsManager, { t: t, emails: handoverEmails, onChange: updateHandoverEmails }),
             React.createElement(PinManager, { t: t, hasPin: hasPin, updatePin: updatePin }),
             React.createElement(ServerSyncManager, { t: t, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: syncStatus, onSyncNow: onSyncNow }),
@@ -3406,6 +3438,43 @@ function ShiftsManager({ t, shifts, machines, onChange }) {
             React.createElement(Plus, { size: 16 }),
             " Add shift")));
 }
+function HandoverLog({ t, handovers }) {
+    const [open, setOpen] = useState(false);
+    const list = handovers || [];
+    const shown = open ? list.slice(0, 30) : list.slice(0, 3);
+    return (React.createElement("div", { className: `${t.card} rounded-xl p-4` },
+        React.createElement("h3", { className: "font-bold mb-1 flex items-center gap-2" },
+            React.createElement(PencilLine, { size: 16 }),
+            " Shift handovers"),
+        React.createElement("p", { className: `text-xs ${t.sub} mb-3` }, "What each operator passed to the next shift, newest first. Kept for 60 days and included in Backup & Restore."),
+        !list.length ? (React.createElement("p", { className: `${t.sub} text-sm` }, "No handovers recorded yet. Operators create one from Operator \u2192 Handover.")) : (React.createElement("div", { className: "space-y-2" },
+            shown.map((h) => (React.createElement("div", { key: h.id, className: `${t.muted} rounded-lg p-3` },
+                React.createElement("div", { className: "flex items-center justify-between gap-2 flex-wrap" },
+                    React.createElement("span", { className: "font-semibold text-sm" },
+                        h.operator,
+                        " ",
+                        React.createElement("span", { className: `font-normal ${t.sub}` },
+                            "\u00B7 ",
+                            h.machine)),
+                    React.createElement("span", { className: `text-[11px] ${t.sub} font-mono` }, fmtTime(h.windowEnd || h.createdAt))),
+                h.note && React.createElement("p", { className: "text-sm mt-1.5 leading-snug" }, h.note),
+                !!(h.flags || []).length && (React.createElement("div", { className: "flex flex-wrap gap-1.5 mt-2" }, h.flags.map((f, i) => {
+                    var _a;
+                    return (React.createElement("span", { key: i, className: `text-[11px] font-semibold px-2 py-1 rounded ${f.level === "fix"
+                            ? "bg-red-500/10 text-red-400" : f.level === "watch" ? "bg-amber-500/10 text-amber-500" : "bg-slate-400/10 text-slate-400"}` }, (_a = FLAG_LEVELS[f.level]) === null || _a === void 0 ? void 0 :
+                        _a.mark,
+                        " ",
+                        f.text));
+                }))),
+                React.createElement("div", { className: `text-[11px] ${t.sub} mt-2` },
+                    h.stopCount,
+                    " stop",
+                    h.stopCount === 1 ? "" : "s",
+                    " \u00B7 ",
+                    fmtDur(h.downtimeMs || 0),
+                    " downtime")))),
+            list.length > 3 && (React.createElement("button", { onClick: () => setOpen((v) => !v), className: "text-emerald-500 text-sm font-semibold hover:underline" }, open ? "Show fewer" : `Show all (${list.length})`))))));
+}
 function HandoverEmailsManager({ t, emails, onChange }) {
     const [input, setInput] = useState((emails || []).join(", "));
     useEffect(() => { setInput((emails || []).join(", ")); }, [emails]);
@@ -3435,6 +3504,7 @@ function ShiftHandoverModal({ t, dark, reportBase, handoverEmails, syncCfg, last
     const [mailState, setMailState] = useState(null);
     const [busy, setBusy] = useState("");
     const [shot, setShot] = useState(null);
+    const savedRef = useRef(null);
     const [err, setErr] = useState("");
     const [note, setNote] = useState("");
     const [flags, setFlags] = useState([]);
@@ -3449,7 +3519,8 @@ function ShiftHandoverModal({ t, dark, reportBase, handoverEmails, syncCfg, last
         setFlagText("");
     };
     const removeFlag = (i) => setFlags((prev) => prev.filter((_, n) => n !== i));
-    const report = useMemo(() => handoutViewModel(Object.assign(Object.assign({}, reportBase), { note, flags })), [reportBase, note, flags]);
+    const [base] = useState(reportBase);
+    const report = useMemo(() => handoutViewModel(Object.assign(Object.assign({}, base), { note: note.trim(), flags: flags.filter((f) => f.text && f.text.trim()) })), [base, note, flags]);
     const text = formatReportText(report);
     const canEmail = !!(syncCfg && syncCfg.enabled && syncCfg.url) && (handoverEmails || []).length > 0;
     const fileName = `stoptrack-handover-${report.operator.replace(/\s+/g, "-").toLowerCase()}-${new Date(report.windowEnd).toISOString().slice(0, 10)}.png`;
@@ -3466,14 +3537,19 @@ function ShiftHandoverModal({ t, dark, reportBase, handoverEmails, syncCfg, last
         return () => clearTimeout(id);
     }, [report]);
     const persist = async () => {
+        if (!savedRef.current) {
+            savedRef.current = { id: `${report.windowEnd}-${Math.floor(Math.random() * 1e6)}`, createdAt: Date.now() };
+        }
         const rec = {
-            id: `${report.windowEnd}-${Math.floor(Math.random() * 1e6)}`,
-            operator: report.operator, machine: report.machineLabel || report.machine,
+            id: savedRef.current.id,
+            operator: report.operator,
+            machine: report.machineLabel || report.machine,
+            machines: (report.machines || []).map((m) => m.machine),
             shiftName: report.shiftName || null,
             windowStart: report.windowStart, windowEnd: report.windowEnd,
             stopCount: report.stopCount, downtimeMs: report.downtimeMs,
             note: report.note, flags: report.flags,
-            createdAt: Date.now(), updatedAt: Date.now(),
+            createdAt: savedRef.current.createdAt, updatedAt: Date.now(),
         };
         await api.saveHandover(rec);
         if (onSaved)
@@ -3487,7 +3563,7 @@ function ShiftHandoverModal({ t, dark, reportBase, handoverEmails, syncCfg, last
         const res = await shareImage(shot.dataUrl, fileName, text);
         if (!res.ok)
             setErr(res.error || "Couldn't share the handout.");
-        else
+        else if (!res.cancelled)
             await persist();
         setBusy("");
     };

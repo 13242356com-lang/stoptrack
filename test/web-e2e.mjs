@@ -179,6 +179,14 @@ async function main() {
   assert(shot.src.startsWith("data:image/png"), `handout preview is not a PNG data URL (got ${shot.src})`);
   assert(shot.w > 400 && shot.h > 200, `handout image looks degenerate: ${shot.w}x${shot.h}`);
 
+  // Share is the PRIMARY action — assert the native share bridge gets real bytes
+  // and the summary text, in the 3-arg shape Kotlin's shareImage(String,String,String?) expects.
+  await page.click("text=Share handout");
+  const sharedImg = await page.evaluate(() => window.__sharedImage || null);
+  assert(sharedImg && sharedImg.len > 5000, `native shareImage not called with real PNG bytes (${JSON.stringify(sharedImg)})`);
+  assert(/\.png$/.test(sharedImg.name), `shared filename should be a .png, got ${sharedImg.name}`);
+  assert(/guide rail/i.test(sharedImg.text || ""), "shared text should carry the operator's message");
+
   await page.click("text=Save image");
 
   // Native bridge received the image bytes …
@@ -195,7 +203,9 @@ async function main() {
     }
     return out;
   });
-  assert(handovers.length === 1, `expected 1 handover record, got ${handovers.length}`);
+  // Sharing AND saving the same handout is one handover, not two — the record is
+  // updated in place, never duplicated.
+  assert(handovers.length === 1, `share+save should file exactly 1 handover record, got ${handovers.length}`);
   const h = handovers[0];
   assert(/guide rail/i.test(h.note || ""), `handover note not persisted: ${JSON.stringify(h.note)}`);
   assert((h.flags || []).some((f) => /coolant/i.test(f.text)), `operator flag not persisted: ${JSON.stringify(h.flags)}`);

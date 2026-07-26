@@ -301,7 +301,7 @@ function shortDur(ms) {
   const s = Math.max(0, Math.round((ms || 0) / 1000));
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
   if (h) return m ? `${h}h ${m}m` : `${h}h`;
-  if (m) return sec >= 30 ? `${m}m` : `${m}m`;
+  if (m) return `${sec >= 30 ? m + 1 : m}m`;
   return `${sec}s`;
 }
 
@@ -316,31 +316,52 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
+// Shorten `text` with an ellipsis until it fits `maxW` at the ctx's current font.
+function ellipsize(ctx, text, maxW) {
+  let s = String(text || "");
+  if (ctx.measureText(s).width <= maxW) return s;
+  while (s.length > 1 && ctx.measureText(`${s}…`).width > maxW) s = s.slice(0, -1);
+  return `${s}…`;
+}
+
 // Greedy word wrap. Returns the lines that fit `maxW` at the ctx's current font.
 function wrapText(ctx, text, maxW) {
   const out = [];
   String(text || "").split(/\n+/).forEach((para) => {
     let line = "";
     para.split(/\s+/).filter(Boolean).forEach((word) => {
-      const test = line ? `${line} ${word}` : word;
+      // A single token longer than the line (a pasted ticket URL, a part number)
+      // is broken on characters — never allowed to run off the card.
+      let w = word;
+      while (ctx.measureText(w).width > maxW && w.length > 1) {
+        let cut = w.length;
+        while (cut > 1 && ctx.measureText(w.slice(0, cut)).width > maxW) cut--;
+        if (line) { out.push(line); line = ""; }
+        out.push(w.slice(0, cut));
+        w = w.slice(cut);
+      }
+      const test = line ? `${line} ${w}` : w;
       if (ctx.measureText(test).width <= maxW || !line) line = test;
-      else { out.push(line); line = word; }
+      else { out.push(line); line = w; }
     });
     if (line) out.push(line);
   });
   return out;
 }
 
-// Lay flag chips out into rows that fit the content width.
+// Lay flag chips out into rows that fit the content width. A chip is never wider
+// than the box it sits in: the operator's words get clipped with an ellipsis
+// rather than running off the edge of the image the next shift receives.
 function layoutFlags(ctx, flags, maxW) {
   ctx.font = `600 11.5px ${HANDOUT.sans}`;
   const rows = [];
   let row = [], rowW = 0;
   (flags || []).forEach((f) => {
     const lv = FLAG_LEVELS[f.level] || FLAG_LEVELS.info;
-    const w = ctx.measureText(`${lv.mark}  ${f.text}`).width + 22;
+    const text = ellipsize(ctx, f.text, maxW - 22 - ctx.measureText(`${lv.mark}  `).width);
+    const w = ctx.measureText(`${lv.mark}  ${text}`).width + 22;
     if (row.length && rowW + w + 7 > maxW) { rows.push(row); row = []; rowW = 0; }
-    row.push({ ...f, w, lv });
+    row.push({ text, w, lv });
     rowW += w + 7;
   });
   if (row.length) rows.push(row);
@@ -363,7 +384,8 @@ function drawHandout(r, scale = 2.5) {
   const flagRows = r.flags && r.flags.length ? layoutFlags(meas, r.flags, contentW - 32) : [];
   const reasons = (r.topReasons || []).slice(0, 5);
 
-  const hHeader = 74, hWho = 40, hTiles = 2 * 74 + 1, hGoal = 92;
+  const showGoal = r.goalPct != null;
+  const hHeader = 74, hWho = 40, hTiles = 2 * 74 + 1, hGoal = showGoal ? 92 : 0;
   const hReasons = reasons.length ? 34 + reasons.length * 23 + (r.longest ? 22 : 0) + 12 : 0;
   const hNoteBox = (noteLines.length || flagRows.length)
     ? 16 + 24 + noteLines.length * 19 + (flagRows.length ? 8 + flagRows.length * 27 : 0) + 14
@@ -425,20 +447,34 @@ function drawHandout(r, scale = 2.5) {
   c.font = `800 12px ${H.sans}`; c.fillStyle = "#04140e"; c.textAlign = "center";
   c.fillText((r.operator || "?").trim().charAt(0).toUpperCase(), av, y + 17);
   c.textAlign = "left";
-  let x = H.PAD + 34;
-  c.font = `700 14px ${H.sans}`; c.fillStyle = H.ink;
-  c.fillText(r.operator, x, y + 18); x += c.measureText(r.operator).width + 8;
-  c.font = `700 14px ${H.sans}`; c.fillStyle = H.brand; c.fillText("→", x, y + 18); x += 18;
-  c.font = `14px ${H.sans}`; c.fillStyle = H.ink2; c.fillText("next shift", x, y + 18);
-  { // machine pill, right-aligned
-    const mt = r.machineLabel || r.machine || "";
+  // The machine pill is measured FIRST so the operator name gets a real width
+  // budget — a long name (or a long machine label) must never overprint it.
+  const nameX = H.PAD + 34;
+  let pillX = H.W - H.PADR;
+  {
     c.font = `11.5px ${H.sans}`;
+    const mt = ellipsize(c, r.machineLabel || r.machine || "", 150);
     const w = c.measureText(mt).width + 28;
-    const px = H.W - H.PADR - w;
-    c.fillStyle = H.surf2; roundRect(c, px, y + 2, w, 24, 12); c.fill();
+    pillX = H.W - H.PADR - w;
+    c.fillStyle = H.surf2; roundRect(c, pillX, y + 2, w, 24, 12); c.fill();
     c.strokeStyle = H.line; c.lineWidth = 1; c.stroke();
-    c.fillStyle = H.brand; c.beginPath(); c.arc(px + 12, y + 14, 3, 0, Math.PI * 2); c.fill();
-    c.fillStyle = H.ink2; c.fillText(mt, px + 20, y + 18);
+    c.fillStyle = H.brand; c.beginPath(); c.arc(pillX + 12, y + 14, 3, 0, Math.PI * 2); c.fill();
+    c.fillStyle = H.ink2; c.fillText(mt, pillX + 20, y + 18);
+  }
+  {
+    const budget = pillX - 10 - nameX;
+    c.font = `14px ${H.sans}`;
+    const tailW = c.measureText(" →  next shift").width;
+    c.font = `700 14px ${H.sans}`; c.fillStyle = H.ink;
+    // Drop the "→ next shift" tail before ever truncating the operator's name.
+    const showTail = c.measureText(r.operator).width + tailW <= budget;
+    const name = ellipsize(c, r.operator, showTail ? budget - tailW : budget);
+    c.fillText(name, nameX, y + 18);
+    if (showTail) {
+      let x = nameX + c.measureText(name).width + 8;
+      c.fillStyle = H.brand; c.fillText("→", x, y + 18); x += 18;
+      c.font = `14px ${H.sans}`; c.fillStyle = H.ink2; c.fillText("next shift", x, y + 18);
+    }
   }
   y += hWho;
 
@@ -464,7 +500,7 @@ function drawHandout(r, scale = 2.5) {
   y += hTiles; rule(y);
 
   // ---- goal -----------------------------------------------------------------
-  if (r.goalPct != null) {
+  if (showGoal) {
     label("Goal", H.PAD, y + 24);
     const cx = H.PAD + 23, cy = y + 56, rad = 15;
     c.lineWidth = 5; c.strokeStyle = H.surf2;
@@ -633,7 +669,7 @@ async function shareImage(dataUrl, filename, text) {
       return { ok: true, how: "web-share" };
     }
   } catch (e) {
-    if (e && e.name === "AbortError") return { ok: true, how: "cancelled" }; // user dismissed
+    if (e && e.name === "AbortError") return { ok: true, cancelled: true }; // user dismissed
   }
   return saveImage(dataUrl, filename);
 }
@@ -2276,7 +2312,7 @@ export default function App() {
             updateShifts={updateShifts} discardStop={discardStop} deleteStop={deleteStop}
             hasPin={!!supervisorPinHash} updatePin={updatePin}
             syncCfg={syncCfg} updateSyncConfig={updateSyncConfig} syncStatus={sync.status} onSyncNow={sync.flush}
-            rates={rates} updateRates={updateRates} production={production} sessions={sessions}
+            rates={rates} updateRates={updateRates} production={production} sessions={sessions} handovers={handovers}
             handoverEmails={handoverEmails} updateHandoverEmails={updateHandoverEmails}
             onDownloadBackup={downloadBackup} onRestore={pickRestore} restoreMsg={restoreMsg}
           />
@@ -2324,7 +2360,7 @@ export default function App() {
           reportBase={buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, activeShift, goalStatus })}
           handoverEmails={handoverEmails} syncCfg={syncCfg}
           lastHandover={handovers[0] || null}
-          onSaved={(rec) => setHandovers((prev) => [rec, ...prev])}
+          onSaved={(rec) => setHandovers((prev) => [rec, ...prev.filter((h) => h.id !== rec.id)])}
           onClose={() => setHandoverOpen(false)}
         />
       )}
@@ -2724,7 +2760,7 @@ function ManualStopModal({ t, dark, machine, machines, reasons, quickStops, last
 /* ============================================================================
    SUPERVISOR VIEW
    ========================================================================== */
-function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quickStops, shifts, updateMachines, updateReasons, updateQuickStops, updateShifts, discardStop, deleteStop, hasPin, updatePin, syncCfg, updateSyncConfig, syncStatus, onSyncNow, rates, updateRates, production, sessions, handoverEmails, updateHandoverEmails, onDownloadBackup, onRestore, restoreMsg }) {
+function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quickStops, shifts, updateMachines, updateReasons, updateQuickStops, updateShifts, discardStop, deleteStop, hasPin, updatePin, syncCfg, updateSyncConfig, syncStatus, onSyncNow, rates, updateRates, production, sessions, handovers, handoverEmails, updateHandoverEmails, onDownloadBackup, onRestore, restoreMsg }) {
   // Uptime/OEE assume a shift length; with several shifts the supervisor picks
   // which one frames the analytics (defaults to the first).
   const [analyticsShiftId, setAnalyticsShiftId] = useState(shifts?.[0]?.id);
@@ -3073,6 +3109,7 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
           <ListManager t={t} title="Stop reasons" icon={<AlertCircle size={16} />} items={reasons} onChange={updateReasons} placeholder="e.g. Sensor calibration" />
           <QuickStopManager t={t} quickStops={quickStops} reasons={reasons} onChange={updateQuickStops} />
           <RatesManager t={t} machines={machines} rates={rates} onChange={updateRates} />
+          <HandoverLog t={t} handovers={handovers} />
           <HandoverEmailsManager t={t} emails={handoverEmails} onChange={updateHandoverEmails} />
           <PinManager t={t} hasPin={hasPin} updatePin={updatePin} />
           <ServerSyncManager t={t} syncCfg={syncCfg} updateSyncConfig={updateSyncConfig} syncStatus={syncStatus} onSyncNow={onSyncNow} />
@@ -3477,6 +3514,52 @@ function ShiftsManager({ t, shifts, machines, onChange }) {
 /* ============================================================================
    SHIFT HANDOVER — recipients settings + report modal
    ========================================================================== */
+// The handout history. Without this the `hand:` records would be write-only —
+// the supervisor needs to see what each shift actually passed on, and which
+// flags were left open.
+function HandoverLog({ t, handovers }) {
+  const [open, setOpen] = useState(false);
+  const list = handovers || [];
+  const shown = open ? list.slice(0, 30) : list.slice(0, 3);
+  return (
+    <div className={`${t.card} rounded-xl p-4`}>
+      <h3 className="font-bold mb-1 flex items-center gap-2"><PencilLine size={16} /> Shift handovers</h3>
+      <p className={`text-xs ${t.sub} mb-3`}>What each operator passed to the next shift, newest first. Kept for 60 days and included in Backup &amp; Restore.</p>
+      {!list.length ? (
+        <p className={`${t.sub} text-sm`}>No handovers recorded yet. Operators create one from Operator → Handover.</p>
+      ) : (
+        <div className="space-y-2">
+          {shown.map((h) => (
+            <div key={h.id} className={`${t.muted} rounded-lg p-3`}>
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="font-semibold text-sm">{h.operator} <span className={`font-normal ${t.sub}`}>· {h.machine}</span></span>
+                <span className={`text-[11px] ${t.sub} font-mono`}>{fmtTime(h.windowEnd || h.createdAt)}</span>
+              </div>
+              {h.note && <p className="text-sm mt-1.5 leading-snug">{h.note}</p>}
+              {!!(h.flags || []).length && (
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {h.flags.map((f, i) => (
+                    <span key={i} className={`text-[11px] font-semibold px-2 py-1 rounded ${f.level === "fix"
+                      ? "bg-red-500/10 text-red-400" : f.level === "watch" ? "bg-amber-500/10 text-amber-500" : "bg-slate-400/10 text-slate-400"}`}>
+                      {FLAG_LEVELS[f.level]?.mark} {f.text}
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div className={`text-[11px] ${t.sub} mt-2`}>{h.stopCount} stop{h.stopCount === 1 ? "" : "s"} · {fmtDur(h.downtimeMs || 0)} downtime</div>
+            </div>
+          ))}
+          {list.length > 3 && (
+            <button onClick={() => setOpen((v) => !v)} className="text-emerald-500 text-sm font-semibold hover:underline">
+              {open ? "Show fewer" : `Show all (${list.length})`}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function HandoverEmailsManager({ t, emails, onChange }) {
   const [input, setInput] = useState((emails || []).join(", "));
   useEffect(() => { setInput((emails || []).join(", ")); }, [emails]);
@@ -3504,6 +3587,7 @@ function ShiftHandoverModal({ t, dark, reportBase, handoverEmails, syncCfg, last
   const [mailState, setMailState] = useState(null); // null | "sending" | "sent" | error string
   const [busy, setBusy] = useState("");             // "" | "share" | "save"
   const [shot, setShot] = useState(null);           // the rendered PNG
+  const savedRef = useRef(null);                    // the filed record, so re-sending never duplicates it
   const [err, setErr] = useState("");
 
   // The operator writes the handover: a message plus their own flags. Nothing
@@ -3522,9 +3606,17 @@ function ShiftHandoverModal({ t, dark, reportBase, handoverEmails, syncCfg, last
   };
   const removeFlag = (i) => setFlags((prev) => prev.filter((_, n) => n !== i));
 
+  // Snapshot at open: the handout describes the shift as it stood when the
+  // operator hit Handover, and freezing it stops `windowEnd: Date.now()` from
+  // re-rendering (and re-encoding) the PNG on every timer tick.
+  const [base] = useState(reportBase);
   const report = useMemo(
-    () => handoutViewModel({ ...reportBase, note, flags }),
-    [reportBase, note, flags],
+    () => handoutViewModel({
+      ...base,
+      note: note.trim(),
+      flags: flags.filter((f) => f.text && f.text.trim()),
+    }),
+    [base, note, flags],
   );
   const text = formatReportText(report);
   const canEmail = !!(syncCfg && syncCfg.enabled && syncCfg.url) && (handoverEmails || []).length > 0;
@@ -3543,14 +3635,21 @@ function ShiftHandoverModal({ t, dark, reportBase, handoverEmails, syncCfg, last
   // Persist the handout so the supervisor keeps a history and the next shift can
   // carry forward what's still open. Called whenever it's actually sent/saved.
   const persist = async () => {
+    // Sharing AND saving AND emailing the same handout must file ONE record, so
+    // the id/createdAt are minted once and later sends just update it.
+    if (!savedRef.current) {
+      savedRef.current = { id: `${report.windowEnd}-${Math.floor(Math.random() * 1e6)}`, createdAt: Date.now() };
+    }
     const rec = {
-      id: `${report.windowEnd}-${Math.floor(Math.random() * 1e6)}`,
-      operator: report.operator, machine: report.machineLabel || report.machine,
+      id: savedRef.current.id,
+      operator: report.operator,
+      machine: report.machineLabel || report.machine,
+      machines: (report.machines || []).map((m) => m.machine),
       shiftName: report.shiftName || null,
       windowStart: report.windowStart, windowEnd: report.windowEnd,
       stopCount: report.stopCount, downtimeMs: report.downtimeMs,
       note: report.note, flags: report.flags,
-      createdAt: Date.now(), updatedAt: Date.now(),
+      createdAt: savedRef.current.createdAt, updatedAt: Date.now(),
     };
     await api.saveHandover(rec);
     if (onSaved) onSaved(rec);
@@ -3561,7 +3660,7 @@ function ShiftHandoverModal({ t, dark, reportBase, handoverEmails, syncCfg, last
     setBusy("share"); setErr("");
     const res = await shareImage(shot.dataUrl, fileName, text);
     if (!res.ok) setErr(res.error || "Couldn't share the handout.");
-    else await persist();
+    else if (!res.cancelled) await persist();
     setBusy("");
   };
 
