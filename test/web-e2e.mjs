@@ -75,6 +75,8 @@ function installMockNative() {
     documentStop: function () { /* intentionally no-op — the web owns recording */ },
     discardStop: function () { this._pending = null; this._push(); },
     saveFile: function (name, mime, content) { window.__savedFile = { name, mime, len: (content || "").length }; },
+    saveImage: function (name, b64) { window.__savedImage = { name, len: (b64 || "").length }; },
+    shareImage: function (name, b64, text) { window.__sharedImage = { name, len: (b64 || "").length, text }; },
     _push: function () {
       const payload = { timer: this._timer, pending: this._pending };
       window.__lastPush = payload;
@@ -158,8 +160,60 @@ async function main() {
     .innerText();
   assert(stopsValue.trim() === "1", `operator "Stops" stat should show 1, saw: ${JSON.stringify(stopsValue)}`);
 
+  // ---- shift handout -------------------------------------------------------
+  // The handover leaves the app as one image, so the guard is: the operator's own
+  // words reach the card, the PNG actually renders, and sending it files a record.
+  await page.click("text=Handover");
+  await page.waitForSelector("text=MESSAGE FOR THE NEXT SHIFT", { timeout: 5000 });
+
+  await page.fill("textarea", "Infeed guide rail looks worn - jammed twice on nights.");
+  await page.fill('input[placeholder="e.g. Asla 2 coolant low"]', "Coolant low on Line 2");
+  await page.click("text=Add");
+
+  // The flag the operator typed must appear as a chip (their words, not a preset).
+  await page.waitForSelector("text=Coolant low on Line 2", { timeout: 3000 });
+
+  // The preview IS the shared PNG — assert it rendered as a real, non-trivial image.
+  const img = await page.waitForSelector('img[alt="Shift handout"]', { timeout: 8000 });
+  const shot = await img.evaluate((el) => ({ src: (el.getAttribute("src") || "").slice(0, 22), w: el.naturalWidth, h: el.naturalHeight }));
+  assert(shot.src.startsWith("data:image/png"), `handout preview is not a PNG data URL (got ${shot.src})`);
+  assert(shot.w > 400 && shot.h > 200, `handout image looks degenerate: ${shot.w}x${shot.h}`);
+
+  // Share is the PRIMARY action — assert the native share bridge gets real bytes
+  // and the summary text, in the 3-arg shape Kotlin's shareImage(String,String,String?) expects.
+  await page.click("text=Share handout");
+  const sharedImg = await page.evaluate(() => window.__sharedImage || null);
+  assert(sharedImg && sharedImg.len > 5000, `native shareImage not called with real PNG bytes (${JSON.stringify(sharedImg)})`);
+  assert(/\.png$/.test(sharedImg.name), `shared filename should be a .png, got ${sharedImg.name}`);
+  assert(/guide rail/i.test(sharedImg.text || ""), "shared text should carry the operator's message");
+
+  await page.click("text=Save image");
+
+  // Native bridge received the image bytes …
+  const savedImg = await page.evaluate(() => window.__savedImage || null);
+  assert(savedImg && savedImg.len > 5000, `native saveImage not called with real PNG bytes (${JSON.stringify(savedImg)})`);
+  assert(/\.png$/.test(savedImg.name), `handout filename should be a .png, got ${savedImg.name}`);
+
+  // … and the handout was filed, carrying the operator's note + flag.
+  const handovers = await page.evaluate(() => {
+    const out = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k.startsWith("hand:")) { try { out.push(JSON.parse(localStorage.getItem(k))); } catch { /* skip */ } }
+    }
+    return out;
+  });
+  // Sharing AND saving the same handout is one handover, not two — the record is
+  // updated in place, never duplicated.
+  assert(handovers.length === 1, `share+save should file exactly 1 handover record, got ${handovers.length}`);
+  const h = handovers[0];
+  assert(/guide rail/i.test(h.note || ""), `handover note not persisted: ${JSON.stringify(h.note)}`);
+  assert((h.flags || []).some((f) => /coolant/i.test(f.text)), `operator flag not persisted: ${JSON.stringify(h.flags)}`);
+  assert(h.operator === "Alice", `handover operator wrong: ${h.operator}`);
+
   await browser.close();
   console.log("web-e2e: PASS — stop recorded immediately (operator=Alice, reason=" + chosenReason + ", duration=" + rec.duration + "ms)");
+  console.log(`web-e2e: PASS — handout rendered ${shot.w}x${shot.h} PNG, shared via native, filed with note + ${h.flags.length} operator flag(s)`);
 }
 
 main().catch((e) => { console.error("web-e2e: FAIL —", e.message); process.exit(1); });

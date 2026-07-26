@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Folders the FileProvider may hand out via content:// URIs. Only the private
+     cache folder the app writes shift handouts into is exposed, and only for as
+     long as the receiving app holds the temporary read grant. -->
+<paths>
+    <cache-path name="shared" path="shared/" />
+</paths>
