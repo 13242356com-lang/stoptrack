@@ -314,6 +314,18 @@ the guard that would have caught the stop-report regression before it shipped.
 **The loop:** writer implements → `npm test` → spawn `reviewer` → fix its findings
 → `npm test` → commit. The Stop hook makes the "tests ran" step non-skippable.
 
+### The scout (what should we build next?)
+- **`.claude/agents/scout.md`** — read-only. Surveys the whole repo (web, server,
+  Android, build, CI, docs) and returns a **ranked backlog**: correctness risks,
+  security, operator/supervisor features, performance, sync integrity, test gaps —
+  each with `file:line`, effort, and what regresses. Ends with **TOP 3 NEXT** and
+  **NOT WORTH DOING**. It proposes; it never implements.
+- The living backlog is **`docs/IDEAS.md`** — the scout reads it so items get
+  re-ranked and marked done rather than re-proposed. Prune it when things ship.
+- Run it on demand ("scout the repo") or on a schedule; a Routine can fire it and
+  refresh `docs/IDEAS.md`. Treat its output as a menu, not a mandate — the
+  NOT WORTH DOING section exists so the backlog doesn't just grow forever.
+
 ## Working style that fits this project
 
 - **Edit the smallest surface.** Change the two functions involved, not the whole
