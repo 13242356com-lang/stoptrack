@@ -137,10 +137,34 @@ function persist() {
 }
 
 // The record's last-write clock — mirrors the client's stampOf().
-const stampOf = (s) => (s && (s.updatedAt != null ? s.updatedAt
+const rawStampOf = (s) => (s && (s.updatedAt != null ? s.updatedAt
   : s.loggedAt != null ? s.loggedAt
   : s.end != null ? s.end
   : s.start != null ? s.start : 0)) || 0;
+
+// How far ahead of the server's clock an incoming stamp may sit before we stop
+// believing it. Devices on a factory floor often have no SIM and no NTP, and a
+// single phone whose clock reads a year ahead used to poison the shared data
+// permanently: its config write out-ranked every later edit, so the supervisor's
+// changes were accepted and then silently reverted, and a future-stamped stop
+// resurrected itself after being discarded. Clamping only the FUTURE side keeps a
+// device that has merely been offline (its stamps are in the past) able to win.
+// Only used to decide when to WARN about a device's clock; the stored stamp is
+// clamped to the server's own clock, because keeping any future value would give
+// the skewed device a dead zone in which later, honest writes still lose.
+const CLOCK_SKEW_GRACE_MS = 5 * 60 * 1000;
+const clampStamp = (stamp, now) => Math.min(Number(stamp) || 0, now);
+const stampOf = (s, now = Date.now()) => clampStamp(rawStampOf(s), now);
+
+// Store the record with an honest stamp. Keeping a future value would let it slide
+// forward forever (re-clamping at read time always yields "now", so it ties or beats
+// every later write); writing the clamped stamp back pins it once. No-op for a
+// record whose clock is sane, since clampStamp only lowers a future value.
+const normalizeStamp = (r, now) => {
+  const raw = rawStampOf(r);
+  const clamped = clampStamp(raw, now);
+  return clamped === raw && r.updatedAt != null ? r : { ...r, updatedAt: clamped };
+};
 
 // --- email (optional) --------------------------------------------------------
 // Shift-handover email via nodemailer, loaded lazily so the server keeps zero
@@ -319,16 +343,19 @@ const server = http.createServer(async (req, res) => {
     if (route === "/stops" && req.method === "POST") {
       const body = await readBody(req);
       const incoming = Array.isArray(body.stops) ? body.stops : [];
-      let saved = 0;
+      let saved = 0, skewed = 0;
       for (const r of incoming) {
         if (!r || !safeId(r.id)) continue;
         const cur = db.stops[r.id];
-        // Last-write-wins: keep whichever record was mutated more recently.
-        if (!cur || stampOf(r) >= stampOf(cur)) { db.stops[r.id] = r; saved++; }
+        if (rawStampOf(r) > now + CLOCK_SKEW_GRACE_MS) skewed++;
+        // Last-write-wins on the CLAMPED stamp, so a device with a wrong clock
+        // can't out-rank every future write.
+        if (!cur || stampOf(r, now) >= stampOf(cur, now)) { db.stops[r.id] = normalizeStamp(r, now); saved++; }
       }
       persist();
       if (saved > 0) log(`saved ${saved} stop(s) from ${ip}`);
-      return send(res, 200, { ok: true, serverTime: now });
+      if (skewed > 0) log(`WARNING: ${skewed} stop(s) from ${ip} are stamped in the future — check that device's clock`);
+      return send(res, 200, { ok: true, serverTime: now, applied: saved, skewed });
     }
 
     // Production records (units/scrap per shift, for OEE) — same contract as /stops.
@@ -345,7 +372,7 @@ const server = http.createServer(async (req, res) => {
       for (const r of incoming) {
         if (!r || !safeId(r.id)) continue;
         const cur = db.production[r.id];
-        if (!cur || stampOf(r) >= stampOf(cur)) { db.production[r.id] = r; saved++; }
+        if (!cur || stampOf(r, now) >= stampOf(cur, now)) { db.production[r.id] = normalizeStamp(r, now); saved++; }
       }
       persist();
       if (saved > 0) log(`saved ${saved} production record(s) from ${ip}`);
@@ -366,7 +393,7 @@ const server = http.createServer(async (req, res) => {
       for (const r of incoming) {
         if (!r || !safeId(r.id)) continue;
         const cur = db.sessions[r.id];
-        if (!cur || stampOf(r) >= stampOf(cur)) { db.sessions[r.id] = r; saved++; }
+        if (!cur || stampOf(r, now) >= stampOf(cur, now)) { db.sessions[r.id] = normalizeStamp(r, now); saved++; }
       }
       persist();
       if (saved > 0 && VERBOSE) log(`saved ${saved} session record(s) from ${ip}`);
@@ -379,13 +406,19 @@ const server = http.createServer(async (req, res) => {
 
     if (route === "/config" && req.method === "PUT") {
       const body = await readBody(req);
-      const incomingAt = Number(body.updatedAt) || (body.config && Number(body.config.updatedAt)) || 0;
-      if (incomingAt >= (db.config.updatedAt || 0)) {
+      const rawAt = Number(body.updatedAt) || (body.config && Number(body.config.updatedAt)) || 0;
+      const incomingAt = clampStamp(rawAt, now);
+      const applied = incomingAt >= (db.config.updatedAt || 0);
+      if (applied) {
         db.config = { config: body.config || null, updatedAt: incomingAt };
         persist();
         log(`settings updated (machines/reasons/quick-stops) by ${ip}`);
+      } else {
+        // Never silently drop a supervisor's edit: say so, so the app can surface it.
+        log(`settings from ${ip} REJECTED as older than the stored copy (incoming ${incomingAt}, stored ${db.config.updatedAt})`);
       }
-      return send(res, 200, { ok: true, serverTime: now });
+      if (rawAt > now + CLOCK_SKEW_GRACE_MS) log(`WARNING: config from ${ip} is stamped in the future — check that device's clock`);
+      return send(res, 200, { ok: true, serverTime: now, applied });
     }
 
     // Shift handover email: { to: [addresses], subject, text }. 501 when SMTP

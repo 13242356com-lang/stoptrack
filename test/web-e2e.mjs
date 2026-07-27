@@ -344,7 +344,8 @@ async function main() {
       shifts: [{ id: "t1", name: "Test", start: hhmm(now - 3600e3), end: hhmm(now + 7 * 3600e3), goals: {} }],
       rates: {}, handoverEmails: [], updatedAt: now,
     }));
-    localStorage.setItem("config:prefs", JSON.stringify({ operator: "Alice", setupLocked: true, machine: "Line 1" }));
+    // Deliberately NO prefs: a locked setup opens a presence session on load,
+    // which would make this no longer a fresh install.
   });
   await p3.goto("file://" + path.join(root, "index.html"));
   await p3.waitForSelector("text=Start Stop", { timeout: 20000 });
