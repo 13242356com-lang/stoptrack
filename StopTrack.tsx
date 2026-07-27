@@ -71,6 +71,10 @@ const relTime = (ts) => {
   return `${Math.round(s / 86400)}d ago`;
 };
 
+// How long after a shift ends its stops still count as that shift's — an operator
+// finishing up or running over shouldn't have the board reset under them.
+const SHIFT_OVERTIME_GRACE_MS = 2 * 60 * 60 * 1000;
+
 function shiftLengthMs(shift) {
   if (!shift?.start || !shift?.end) return 0;
   const [sh, sm] = shift.start.split(":").map(Number);
@@ -1630,10 +1634,18 @@ export default function App() {
     () => shiftWindowAt(activeShift, Date.now()),
     [activeShift, slowTick],
   );
-  const shiftStart = useMemo(
-    () => Math.max(shiftWindow ? shiftWindow.start : 0, clearedBefore || 0),
-    [shiftWindow, clearedBefore],
-  );
+  // Between shifts the clock resolves to the shift that has most recently STARTED,
+  // which just before the next one begins is nearly 24h old — so the board would
+  // show all of yesterday. Once we're past the shift end (plus a grace window for
+  // overtime, during which stops still belong to the shift), the board goes fresh
+  // instead: an operator arriving at 05:45 for an 06:00 shift starts clean, and a
+  // stop logged in that gap is still visible because it lands after the boundary.
+  const shiftStart = useMemo(() => {
+    if (!shiftWindow) return clearedBefore || 0;
+    const overtimeEnd = shiftWindow.end + SHIFT_OVERTIME_GRACE_MS;
+    const base = Date.now() > overtimeEnd ? overtimeEnd : shiftWindow.start;
+    return Math.max(base, clearedBefore || 0);
+  }, [shiftWindow, clearedBefore, slowTick]);
 
 
   // Latest snapshots for the sync merges, without re-creating the merge callbacks
@@ -2246,10 +2258,12 @@ export default function App() {
       const start = Math.max(s.start, winStart);
       if (end > start) { share[s.machine] = (share[s.machine] || 0) + (end - start); shareTotal += end - start; }
     }
+    // With presence data, the shift is apportioned across the machines worked.
+    // WITHOUT it we assign nothing: inventing a full shift on the current machine
+    // would put fabricated manned time on the board and in the handout for every
+    // user who has never locked setup — the very bug this change exists to kill.
     if (shareTotal > 0) {
       for (const m of Object.keys(share)) entry(m).mannedMs = elapsed * (share[m] / shareTotal);
-    } else if (machine) {
-      entry(machine).mannedMs = elapsed; // no presence data — it's all on the current machine
     }
 
     for (const s of shiftStops) { const e = entry(s.machine); e.downtimeMs += s.duration; e.stops += 1; }
@@ -2284,7 +2298,7 @@ export default function App() {
       // single-machine framing against the configured shift length.
       const downtimeMs = shiftStops.reduce((a, s) => a + s.duration, 0);
       overall = computeOEE({
-        plannedMs: shiftLengthMs(activeShift), downtimeMs,
+        plannedMs: elapsed || shiftLengthMs(activeShift), downtimeMs,
         unitsProduced: myProduction?.unitsProduced, scrapCount: myProduction?.scrapCount,
         ratePerHour: rates?.[machine],
       });
@@ -2301,9 +2315,9 @@ export default function App() {
     const produced = myShift.rows.find((r) => r.machine === machine)?.units || 0;
     return computeGoalStatus({
       goal, produced, machine,
-      ratePerHour: rates?.[machine], shiftEndMs: shiftEndAt(activeShift), now: Date.now(),
+      ratePerHour: rates?.[machine], shiftEndMs: shiftWindow ? shiftWindow.end : shiftEndAt(activeShift), now: Date.now(),
     });
-  }, [myShift, activeShift, rates, machine, slowTick]);
+  }, [myShift, activeShift, rates, machine, shiftWindow, slowTick]);
 
   // In the shell the operator timer is a view over the native timer: display from
   // the pushed state, buttons drive native. In a browser it's the local useTimer.
@@ -2367,7 +2381,7 @@ export default function App() {
             myStops={shiftStops} visibleStops={visibleStops} machines={machines} reasons={reasons} quickStops={quickStops}
             applyQuickStop={applyQuickStop} lastReason={lastReason}
             shift={activeShift} shifts={shifts} shiftId={shiftId} onSelectShift={selectShift}
-            clearedBefore={clearedBefore} shiftStart={shiftStart} hiddenStopCount={hiddenStopCount}
+            shiftStart={shiftStart} hiddenStopCount={hiddenStopCount}
             onNewShift={() => setNewShiftOpen(true)} showAll={showAll} onToggleShowAll={toggleShowAll}
             setupLocked={setupLocked} onLockSetup={lockSetup} onUnlockSetup={unlockSetup}
             onOpenManual={() => { setSaveError(""); setManualOpen(true); }}
@@ -2450,7 +2464,7 @@ function OperatorView(props) {
     t, operator, setOperator, machine, setMachine, timer, onStop,
     pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError,
     myStops, visibleStops, machines, reasons, quickStops, applyQuickStop, lastReason,
-    shift, shifts, shiftId, onSelectShift, clearedBefore, shiftStart, hiddenStopCount, onNewShift, showAll, onToggleShowAll,
+    shift, shifts, shiftId, onSelectShift, shiftStart, hiddenStopCount, onNewShift, showAll, onToggleShowAll,
     setupLocked, onLockSetup, onUnlockSetup, onOpenManual,
     syncStatus, syncOn,
     rates, myProduction, onSaveProduction, myShift, goalStatus, onOpenHandover,
@@ -2459,7 +2473,7 @@ function OperatorView(props) {
   const { state, elapsed, start, pause, resume } = timer;
   const { running, paused } = state;
 
-  // ---- current-shift stats (from myStops: own, non-discarded, since New Shift) --
+  // ---- current-shift stats (own, non-discarded, inside the shift window) ---
   // Total downtime shown on the current board.
   const downtimeMs = useMemo(() => myStops.reduce((a, s) => a + s.duration, 0), [myStops]);
   // Stops in the last hour.

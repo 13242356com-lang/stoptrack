@@ -250,13 +250,30 @@ async function main() {
   });
   await p2.addInitScript(() => {
     const now = Date.now(), DAY = 86400e3;
+    // Pin a shift that definitely CONTAINS now (started 1h ago, runs 8h), so the
+    // assertions below don't depend on what time CI happens to run at.
+    const hhmm = (ms) => {
+      const d = new Date(ms);
+      return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    };
+    localStorage.setItem("config:lists", JSON.stringify({
+      machines: ["Line 1"], reasons: ["Cleaning", "Material jam"], quickStops: [],
+      shifts: [{ id: "t1", name: "Test", start: hhmm(now - 3600e3), end: hhmm(now + 7 * 3600e3), goals: {} }],
+      rates: {}, handoverEmails: [], updatedAt: now,
+    }));
     const stop = (id, ago, dur) => localStorage.setItem(`stop:${id}`, JSON.stringify({
       id, machine: "Line 1", operator: "Alice", start: now - ago, end: now - ago + dur,
       duration: dur, reason: "Cleaning", notes: "", discarded: false,
       loggedAt: now - ago, updatedAt: now - ago,
     }));
     stop("old-1", 25 * 3600e3, 45 * 60e3);  // yesterday — outside any window
-    stop("cur-1", 60e3, 60e3);              // this shift
+    stop("cur-1", 5e3, 60e3);               // this shift (5s ago: never straddles the window edge)
+    // A presence span left open since yesterday — exactly what credited an
+    // operator with 21 hours of manned time on one machine.
+    localStorage.setItem("sess:stale-1", JSON.stringify({
+      id: "stale-1", kind: "session", operator: "Alice", machine: "Line 1",
+      start: now - 30 * 3600e3, end: null, loggedAt: now - 30 * 3600e3, updatedAt: now,
+    }));
     localStorage.setItem("config:prefs", JSON.stringify({ operator: "Alice", setupLocked: true, machine: "Line 1" }));
   });
   await p2.goto("file://" + path.join(root, "index.html"));
@@ -277,7 +294,66 @@ async function main() {
   const listAfter = await listCount();
   assert(listAfter > listBefore, `"Show all" should still reveal older stops in the list (${listBefore} -> ${listAfter})`);
 
+  // A 30-hour-old open presence span must NOT become 30 hours of manned time.
+  // This is the regression guard for the reported "21 hours on one machine" —
+  // without it, reverting the apportioning still passes every other assertion.
+  const manned = await p2.evaluate(() => {
+    const chips = [...document.querySelectorAll("span")]
+      .map((el) => el.textContent || "")
+      .filter((txt) => /^Line 1 · \d/.test(txt.trim()));
+    const parse = (txt) => {
+      let ms = 0;
+      for (const m of String(txt).matchAll(/(\d+)\s*([hms])/g)) {
+        const n = Number(m[1]);
+        ms += m[2] === "h" ? n * 3600e3 : m[2] === "m" ? n * 60e3 : n * 1000;
+      }
+      return ms;
+    };
+    return chips.map((c) => ({ text: c.trim(), ms: parse(c.split("·")[1] || "") }));
+  });
+  // The chip must actually be on screen, or this assertion guards nothing.
+  assert(manned.length > 0, "expected a machines-worked chip for the seeded session");
+  // The pinned shift started 1h ago. A 30h-old open span must therefore report
+  // ~1h of manned time, never 30h.
+  for (const chip of manned) {
+    assert(chip.ms <= 2 * 3600e3,
+      `manned time must stay within the shift, got ${chip.text} (${(chip.ms / 3600e3).toFixed(1)}h)`);
+  }
+
   await ctx2.close();
+
+  // With NO presence sessions at all, the app must not invent manned time — a
+  // fresh install briefly claimed a full shift on the default machine, which then
+  // travelled into the handout the supervisor receives.
+  const ctx3 = await browser.newContext();
+  const p3 = await ctx3.newPage();
+  await p3.route(/unpkg\.com|cdn\.tailwindcss\.com/, async (route) => {
+    const url = route.request().url();
+    if (url.includes("react-dom")) return route.fulfill({ contentType: "application/javascript", body: reactDomUmd });
+    if (url.includes("react")) return route.fulfill({ contentType: "application/javascript", body: reactUmd });
+    return route.fulfill({ contentType: "application/javascript", body: "/* tailwind stub */" });
+  });
+  await p3.addInitScript(() => {
+    const now = Date.now();
+    const hhmm = (ms) => {
+      const d = new Date(ms);
+      return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    };
+    localStorage.setItem("config:lists", JSON.stringify({
+      machines: ["Line 1"], reasons: ["Cleaning"], quickStops: [],
+      shifts: [{ id: "t1", name: "Test", start: hhmm(now - 3600e3), end: hhmm(now + 7 * 3600e3), goals: {} }],
+      rates: {}, handoverEmails: [], updatedAt: now,
+    }));
+    localStorage.setItem("config:prefs", JSON.stringify({ operator: "Alice", setupLocked: true, machine: "Line 1" }));
+  });
+  await p3.goto("file://" + path.join(root, "index.html"));
+  await p3.waitForSelector("text=Start Stop", { timeout: 20000 });
+  const fabricated = await p3.evaluate(() => [...document.querySelectorAll("span")]
+    .map((el) => (el.textContent || "").trim())
+    .filter((txt) => /^\S.*·\s*\d+h/.test(txt) && /Line|Packaging|Assembly/.test(txt)));
+  assert(fabricated.length === 0,
+    `a fresh install with no sessions must show no manned time, saw ${JSON.stringify(fabricated)}`);
+  await ctx3.close();
 
   await browser.close();
   console.log("web-e2e: PASS — stop recorded immediately (operator=Alice, reason=" + chosenReason + ", duration=" + rec.duration + "ms)");

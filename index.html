@@ -156,6 +156,7 @@ const relTime = (ts) => {
         return `${Math.round(s / 3600)}h ago`;
     return `${Math.round(s / 86400)}d ago`;
 };
+const SHIFT_OVERTIME_GRACE_MS = 2 * 60 * 60 * 1000;
 function shiftLengthMs(shift) {
     if (!(shift === null || shift === void 0 ? void 0 : shift.start) || !(shift === null || shift === void 0 ? void 0 : shift.end))
         return 0;
@@ -1750,7 +1751,13 @@ function App() {
         return () => clearInterval(iv);
     }, []);
     const shiftWindow = useMemo(() => shiftWindowAt(activeShift, Date.now()), [activeShift, slowTick]);
-    const shiftStart = useMemo(() => Math.max(shiftWindow ? shiftWindow.start : 0, clearedBefore || 0), [shiftWindow, clearedBefore]);
+    const shiftStart = useMemo(() => {
+        if (!shiftWindow)
+            return clearedBefore || 0;
+        const overtimeEnd = shiftWindow.end + SHIFT_OVERTIME_GRACE_MS;
+        const base = Date.now() > overtimeEnd ? overtimeEnd : shiftWindow.start;
+        return Math.max(base, clearedBefore || 0);
+    }, [shiftWindow, clearedBefore, slowTick]);
     const stopsRef = useRef(stops);
     stopsRef.current = stops;
     const productionRef = useRef(production);
@@ -2300,9 +2307,6 @@ function App() {
             for (const m of Object.keys(share))
                 entry(m).mannedMs = elapsed * (share[m] / shareTotal);
         }
-        else if (machine) {
-            entry(machine).mannedMs = elapsed;
-        }
         for (const s of shiftStops) {
             const e = entry(s.machine);
             e.downtimeMs += s.duration;
@@ -2343,7 +2347,7 @@ function App() {
         else {
             const downtimeMs = shiftStops.reduce((a, s) => a + s.duration, 0);
             overall = computeOEE({
-                plannedMs: shiftLengthMs(activeShift), downtimeMs,
+                plannedMs: elapsed || shiftLengthMs(activeShift), downtimeMs,
                 unitsProduced: myProduction === null || myProduction === void 0 ? void 0 : myProduction.unitsProduced, scrapCount: myProduction === null || myProduction === void 0 ? void 0 : myProduction.scrapCount,
                 ratePerHour: rates === null || rates === void 0 ? void 0 : rates[machine],
             });
@@ -2357,9 +2361,9 @@ function App() {
         const produced = ((_b = myShift.rows.find((r) => r.machine === machine)) === null || _b === void 0 ? void 0 : _b.units) || 0;
         return computeGoalStatus({
             goal, produced, machine,
-            ratePerHour: rates === null || rates === void 0 ? void 0 : rates[machine], shiftEndMs: shiftEndAt(activeShift), now: Date.now(),
+            ratePerHour: rates === null || rates === void 0 ? void 0 : rates[machine], shiftEndMs: shiftWindow ? shiftWindow.end : shiftEndAt(activeShift), now: Date.now(),
         });
-    }, [myShift, activeShift, rates, machine, slowTick]);
+    }, [myShift, activeShift, rates, machine, shiftWindow, slowTick]);
     const effectivePending = inShell ? nativePending : pendingStop;
     const effectiveTimer = inShell ? {
         state: nativeTimer || emptyTimer,
@@ -2402,7 +2406,7 @@ function App() {
                     React.createElement("button", { onClick: pickRestore, className: "bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-1.5 rounded-lg" }, "Restore backup"),
                     React.createElement("button", { onClick: () => setNeedsRestore(false), className: `text-sm ${t.sub} px-2 py-1.5` }, "Not now"))),
             restoreMsg && React.createElement("p", { className: "max-w-3xl mx-auto text-xs text-red-500 mt-1" }, restoreMsg))),
-        React.createElement("main", { className: "max-w-3xl mx-auto p-4 pb-24" }, view === "operator" ? (React.createElement(OperatorView, { t: t, operator: operator, setOperator: setOperator, machine: machine, setMachine: switchMachine, timer: effectiveTimer, onStop: handleStop, pendingStop: effectivePending, reason: reason, setReason: setReason, notes: notes, setNotes: setNotes, onSave: handleSave, onDiscardPending: handleDiscardPending, saving: saving, saveError: saveError, myStops: shiftStops, visibleStops: visibleStops, machines: machines, reasons: reasons, quickStops: quickStops, applyQuickStop: applyQuickStop, lastReason: lastReason, shift: activeShift, shifts: shifts, shiftId: shiftId, onSelectShift: selectShift, clearedBefore: clearedBefore, shiftStart: shiftStart, hiddenStopCount: hiddenStopCount, onNewShift: () => setNewShiftOpen(true), showAll: showAll, onToggleShowAll: toggleShowAll, setupLocked: setupLocked, onLockSetup: lockSetup, onUnlockSetup: unlockSetup, onOpenManual: () => { setSaveError(""); setManualOpen(true); }, syncStatus: sync.status, syncOn: syncOn, rates: rates, myProduction: myProduction, onSaveProduction: handleSaveProduction, myShift: myShift, goalStatus: goalStatus, onOpenHandover: () => setHandoverOpen(true) })) : (supervisorPinHash && !supervisorUnlocked) ? (React.createElement(PinGate, { t: t, pinHash: supervisorPinHash, onUnlock: () => setSupervisorUnlocked(true) })) : (React.createElement(SupervisorView, { t: t, stops: stops, loading: loading, onRefresh: refreshStops, machines: machines, reasons: reasons, quickStops: quickStops, shifts: shifts, updateMachines: updateMachines, updateReasons: updateReasons, updateQuickStops: updateQuickStops, updateShifts: updateShifts, discardStop: discardStop, deleteStop: deleteStop, hasPin: !!supervisorPinHash, updatePin: updatePin, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: sync.status, onSyncNow: sync.flush, rates: rates, updateRates: updateRates, production: production, sessions: sessions, handovers: handovers, handoverEmails: handoverEmails, updateHandoverEmails: updateHandoverEmails, onDownloadBackup: downloadBackup, onRestore: pickRestore, restoreMsg: restoreMsg }))),
+        React.createElement("main", { className: "max-w-3xl mx-auto p-4 pb-24" }, view === "operator" ? (React.createElement(OperatorView, { t: t, operator: operator, setOperator: setOperator, machine: machine, setMachine: switchMachine, timer: effectiveTimer, onStop: handleStop, pendingStop: effectivePending, reason: reason, setReason: setReason, notes: notes, setNotes: setNotes, onSave: handleSave, onDiscardPending: handleDiscardPending, saving: saving, saveError: saveError, myStops: shiftStops, visibleStops: visibleStops, machines: machines, reasons: reasons, quickStops: quickStops, applyQuickStop: applyQuickStop, lastReason: lastReason, shift: activeShift, shifts: shifts, shiftId: shiftId, onSelectShift: selectShift, shiftStart: shiftStart, hiddenStopCount: hiddenStopCount, onNewShift: () => setNewShiftOpen(true), showAll: showAll, onToggleShowAll: toggleShowAll, setupLocked: setupLocked, onLockSetup: lockSetup, onUnlockSetup: unlockSetup, onOpenManual: () => { setSaveError(""); setManualOpen(true); }, syncStatus: sync.status, syncOn: syncOn, rates: rates, myProduction: myProduction, onSaveProduction: handleSaveProduction, myShift: myShift, goalStatus: goalStatus, onOpenHandover: () => setHandoverOpen(true) })) : (supervisorPinHash && !supervisorUnlocked) ? (React.createElement(PinGate, { t: t, pinHash: supervisorPinHash, onUnlock: () => setSupervisorUnlocked(true) })) : (React.createElement(SupervisorView, { t: t, stops: stops, loading: loading, onRefresh: refreshStops, machines: machines, reasons: reasons, quickStops: quickStops, shifts: shifts, updateMachines: updateMachines, updateReasons: updateReasons, updateQuickStops: updateQuickStops, updateShifts: updateShifts, discardStop: discardStop, deleteStop: deleteStop, hasPin: !!supervisorPinHash, updatePin: updatePin, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: sync.status, onSyncNow: sync.flush, rates: rates, updateRates: updateRates, production: production, sessions: sessions, handovers: handovers, handoverEmails: handoverEmails, updateHandoverEmails: updateHandoverEmails, onDownloadBackup: downloadBackup, onRestore: pickRestore, restoreMsg: restoreMsg }))),
         recovered && (React.createElement("div", { className: "fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30" },
             React.createElement("div", { className: `${dark ? "bg-slate-900" : "bg-white"} rounded-xl shadow-xl p-5 max-w-sm w-full space-y-3` },
                 React.createElement("div", { className: "flex items-center gap-2 font-bold" },
@@ -2431,7 +2435,7 @@ function App() {
         handoverOpen && (React.createElement(ShiftHandoverModal, { t: t, dark: dark, reportBase: buildShiftReport({ operator, machine, myStops: shiftStops, myShift, clearedBefore: shiftStart, activeShift, goalStatus }), handoverEmails: handoverEmails, syncCfg: syncCfg, lastHandover: handovers[0] || null, onSaved: (rec) => setHandovers((prev) => [rec, ...prev.filter((h) => h.id !== rec.id)]), onClose: () => setHandoverOpen(false) }))));
 }
 function OperatorView(props) {
-    const { t, operator, setOperator, machine, setMachine, timer, onStop, pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError, myStops, visibleStops, machines, reasons, quickStops, applyQuickStop, lastReason, shift, shifts, shiftId, onSelectShift, clearedBefore, shiftStart, hiddenStopCount, onNewShift, showAll, onToggleShowAll, setupLocked, onLockSetup, onUnlockSetup, onOpenManual, syncStatus, syncOn, rates, myProduction, onSaveProduction, myShift, goalStatus, onOpenHandover, } = props;
+    const { t, operator, setOperator, machine, setMachine, timer, onStop, pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError, myStops, visibleStops, machines, reasons, quickStops, applyQuickStop, lastReason, shift, shifts, shiftId, onSelectShift, shiftStart, hiddenStopCount, onNewShift, showAll, onToggleShowAll, setupLocked, onLockSetup, onUnlockSetup, onOpenManual, syncStatus, syncOn, rates, myProduction, onSaveProduction, myShift, goalStatus, onOpenHandover, } = props;
     const { state, elapsed, start, pause, resume } = timer;
     const { running, paused } = state;
     const downtimeMs = useMemo(() => myStops.reduce((a, s) => a + s.duration, 0), [myStops]);
