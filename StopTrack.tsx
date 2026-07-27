@@ -93,6 +93,27 @@ function shiftEndAt(shift, now = Date.now()) {
   return end;
 }
 
+/**
+ * The occurrence of `shift` that CONTAINS `now` (or, if the shift hasn't started
+ * yet today, the one that started yesterday) as `{start, end}` epoch ms.
+ *
+ * This is what "this shift" means. It rolls over on the clock, so an operator who
+ * forgets to tap "New Shift" doesn't accumulate a multi-day window — the bug that
+ * had a night operator credited with 21 hours of manned time on one machine.
+ * Overnight shifts wrap correctly because shiftLengthMs already handles them.
+ */
+function shiftWindowAt(shift, now = Date.now()) {
+  if (!shift?.start) return null;
+  const [sh, sm] = shift.start.split(":").map(Number);
+  if (Number.isNaN(sh) || Number.isNaN(sm)) return null;
+  const d = new Date(now);
+  d.setHours(sh, sm, 0, 0);
+  let start = d.getTime();
+  if (start > now) start -= 24 * 60 * 60 * 1000; // today's start is still ahead → yesterday's occurrence
+  const len = shiftLengthMs(shift) || 24 * 60 * 60 * 1000;
+  return { start, end: start + len };
+}
+
 // Coerce a shifts array (or a legacy single `shift`) into a valid, non-empty list
 // of {id,name,start,end,goal}. Returns null if there's nothing usable.
 function normalizeShifts(shiftsArr, legacyShift) {
@@ -1591,6 +1612,30 @@ export default function App() {
     [shifts, shiftId],
   );
 
+  // Slow tick so the shift window (and the OEE built on it) stays current even
+  // when nothing else re-renders.
+  const [slowTick, setSlowTick] = useState(0);
+  useEffect(() => {
+    const iv = setInterval(() => setSlowTick((n) => n + 1), 30000);
+    return () => clearInterval(iv);
+  }, []);
+
+  // ---- what "this shift" means ---------------------------------------------
+  // The window is driven by the CLOCK — the occurrence of the operator's chosen
+  // shift that contains now — so it rolls over on its own. "New Shift" is a
+  // manual "start early" on top of that, never the only thing that moves the
+  // window. (Before this, the cutoff moved only when someone tapped the button,
+  // so a forgotten tap produced a multi-day "shift".)
+  const shiftWindow = useMemo(
+    () => shiftWindowAt(activeShift, Date.now()),
+    [activeShift, slowTick],
+  );
+  const shiftStart = useMemo(
+    () => Math.max(shiftWindow ? shiftWindow.start : 0, clearedBefore || 0),
+    [shiftWindow, clearedBefore],
+  );
+
+
   // Latest snapshots for the sync merges, without re-creating the merge callbacks
   // on every render.
   const stopsRef = useRef(stops); stopsRef.current = stops;
@@ -2052,10 +2097,10 @@ export default function App() {
   const handleSaveProduction = async ({ unitsProduced, scrapCount }) => {
     const now = Date.now();
     const op = operator.trim() || "Unnamed";
-    const id = `${machineSlug(machine)}|${clearedBefore}|${op}`;
+    const id = `${machineSlug(machine)}|${shiftStart}|${op}`;
     const record = {
       id, kind: "production", machine, operator: op,
-      shiftStart: clearedBefore,
+      shiftStart,
       unitsProduced: Math.max(0, Math.floor(Number(unitsProduced) || 0)),
       scrapCount: Math.max(0, Math.floor(Number(scrapCount) || 0)),
       loggedAt: now, updatedAt: now,
@@ -2074,8 +2119,8 @@ export default function App() {
   // The operator's own production entry for the current shift + machine.
   const myProduction = useMemo(() => {
     const op = operator.trim() || "Unnamed";
-    return production.find((p) => p.id === `${machineSlug(machine)}|${clearedBefore}|${op}`) || null;
-  }, [production, machine, clearedBefore, operator]);
+    return production.find((p) => p.id === `${machineSlug(machine)}|${shiftStart}|${op}`) || null;
+  }, [production, machine, shiftStart, operator]);
 
   // ---- recovery ------------------------------------------------------------
   const recoverResume = () => {
@@ -2142,46 +2187,74 @@ export default function App() {
   // so the operator can always return to the fresh-shift view.
   const toggleShowAll = () => setShowAll((v) => !v);
 
-  // Visible-to-operator stops: their own, not discarded. Shift membership uses
-  // when the stop was logged (loggedAt), not its start — so a manual stop with a
-  // back-dated start still counts toward the shift it was entered in. Falls back
-  // to end/start for records saved before loggedAt existed.
-  const myStops = useMemo(() => stops.filter((s) => {
+  // Stops belonging to THIS shift: the operator's own, not discarded, logged
+  // after the window start. Shift membership uses when the stop was logged
+  // (loggedAt), not its start — so a manual stop with a back-dated start still
+  // counts toward the shift it was entered in. Falls back to end/start for
+  // records saved before loggedAt existed.
+  //
+  // This list drives every NUMBER (stat cards, by-reason, OEE, the handout). It
+  // deliberately ignores `showAll`, which is only a view toggle for the Recent
+  // list below — letting it widen the stats meant a curious tap could send a
+  // supervisor a handout claiming 4 stops / 2h for a 1 stop / 5m shift.
+  const shiftStops = useMemo(() => stops.filter((s) => {
     const stamp = s.loggedAt ?? s.end ?? s.start;
     return (!operator.trim() || s.operator === operator.trim()) && !s.discarded && !s.deleted &&
-      (showAll || stamp > clearedBefore);
-  }), [stops, operator, clearedBefore, showAll]);
+      stamp > shiftStart;
+  }), [stops, operator, shiftStart]);
 
-  // Slow tick so the open session's manned time (and the OEE built on it)
-  // stays current even when nothing else re-renders.
-  const [slowTick, setSlowTick] = useState(0);
-  useEffect(() => {
-    const iv = setInterval(() => setSlowTick((n) => n + 1), 30000);
-    return () => clearInterval(iv);
-  }, []);
+  // Stops of this operator's that exist but fall OUTSIDE the current window.
+  // The window hides them on the clock now, not just when someone taps "New
+  // Shift" — so the "Show all" affordance has to key off this, or older stops
+  // would disappear with no explanation and no way back.
+  const hiddenStopCount = useMemo(() => {
+    const own = stops.filter((s) => (!operator.trim() || s.operator === operator.trim()) && !s.discarded && !s.deleted);
+    return Math.max(0, own.length - shiftStops.length);
+  }, [stops, operator, shiftStops]);
+
+  // What the Recent-stops list shows: the same set, or everything when the
+  // operator taps "Show all".
+  const visibleStops = useMemo(() => (showAll
+    ? stops.filter((s) => (!operator.trim() || s.operator === operator.trim()) && !s.discarded && !s.deleted)
+    : shiftStops), [stops, operator, showAll, shiftStops]);
 
   // ---- shift-wide operator picture (roaming-aware OEE) ----------------------
-  // Manned time per machine comes from this operator's sessions clipped to the
-  // shift window; downtime from their stops; units/scrap from their production
-  // records. Performance is judged against time actually AT each machine, not
-  // the whole shift — the honest denominator for an operator who roams.
+  // Manned time is the operator's SHIFT — from the window start to now, capped at
+  // the shift end — apportioned across the machines they actually worked. It is
+  // no longer the raw length of an open presence span: a span never closes by
+  // itself, so a locked phone left running reported 21 hours on one machine.
   const myShift = useMemo(() => {
     const op = operator.trim() || "Unnamed";
     const now = Date.now();
-    const winStart = clearedBefore || 0;
+    const winStart = shiftStart;
+    // The shift so far: never past its end, never negative. This is the planned
+    // time — the denominator behind uptime/OEE.
+    const winEnd = Math.min(now, shiftWindow ? shiftWindow.end : now);
+    const elapsed = Math.max(0, winEnd - winStart);
 
     const bag = {}; // machine -> { mannedMs, downtimeMs, stops, units, scrap }
     const entry = (m) => (bag[m] = bag[m] || { machine: m, mannedMs: 0, downtimeMs: 0, stops: 0, units: 0, scrap: 0 });
 
+    // Presence spans no longer SET manned time — they only apportion the shift
+    // across the machines a roaming operator worked. Each span is clipped to the
+    // window first, so a span left open since yesterday can't dominate.
+    const share = {};
+    let shareTotal = 0;
     for (const s of sessions) {
       if (s.operator !== op) continue;
-      const end = Math.min(s.end ?? now, now);
+      const end = Math.min(s.end ?? now, winEnd);
       const start = Math.max(s.start, winStart);
-      if (end > start) entry(s.machine).mannedMs += end - start;
+      if (end > start) { share[s.machine] = (share[s.machine] || 0) + (end - start); shareTotal += end - start; }
     }
-    for (const s of myStops) { const e = entry(s.machine); e.downtimeMs += s.duration; e.stops += 1; }
+    if (shareTotal > 0) {
+      for (const m of Object.keys(share)) entry(m).mannedMs = elapsed * (share[m] / shareTotal);
+    } else if (machine) {
+      entry(machine).mannedMs = elapsed; // no presence data — it's all on the current machine
+    }
+
+    for (const s of shiftStops) { const e = entry(s.machine); e.downtimeMs += s.duration; e.stops += 1; }
     for (const p of production) {
-      if (p.operator !== op || p.shiftStart !== clearedBefore) continue;
+      if (p.operator !== op || p.shiftStart !== shiftStart) continue;
       const e = entry(p.machine); e.units += p.unitsProduced || 0; e.scrap += p.scrapCount || 0;
     }
 
@@ -2209,7 +2282,7 @@ export default function App() {
     } else {
       // No presence data (old records / name not set) — fall back to the
       // single-machine framing against the configured shift length.
-      const downtimeMs = myStops.reduce((a, s) => a + s.duration, 0);
+      const downtimeMs = shiftStops.reduce((a, s) => a + s.duration, 0);
       overall = computeOEE({
         plannedMs: shiftLengthMs(activeShift), downtimeMs,
         unitsProduced: myProduction?.unitsProduced, scrapCount: myProduction?.scrapCount,
@@ -2218,7 +2291,7 @@ export default function App() {
     }
     rows.sort((a, b) => b.mannedMs - a.mannedMs);
     return { rows, overall, hasSessions };
-  }, [sessions, myStops, production, rates, activeShift, clearedBefore, operator, machine, myProduction, slowTick]);
+  }, [sessions, shiftStops, production, rates, activeShift, shiftStart, shiftWindow, operator, machine, myProduction, slowTick]);
 
   // ---- shift output goal (achievability) -----------------------------------
   // Per-machine: the current machine's units produced this shift vs that
@@ -2291,10 +2364,11 @@ export default function App() {
             timer={effectiveTimer} onStop={handleStop}
             pendingStop={effectivePending} reason={reason} setReason={setReason} notes={notes} setNotes={setNotes}
             onSave={handleSave} onDiscardPending={handleDiscardPending} saving={saving} saveError={saveError}
-            myStops={myStops} machines={machines} reasons={reasons} quickStops={quickStops}
+            myStops={shiftStops} visibleStops={visibleStops} machines={machines} reasons={reasons} quickStops={quickStops}
             applyQuickStop={applyQuickStop} lastReason={lastReason}
             shift={activeShift} shifts={shifts} shiftId={shiftId} onSelectShift={selectShift}
-            clearedBefore={clearedBefore} onNewShift={() => setNewShiftOpen(true)} showAll={showAll} onToggleShowAll={toggleShowAll}
+            clearedBefore={clearedBefore} shiftStart={shiftStart} hiddenStopCount={hiddenStopCount}
+            onNewShift={() => setNewShiftOpen(true)} showAll={showAll} onToggleShowAll={toggleShowAll}
             setupLocked={setupLocked} onLockSetup={lockSetup} onUnlockSetup={unlockSetup}
             onOpenManual={() => { setSaveError(""); setManualOpen(true); }}
             syncStatus={sync.status} syncOn={syncOn}
@@ -2357,7 +2431,7 @@ export default function App() {
       {handoverOpen && (
         <ShiftHandoverModal
           t={t} dark={dark}
-          reportBase={buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, activeShift, goalStatus })}
+          reportBase={buildShiftReport({ operator, machine, myStops: shiftStops, myShift, clearedBefore: shiftStart, activeShift, goalStatus })}
           handoverEmails={handoverEmails} syncCfg={syncCfg}
           lastHandover={handovers[0] || null}
           onSaved={(rec) => setHandovers((prev) => [rec, ...prev.filter((h) => h.id !== rec.id)])}
@@ -2375,8 +2449,8 @@ function OperatorView(props) {
   const {
     t, operator, setOperator, machine, setMachine, timer, onStop,
     pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError,
-    myStops, machines, reasons, quickStops, applyQuickStop, lastReason,
-    shift, shifts, shiftId, onSelectShift, clearedBefore, onNewShift, showAll, onToggleShowAll,
+    myStops, visibleStops, machines, reasons, quickStops, applyQuickStop, lastReason,
+    shift, shifts, shiftId, onSelectShift, clearedBefore, shiftStart, hiddenStopCount, onNewShift, showAll, onToggleShowAll,
     setupLocked, onLockSetup, onUnlockSetup, onOpenManual,
     syncStatus, syncOn,
     rates, myProduction, onSaveProduction, myShift, goalStatus, onOpenHandover,
@@ -2404,6 +2478,10 @@ function OperatorView(props) {
   }, [myStops]);
 
   const canLock = operator.trim().length > 0; // need a name before locking
+  // With no name entered, `myStops` can't filter by operator — on a synced device
+  // that means the board is showing the whole plant. Say so, and don't let a
+  // handout go out under one person's name with everyone's numbers on it.
+  const unnamed = !operator.trim();
 
   return (
     <div className="space-y-4">
@@ -2415,6 +2493,13 @@ function OperatorView(props) {
         <StatCard t={t} label={oee.partial ? "OEE (partial)" : "OEE"} value={pct(oee.oee)} icon={<TrendingUp size={16} />}
           accent={oeeAccent(oee.oee)} />
       </div>
+      {unnamed && (
+        <div className={`${t.card} rounded-xl px-4 py-2.5 flex items-center gap-2 text-sm border border-amber-500/40`}>
+          <User size={15} className="text-amber-500 flex-none" />
+          <span>Showing <b>all operators on this device</b> — enter your name below to see just your shift.</span>
+        </div>
+      )}
+
       {/* A / P / Q factor breakdown for the OEE card */}
       <div className={`text-[11px] ${t.sub} text-center -mt-2`}>
         Availability {pct(oee.a)} · Performance {pct(oee.p)} · Quality {pct(oee.q)}
@@ -2615,8 +2700,9 @@ function OperatorView(props) {
             <div className="font-bold text-lg leading-tight">{myStops.length} stop{myStops.length === 1 ? "" : "s"} · <span className="font-mono text-red-500">{fmtDur(downtimeMs)}</span></div>
           </div>
           <div className="flex gap-2">
-            <button onClick={onOpenHandover}
-              className={`flex items-center gap-2 ${t.accentBtn} font-bold px-4 py-3 rounded-xl shadow active:scale-95 transition`}>
+            <button onClick={onOpenHandover} disabled={unnamed}
+              title={unnamed ? "Enter your name first — a handover goes out under your name" : undefined}
+              className={`flex items-center gap-2 ${t.accentBtn} disabled:opacity-40 font-bold px-4 py-3 rounded-xl shadow active:scale-95 transition`}>
               <PencilLine size={18} /> Handover
             </button>
             <button onClick={onNewShift} disabled={!!pendingStop}
@@ -2625,13 +2711,13 @@ function OperatorView(props) {
             </button>
           </div>
         </div>
-        {clearedBefore > 0 && (
+        {(hiddenStopCount > 0 || showAll) && (
           <div className={`text-xs ${t.sub} ${t.muted} rounded-lg px-3 py-2 mt-3 flex items-center justify-between gap-2`}>
             <span className="flex items-center gap-1">
               <Archive size={13} />
               {showAll
-                ? "Showing all stops, including earlier shifts."
-                : `New shift started ${fmtTime(clearedBefore)}. Earlier stops are hidden but saved.`}
+                ? "Showing all stops, including earlier shifts. Stats above still cover this shift only."
+                : `This shift started ${fmtTime(shiftStart)}. ${hiddenStopCount} earlier stop${hiddenStopCount === 1 ? "" : "s"} hidden but saved.`}
             </span>
             <button onClick={onToggleShowAll} className="text-emerald-500 font-semibold hover:underline whitespace-nowrap">
               {showAll ? "Hide earlier" : "Show all"}
@@ -2643,9 +2729,9 @@ function OperatorView(props) {
       {/* recent stops */}
       <div className={`${t.card} rounded-xl p-4`}>
         <div className="flex items-center gap-2 font-bold mb-3"><List size={18} /> Recent stops {operator.trim() && <span className={`text-xs font-normal ${t.sub}`}>({operator.trim()})</span>}</div>
-        {myStops.length === 0 ? <p className={`${t.sub} text-sm text-center py-4`}>No stops logged yet. Start the timer when the machine stops.</p> : (
+        {visibleStops.length === 0 ? <p className={`${t.sub} text-sm text-center py-4`}>No stops logged yet. Start the timer when the machine stops.</p> : (
           <div className="space-y-2">
-            {myStops.slice(0, 8).map((s) => (
+            {visibleStops.slice(0, 8).map((s) => (
               <div key={s.id} className={`flex items-center justify-between border ${t.border} rounded-lg px-3 py-2.5 text-sm`}>
                 <div><div className="font-semibold">{s.machine}</div><div className={`${t.sub} text-xs`}>{fmtTime(s.start)} · {s.reason}</div></div>
                 <div className="font-mono font-bold text-red-500">{fmtDur(s.duration)}</div>

@@ -211,8 +211,77 @@ async function main() {
   assert((h.flags || []).some((f) => /coolant/i.test(f.text)), `operator flag not persisted: ${JSON.stringify(h.flags)}`);
   assert(h.operator === "Alice", `handover operator wrong: ${h.operator}`);
 
+  // ---- what counts as "this shift" -----------------------------------------
+  // The window is derived from the shift CLOCK, so it rolls over on its own. It
+  // used to move only when someone tapped "New Shift", which credited a night
+  // operator with 21 hours of manned time on one machine. Check the window maths
+  // directly (it's a pure function), then the behaviour it drives.
+  const win = await page.evaluate(() => {
+    const at = (h, m) => { const d = new Date(); d.setHours(h, m, 0, 0); return d.getTime(); };
+    const HOUR = 3600e3;
+    const night = shiftWindowAt({ start: "00:00", end: "07:00" }, at(6, 0));
+    const day = shiftWindowAt({ start: "07:00", end: "16:00" }, at(22, 0));
+    const overnight = shiftWindowAt({ start: "22:00", end: "06:00" }, at(2, 0));
+    return {
+      nightLen: (night.end - night.start) / HOUR,
+      nightStartsToday: night.start === at(0, 0),
+      dayLen: (day.end - day.start) / HOUR,
+      dayIsMostRecent: day.start === at(7, 0),
+      overnightLen: (overnight.end - overnight.start) / HOUR,
+      overnightStartedYesterday: overnight.start === at(22, 0) - 24 * HOUR,
+    };
+  });
+  assert(win.nightLen === 7, `night shift window should be 7h, got ${win.nightLen}`);
+  assert(win.nightStartsToday, "night window should start at today's 00:00");
+  assert(win.dayLen === 9, `day shift window should be 9h, got ${win.dayLen}`);
+  assert(win.dayIsMostRecent, "a shift that already ended should resolve to its most recent occurrence");
+  assert(win.overnightLen === 8, `overnight window should be 8h, got ${win.overnightLen}`);
+  assert(win.overnightStartedYesterday, "an overnight shift at 02:00 should have started yesterday");
+
+  // A stop from >24h ago can never be inside the window, so it must not count
+  // toward this shift — and "Show all" must not drag it into the stats.
+  const ctx2 = await browser.newContext();
+  const p2 = await ctx2.newPage();
+  await p2.route(/unpkg\.com|cdn\.tailwindcss\.com/, async (route) => {
+    const url = route.request().url();
+    if (url.includes("react-dom")) return route.fulfill({ contentType: "application/javascript", body: reactDomUmd });
+    if (url.includes("react")) return route.fulfill({ contentType: "application/javascript", body: reactUmd });
+    return route.fulfill({ contentType: "application/javascript", body: "/* tailwind stub */" });
+  });
+  await p2.addInitScript(() => {
+    const now = Date.now(), DAY = 86400e3;
+    const stop = (id, ago, dur) => localStorage.setItem(`stop:${id}`, JSON.stringify({
+      id, machine: "Line 1", operator: "Alice", start: now - ago, end: now - ago + dur,
+      duration: dur, reason: "Cleaning", notes: "", discarded: false,
+      loggedAt: now - ago, updatedAt: now - ago,
+    }));
+    stop("old-1", 25 * 3600e3, 45 * 60e3);  // yesterday — outside any window
+    stop("cur-1", 60e3, 60e3);              // this shift
+    localStorage.setItem("config:prefs", JSON.stringify({ operator: "Alice", setupLocked: true, machine: "Line 1" }));
+  });
+  await p2.goto("file://" + path.join(root, "index.html"));
+  await p2.waitForSelector("text=Start Stop", { timeout: 20000 });
+
+  const statStops = async () => (await p2
+    .locator("div.rounded-xl.p-3.text-center", { hasText: "Stops" })
+    .first().locator("div.font-bold").innerText()).trim();
+  const listCount = async () => p2.locator("text=Cleaning").count();
+
+  assert(await statStops() === "1", `only the in-shift stop should count, saw ${await statStops()}`);
+  const listBefore = await listCount();
+
+  await p2.click("text=Show all");
+  await p2.waitForTimeout(300);
+  assert(await statStops() === "1",
+    `"Show all" must not change the shift stats (it corrupts the handout) — saw ${await statStops()}`);
+  const listAfter = await listCount();
+  assert(listAfter > listBefore, `"Show all" should still reveal older stops in the list (${listBefore} -> ${listAfter})`);
+
+  await ctx2.close();
+
   await browser.close();
   console.log("web-e2e: PASS — stop recorded immediately (operator=Alice, reason=" + chosenReason + ", duration=" + rec.duration + "ms)");
+  console.log("web-e2e: PASS — shift window is clock-derived (7h/9h/8h incl. overnight); Show all reveals stops without inflating the stats");
   console.log(`web-e2e: PASS — handout rendered ${shot.w}x${shot.h} PNG, shared via native, filed with note + ${h.flags.length} operator flag(s)`);
 }
 
