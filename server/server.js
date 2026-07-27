@@ -100,27 +100,71 @@ const APP_HTML = process.env.APP_HTML
   || "";
 
 // --- persistence (single JSON file) ----------------------------------------
-// Shape: { stops: { [id]: record }, production: { [id]: record }, sessions: { [id]: record }, config: { config, updatedAt } }
+// Shape: { stops, production, sessions, handovers: { [id]: record }, config: { config, updatedAt } }
 // Collections use null-prototype objects and record ids are validated, so a
 // record whose id is "__proto__"/"constructor"/"prototype" can't pollute or
 // corrupt the store.
 const RESERVED_IDS = new Set(["__proto__", "constructor", "prototype"]);
 const safeId = (id) => typeof id === "string" && id.length > 0 && id.length <= 512 && !RESERVED_IDS.has(id);
 function emptyCollections() {
-  return { stops: Object.create(null), production: Object.create(null), sessions: Object.create(null), config: { config: null, updatedAt: 0 } };
+  return { stops: Object.create(null), production: Object.create(null), sessions: Object.create(null), handovers: Object.create(null), config: { config: null, updatedAt: 0 } };
 }
+// The record's last-write clock — mirrors the client's stampOf().
+const rawStampOf = (s) => (s && (s.updatedAt != null ? s.updatedAt
+  : s.loggedAt != null ? s.loggedAt
+  : s.end != null ? s.end
+  : s.start != null ? s.start : 0)) || 0;
+
+// How far ahead of the server's clock an incoming stamp may sit before we stop
+// believing it. Devices on a factory floor often have no SIM and no NTP, and a
+// single phone whose clock reads a year ahead used to poison the shared data
+// permanently: its config write out-ranked every later edit, so the supervisor's
+// changes were accepted and then silently reverted, and a future-stamped stop
+// resurrected itself after being discarded. Clamping only the FUTURE side keeps a
+// device that has merely been offline (its stamps are in the past) able to win.
+// Only used to decide when to WARN about a device's clock; the stored stamp is
+// clamped to the server's own clock, because keeping any future value would give
+// the skewed device a dead zone in which later, honest writes still lose.
+const CLOCK_SKEW_GRACE_MS = 5 * 60 * 1000;
+const clampStamp = (stamp, now) => Math.min(Number(stamp) || 0, now);
+const stampOf = (s, now = Date.now()) => clampStamp(rawStampOf(s), now);
+
+// Store the record with an honest stamp. Keeping a future value would let it slide
+// forward forever (re-clamping at read time always yields "now", so it ties or beats
+// every later write); writing the clamped stamp back pins it once. No-op for a
+// record whose clock is sane, since clampStamp only lowers a future value.
+const normalizeStamp = (r, now) => {
+  const raw = rawStampOf(r);
+  const clamped = clampStamp(raw, now);
+  return clamped === raw && r.updatedAt != null ? r : { ...r, updatedAt: clamped };
+};
+
 let db = emptyCollections();
+let repaired = 0;
+const bootNow = Date.now();
 try {
   if (fs.existsSync(DATA_FILE)) {
     const parsed = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
     db = emptyCollections();
-    for (const coll of ["stops", "production", "sessions"]) {
+    for (const coll of ["stops", "production", "sessions", "handovers"]) {
       const src = parsed && parsed[coll];
       if (src && typeof src === "object") {
-        for (const id of Object.keys(src)) if (safeId(id)) db[coll][id] = src[id];
+        for (const id of Object.keys(src)) {
+          if (!safeId(id)) continue;
+          const before = rawStampOf(src[id]);
+          const rec = normalizeStamp(src[id], bootNow);
+          if (rawStampOf(rec) !== before) repaired++;
+          db[coll][id] = rec;
+        }
       }
     }
-    if (parsed && parsed.config) db.config = parsed.config;
+    if (parsed && parsed.config) {
+      db.config = parsed.config;
+      // A future-stamped config from before the clamp would reject every later
+      // supervisor edit forever; pull it back to the boot clock too.
+      const cfgAt = Number(db.config.updatedAt) || 0;
+      if (cfgAt > bootNow) { db.config.updatedAt = bootNow; repaired++; }
+    }
   }
 } catch (e) { console.error("Could not read data file, starting empty:", e.message); }
 
@@ -135,12 +179,6 @@ function persist() {
     catch (e) { console.error("Save failed:", e.message); }
   }, 150);
 }
-
-// The record's last-write clock — mirrors the client's stampOf().
-const stampOf = (s) => (s && (s.updatedAt != null ? s.updatedAt
-  : s.loggedAt != null ? s.loggedAt
-  : s.end != null ? s.end
-  : s.start != null ? s.start : 0)) || 0;
 
 // --- email (optional) --------------------------------------------------------
 // Shift-handover email via nodemailer, loaded lazily so the server keeps zero
@@ -319,16 +357,19 @@ const server = http.createServer(async (req, res) => {
     if (route === "/stops" && req.method === "POST") {
       const body = await readBody(req);
       const incoming = Array.isArray(body.stops) ? body.stops : [];
-      let saved = 0;
+      let saved = 0, skewed = 0;
       for (const r of incoming) {
         if (!r || !safeId(r.id)) continue;
         const cur = db.stops[r.id];
-        // Last-write-wins: keep whichever record was mutated more recently.
-        if (!cur || stampOf(r) >= stampOf(cur)) { db.stops[r.id] = r; saved++; }
+        if (rawStampOf(r) > now + CLOCK_SKEW_GRACE_MS) skewed++;
+        // Last-write-wins on the CLAMPED stamp, so a device with a wrong clock
+        // can't out-rank every future write.
+        if (!cur || stampOf(r, now) >= stampOf(cur, now)) { db.stops[r.id] = normalizeStamp(r, now); saved++; }
       }
       persist();
       if (saved > 0) log(`saved ${saved} stop(s) from ${ip}`);
-      return send(res, 200, { ok: true, serverTime: now });
+      if (skewed > 0) log(`WARNING: ${skewed} stop(s) from ${ip} are stamped in the future — check that device's clock`);
+      return send(res, 200, { ok: true, serverTime: now, applied: saved, skewed });
     }
 
     // Production records (units/scrap per shift, for OEE) — same contract as /stops.
@@ -345,7 +386,7 @@ const server = http.createServer(async (req, res) => {
       for (const r of incoming) {
         if (!r || !safeId(r.id)) continue;
         const cur = db.production[r.id];
-        if (!cur || stampOf(r) >= stampOf(cur)) { db.production[r.id] = r; saved++; }
+        if (!cur || stampOf(r, now) >= stampOf(cur, now)) { db.production[r.id] = normalizeStamp(r, now); saved++; }
       }
       persist();
       if (saved > 0) log(`saved ${saved} production record(s) from ${ip}`);
@@ -366,7 +407,7 @@ const server = http.createServer(async (req, res) => {
       for (const r of incoming) {
         if (!r || !safeId(r.id)) continue;
         const cur = db.sessions[r.id];
-        if (!cur || stampOf(r) >= stampOf(cur)) { db.sessions[r.id] = r; saved++; }
+        if (!cur || stampOf(r, now) >= stampOf(cur, now)) { db.sessions[r.id] = normalizeStamp(r, now); saved++; }
       }
       persist();
       if (saved > 0 && VERBOSE) log(`saved ${saved} session record(s) from ${ip}`);
@@ -379,12 +420,41 @@ const server = http.createServer(async (req, res) => {
 
     if (route === "/config" && req.method === "PUT") {
       const body = await readBody(req);
-      const incomingAt = Number(body.updatedAt) || (body.config && Number(body.config.updatedAt)) || 0;
-      if (incomingAt >= (db.config.updatedAt || 0)) {
+      const rawAt = Number(body.updatedAt) || (body.config && Number(body.config.updatedAt)) || 0;
+      const incomingAt = clampStamp(rawAt, now);
+      const applied = incomingAt >= clampStamp(db.config.updatedAt || 0, now);
+      if (applied) {
         db.config = { config: body.config || null, updatedAt: incomingAt };
         persist();
         log(`settings updated (machines/reasons/quick-stops) by ${ip}`);
+      } else {
+        // Never silently drop a supervisor's edit: say so, so the app can surface it.
+        log(`settings from ${ip} REJECTED as older than the stored copy (incoming ${incomingAt}, stored ${db.config.updatedAt})`);
       }
+      if (rawAt > now + CLOCK_SKEW_GRACE_MS) log(`WARNING: config from ${ip} is stamped in the future — check that device's clock`);
+      return send(res, 200, { ok: true, serverTime: now, applied });
+    }
+
+    // Shift handovers — the end-of-shift card an operator hands to the next one
+    // (message + their own flags). Same contract as /sessions, so the supervisor
+    // sees handovers from every device rather than only the one they're holding.
+    if (route === "/handovers" && req.method === "GET") {
+      const since = Number(url.searchParams.get("since")) || 0;
+      const records = Object.values(db.handovers).filter((r) => stampOf(r) > since);
+      return send(res, 200, { records, serverTime: now });
+    }
+
+    if (route === "/handovers" && req.method === "POST") {
+      const body = await readBody(req);
+      const incoming = Array.isArray(body.records) ? body.records : [];
+      let saved = 0;
+      for (const r of incoming) {
+        if (!r || !safeId(r.id)) continue;
+        const cur = db.handovers[r.id];
+        if (!cur || stampOf(r, now) >= stampOf(cur, now)) { db.handovers[r.id] = normalizeStamp(r, now); saved++; }
+      }
+      persist();
+      if (saved > 0) log(`saved ${saved} handover(s) from ${ip}`);
       return send(res, 200, { ok: true, serverTime: now });
     }
 
@@ -462,7 +532,8 @@ server.listen(PORT, () => {
   console.log(line);
   console.log("");
   console.log(`Storage:  ${DATA_DIR}   (all data + token live here — back this folder up)`);
-  console.log(`Loaded:   ${Object.keys(db.stops).length} stops, ${Object.keys(db.production).length} production, ${Object.keys(db.sessions).length} sessions`);
+  if (repaired > 0) console.log(`Repaired: ${repaired} record(s) stamped in the future (a device clock was wrong)`);
+  console.log(`Loaded:   ${Object.keys(db.stops).length} stops, ${Object.keys(db.production).length} production, ${Object.keys(db.sessions).length} sessions, ${Object.keys(db.handovers).length} handovers`);
   console.log(APP_HTML ? `App page: served at "/" from ${APP_HTML}` : `App page: NOT served — no index.html found next to server.js.`);
   console.log(VERBOSE ? "Logging:  verbose (every request)." : "Logging:  activity only (set LOG_VERBOSE=1 for every request).");
   console.log("");

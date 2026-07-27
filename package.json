@@ -2,13 +2,14 @@
   "name": "stoptrack",
   "version": "1.0.0",
   "private": true,
-  "description": "StopTrack — offline-first machine downtime tracker. Single-file web app built from StopTrack.tsx.",
+  "description": "StopTrack \u2014 offline-first machine downtime tracker. Single-file web app built from StopTrack.tsx.",
   "type": "module",
   "scripts": {
     "build": "node build/build.mjs",
     "verify": "node build/build.mjs",
     "test:web": "node test/web-e2e.mjs",
-    "test": "node build/build.mjs && node test/web-e2e.mjs"
+    "test": "node build/build.mjs && node --test server/test/lww.test.mjs && node test/web-e2e.mjs",
+    "test:server": "node --test server/test/lww.test.mjs"
   },
   "devDependencies": {
     "playwright": "^1.49.1",

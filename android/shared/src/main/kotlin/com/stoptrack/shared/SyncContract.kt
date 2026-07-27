@@ -12,6 +12,7 @@ object SyncContract {
     const val CONFIG = "/config"
     const val PRODUCTION = "/production"
     const val SESSIONS = "/sessions"
+    const val HANDOVERS = "/handovers"
     const val REPORT = "/report"
 
     /** GET query param used by /stops, /production, /sessions to page changes. */
@@ -23,7 +24,7 @@ object SyncContract {
 }
 
 /**
- * The three synced record collections. The companion keeps one keyed map per
+ * The synced record collections. The companion keeps one keyed map per
  * collection, exactly like server.js's `{ stops, production, sessions }`.
  *
  * [payloadKey] is the JSON array field the contract uses for that collection:
@@ -34,4 +35,5 @@ enum class Collection(val path: String, val payloadKey: String) {
     STOPS(SyncContract.STOPS, "stops"),
     PRODUCTION(SyncContract.PRODUCTION, "records"),
     SESSIONS(SyncContract.SESSIONS, "records"),
+    HANDOVERS(SyncContract.HANDOVERS, "records"),
 }

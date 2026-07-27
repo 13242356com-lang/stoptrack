@@ -71,8 +71,32 @@ jobs:
               echo "STOPTRACK_KEY_PASSWORD=$KEY_PW"
             } >> "$GITHUB_ENV"
             echo "Release APKs will be signed with the private key from secrets."
+            echo "SIGNED=yes" >> "$GITHUB_ENV"
           else
-            echo "::warning::No SIGNING_KEYSTORE_B64 secret set — release APKs are debug-signed (NOT authentic). See android/SIGNING.md."
+            echo "::warning::No SIGNING_KEYSTORE_B64 secret set — release APKs are debug-signed (NOT authentic) and CANNOT be installed as an update. See android/SIGNING.md."
+            echo "SIGNED=no" >> "$GITHUB_ENV"
+          fi
+
+      # Say it in the release itself, not just in a log nobody reads: an
+      # unsigned build forces an uninstall+reinstall (which wipes local data),
+      # and that is invisible until someone tries to update on the floor.
+      - name: Compose signing note
+        run: |
+          if [ "${SIGNED:-no}" = "yes" ]; then
+            echo "SIGNING_NOTE=" >> "$GITHUB_ENV"
+          else
+            {
+              echo "SIGNING_NOTE<<EOM"
+              echo "> [!WARNING]"
+              echo "> **This build is not signed with the project key, so it will NOT install as an update.**"
+              echo "> Android refuses an update whose certificate changed, and CI generates a throwaway"
+              echo "> certificate on every run. You will have to uninstall the previous version first,"
+              echo "> which wipes local data — take a backup from Supervisor → Settings → Backup & Restore."
+              echo ">"
+              echo "> To fix this permanently (once, ~5 minutes): run \`bash android/make-signing-key.sh\`"
+              echo "> and add the four repository secrets it prints. See [android/SIGNING.md](android/SIGNING.md)."
+              echo "EOM"
+            } >> "$GITHUB_ENV"
           fi
 
       - name: Build release APKs
@@ -107,6 +131,8 @@ jobs:
           name: Latest StopTrack build (phone + watch APKs)
           prerelease: true
           body: |
+            ${{ env.SIGNING_NOTE }}
+
             Auto-built from the latest `main`.
 
             - **StopTrack-phone.apk** — install on the phone (the full app + watch bridge)
@@ -128,6 +154,8 @@ jobs:
           target_commitish: ${{ github.sha }}
           prerelease: false
           body: |
+            ${{ env.SIGNING_NOTE }}
+
             StopTrack ${{ github.ref_name }}.
 
             - **StopTrack-phone.apk** — install on the phone (the full app + watch bridge)

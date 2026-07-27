@@ -87,6 +87,8 @@ record's `updatedAt` (falling back to `loggedAt`/`end`/`start` for old records).
 | `GET /production?since=<ms>` | — | `{ records: [record, …], serverTime }` — production records changed since the cursor. |
 | `POST /sessions` | `{ records: [record, …] }` | `{ ok, serverTime }` — upserts machine-session records (`{ id, operator, machine, start, end }`, operator presence spans), LWW like `/stops`. |
 | `GET /sessions?since=<ms>` | — | `{ records: [record, …], serverTime }` — session records changed since the cursor. |
+| `POST /handovers` | `{ records: [record, …] }` | `{ ok, serverTime }` — upserts shift-handover cards (operator's message + their flags), LWW like `/stops`. |
+| `GET /handovers?since=<ms>` | — | `{ records: [record, …], serverTime }` — handovers changed since the cursor. |
 | `POST /report` | `{ to: [emails], subject, text }` | `{ ok, serverTime }` — emails a shift handover report. `501` when SMTP isn't configured. |
 
 ### Record shape
@@ -95,6 +97,27 @@ The server treats records opaquely (keyed by `id`) and never mutates them; it
 only compares `updatedAt`. See the StopTrack data model for fields
 (`id`, `machine`, `operator`, `start`, `end`, `duration`, `reason`, `notes`,
 `manual`, `discarded`, `deleted`, `loggedAt`, `updatedAt`, …).
+
+### Clock skew
+
+Records already stored with a future stamp are **repaired at boot** (the count is
+logged), because a stored future stamp re-clamps to the current time on every read
+and would otherwise reject every honest write forever.
+
+Incoming `updatedAt` stamps are **clamped to the server's clock** before the
+last-write-wins comparison, and the clamped value is what gets stored. Without
+this, one device with a wrong clock (no SIM, no NTP) poisons the shared data
+permanently: its future-stamped write outranks every later edit, so a supervisor's
+settings change is accepted and then silently reverted, and a discarded stop
+resurrects itself. Only the future side is clamped — a device that has merely been
+offline still wins with a legitimately newer edit. Writes answer with
+`applied` (and `skewed` for `/stops`) so the client can tell the user instead of
+losing their edit quietly — the app surfaces a rejected settings write in the sync
+status; the server also logs a warning naming the device's IP.
+
+The web app and the Android `PhoneStore` clamp identically. All three
+implementations of this contract must, or a skewed device simply re-poisons the
+data through whichever one doesn't.
 
 ## Notes & hardening
 

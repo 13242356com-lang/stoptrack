@@ -12,6 +12,7 @@ on:
       - "index.html"
       - "build/**"
       - "test/**"
+      - "server/**"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/web-test.yml"
@@ -44,8 +45,8 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 
-      # `npm test` = rebuild index.html from StopTrack.tsx, then run the browser
-      # e2e against the fresh build (so the test validates the source, not a stale
-      # committed artifact).
-      - name: Build + run web e2e
+      # `npm test` = rebuild index.html from StopTrack.tsx, run the sync server's
+      # merge tests, then the browser e2e against the fresh build (so the tests
+      # validate the source, not a stale committed artifact).
+      - name: Build + run server and web tests
         run: npm test
