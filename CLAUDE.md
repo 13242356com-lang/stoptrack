@@ -75,6 +75,7 @@ seam clean.
 
 ### Storage keys
 - `stop:<id>` — one record per stop
+- `hand:<id>` — one record per shift handout (synced via `/handovers`)
 - `config:lists` — machines / reasons / quickStops / shifts (each shift =
   {id,name,start,end,goals:{machine:units}}) / rates / handoverEmails. A legacy
   `shift` {start,end} mirror of the first shift is written alongside for old

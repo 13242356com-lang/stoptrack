@@ -103,6 +103,13 @@ async function main() {
   });
 
   await page.addInitScript(installMockNative);
+  // Configure sync at an unreachable port: the outbox only records changes once
+  // sync is configured, so this is what lets us assert a handover is queued for
+  // upload. Every request simply fails and is retried later, which is the
+  // offline-first behaviour anyway.
+  await page.addInitScript(() => {
+    localStorage.setItem("config:sync", JSON.stringify({ url: "http://127.0.0.1:9", token: "t", enabled: true }));
+  });
   await page.goto("file://" + path.join(root, "index.html"));
 
   // App booted (no red error overlay, operator timer visible).
@@ -210,6 +217,15 @@ async function main() {
   assert(/guide rail/i.test(h.note || ""), `handover note not persisted: ${JSON.stringify(h.note)}`);
   assert((h.flags || []).some((f) => /coolant/i.test(f.text)), `operator flag not persisted: ${JSON.stringify(h.flags)}`);
   assert(h.operator === "Alice", `handover operator wrong: ${h.operator}`);
+
+  // The handout must also be QUEUED FOR SYNC. Without this it stayed on the
+  // device forever: no /handovers route, no _enqueue — so the supervisor's
+  // handover log was permanently empty on any setup with more than one phone.
+  const outbox = await page.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem("sync:outbox") || "[]"); } catch { return []; }
+  });
+  assert(outbox.includes(`hand:${h.id}`),
+    `handover must be queued for sync, outbox was ${JSON.stringify(outbox)}`);
 
   // ---- what counts as "this shift" -----------------------------------------
   // The window is derived from the shift CLOCK, so it rolls over on its own. It

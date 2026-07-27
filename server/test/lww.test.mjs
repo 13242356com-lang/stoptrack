@@ -114,3 +114,29 @@ test("a device that is merely BEHIND still wins with a legitimately newer edit",
   assert.equal(got.data.stops.find((s) => s.id === id).notes, "second",
     "a newer (but still past) stamp must win — the clamp is future-only");
 });
+
+test("handovers round-trip through the sync contract", async () => {
+  // v0.6 shipped the handout with no server route at all, so the supervisor's
+  // handover log was permanently empty on any setup with more than one device.
+  const id = `${Date.now()}-77`;
+  const rec = {
+    id, operator: "Alice", machine: "Line 1", shiftName: "Night",
+    windowStart: Date.now() - 7 * 3600e3, windowEnd: Date.now(),
+    stopCount: 3, downtimeMs: 900000,
+    note: "Infeed guide rail looks worn.",
+    flags: [{ text: "Guide rail worn", level: "fix" }],
+    createdAt: Date.now(), updatedAt: Date.now(),
+  };
+  const post = await req("POST", "/handovers", { records: [rec] });
+  assert.equal(post.data.ok, true);
+
+  const got = await req("GET", "/handovers?since=0");
+  const back = got.data.records.find((r) => r.id === id);
+  assert.ok(back, "the handover must come back from the server");
+  assert.equal(back.note, rec.note, "the operator's message must survive the round trip");
+  assert.equal(back.flags[0].text, "Guide rail worn", "the operator's flags must survive too");
+
+  // `since` must page it like every other collection.
+  const later = await req("GET", `/handovers?since=${Date.now() + 60_000}`);
+  assert.equal(later.data.records.length, 0, "a future cursor should return nothing");
+});

@@ -1025,6 +1025,7 @@ const api = {
     try {
       try { await STORE.set(key, JSON.stringify(record), SHARED); }
       catch { await STORE.set(key, JSON.stringify(record)); }
+      await this._enqueue(key);
       return { ok: true, record };
     } catch (e) { return { ok: false, error: e?.message || "Couldn't save the handover." }; }
   },
@@ -1167,7 +1168,8 @@ const api = {
       const stops = await STORE.list("stop:", SHARED);
       const prods = await STORE.list("prod:", SHARED).catch(() => ({ keys: [] }));
       const sess = await STORE.list("sess:", SHARED).catch(() => ({ keys: [] }));
-      await this.setOutbox([...(stops?.keys || []), ...(prods?.keys || []), ...(sess?.keys || [])]);
+      const hand = await STORE.list("hand:", SHARED).catch(() => ({ keys: [] }));
+      await this.setOutbox([...(stops?.keys || []), ...(prods?.keys || []), ...(sess?.keys || []), ...(hand?.keys || [])]);
     } catch { /* ignore */ }
   },
   // This device's open machine-session id, so a reload can close the dangling
@@ -1223,6 +1225,19 @@ const api = {
     const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/sessions`, { token: cfg.token, method: "POST", body: { records } });
     return res.ok ? { ok: true, serverTime: res.data?.serverTime || Date.now() } : res;
   },
+  async remotePushHandovers(records, cfg) {
+    if (!records.length) return { ok: true };
+    const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/handovers`, { token: cfg.token, method: "POST", body: { records } });
+    return res.ok ? { ok: true } : { ok: false, error: res.error || `HTTP ${res.status}` };
+  },
+
+  async remotePullHandovers(since, cfg) {
+    if (!cfg?.url) return { ok: false, records: [] };
+    const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/handovers?since=${since || 0}`, { token: cfg.token });
+    if (!res.ok) return { ok: false, records: [], error: res.error || `HTTP ${res.status}` };
+    return { ok: true, records: res.data?.records || [], serverTime: res.data?.serverTime || Date.now() };
+  },
+
   async remotePullSessions(since, cfg) {
     if (!cfg?.url) return { ok: false, error: "No server URL" };
     const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/sessions?since=${since || 0}`, { token: cfg.token });
@@ -1379,7 +1394,7 @@ function useTimer({ operator, machine }) {
    ========================================================================== */
 const SYNC_INTERVAL_MS = 25000;
 
-function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, localConfig, onRemoteConfig }) {
+function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, onRemoteHandovers, localConfig, onRemoteConfig }) {
   const [status, setStatus] = useState({
     online: typeof navigator === "undefined" ? true : navigator.onLine,
     lastSync: null, pending: 0, syncing: false, error: null,
@@ -1390,6 +1405,7 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, loc
   const onStopsRef = useRef(onRemoteStops); onStopsRef.current = onRemoteStops;
   const onProdRef = useRef(onRemoteProduction); onProdRef.current = onRemoteProduction;
   const onSessRef = useRef(onRemoteSessions); onSessRef.current = onRemoteSessions;
+  const onHandRef = useRef(onRemoteHandovers); onHandRef.current = onRemoteHandovers;
   const localCfgRef = useRef(localConfig); localCfgRef.current = localConfig;
   const onCfgRef = useRef(onRemoteConfig); onCfgRef.current = onRemoteConfig;
   const runningRef = useRef(false); // guards against overlapping flushes
@@ -1413,6 +1429,7 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, loc
         const stopRows = records.filter((r) => r.key.startsWith("stop:"));
         const prodRows = records.filter((r) => r.key.startsWith("prod:"));
         const sessRows = records.filter((r) => r.key.startsWith("sess:"));
+        const handRows = records.filter((r) => r.key.startsWith("hand:"));
         if (stopRows.length) {
           const res = await api.remotePush(stopRows, c);
           if (!res.ok) { setStatus((s) => ({ ...s, syncing: false, error: res.error || "Push failed", pending: keys.length })); runningRef.current = false; return; }
@@ -1423,6 +1440,10 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, loc
         }
         if (sessRows.length) {
           const res = await api.remotePushSessions(sessRows, c);
+          if (!res.ok) { setStatus((s) => ({ ...s, syncing: false, error: res.error || "Push failed", pending: keys.length })); runningRef.current = false; return; }
+        }
+        if (handRows.length) {
+          const res = await api.remotePushHandovers(handRows, c);
           if (!res.ok) { setStatus((s) => ({ ...s, syncing: false, error: res.error || "Push failed", pending: keys.length })); runningRef.current = false; return; }
         }
         await api.setOutbox([]); // clear only after every push confirmed
@@ -1457,8 +1478,15 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, loc
         await api.setCursor(sessPull.serverTime, "sess");
       }
 
+      const handSince = await api.getCursor("hand");
+      const handPull = await api.remotePullHandovers(handSince, c);
+      if (handPull.ok) {
+        if (handPull.records.length) await onHandRef.current?.(handPull.records);
+        await api.setCursor(handPull.serverTime, "hand");
+      }
+
       const pending = (await api.getOutbox()).length;
-      const pullErr = !pull.ok ? (pull.error || "Pull failed") : !prodPull.ok ? (prodPull.error || "Pull failed") : !sessPull.ok ? (sessPull.error || "Pull failed") : null;
+      const pullErr = !pull.ok ? (pull.error || "Pull failed") : !prodPull.ok ? (prodPull.error || "Pull failed") : !sessPull.ok ? (sessPull.error || "Pull failed") : !handPull.ok ? (handPull.error || "Pull failed") : null;
       setStatus({ online: true, lastSync: Date.now(), pending, syncing: false, error: pullErr });
     } catch (e) {
       setStatus((s) => ({ ...s, syncing: false, error: e?.message || "Sync error" }));
@@ -1653,6 +1681,7 @@ export default function App() {
   const stopsRef = useRef(stops); stopsRef.current = stops;
   const productionRef = useRef(production); productionRef.current = production;
   const sessionsRef = useRef(sessions); sessionsRef.current = sessions;
+  const handoversRef = useRef(handovers); handoversRef.current = handovers;
   const operatorRef = useRef(operator); operatorRef.current = operator;
   const machineRef = useRef(machine); machineRef.current = machine;
 
@@ -1879,6 +1908,24 @@ export default function App() {
     setSessions([...map.values()]);
   }, []);
 
+  // Handovers pulled from other devices — this is what makes the supervisor's
+  // handover log show the whole factory rather than only the phone in their hand.
+  const applyRemoteHandovers = useCallback(async (incoming) => {
+    const map = new Map(handoversRef.current.map((h) => [h.id, h]));
+    const writes = [];
+    for (const r of incoming) {
+      const local = map.get(r.id);
+      if (!local || stampOf(r) > stampOf(local)) {
+        const rec = { ...r, key: `hand:${r.id}` };
+        map.set(r.id, rec);
+        writes.push(rec);
+      }
+    }
+    if (!writes.length) return;
+    await Promise.all(writes.map((w) => api.putLocal(w)));
+    setHandovers([...map.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)));
+  }, []);
+
   // Apply a newer shared config pulled from the server (keeps its updatedAt).
   const applyRemoteConfig = useCallback((cfg) => {
     if (cfg.machines?.length) setMachines(cfg.machines);
@@ -1897,7 +1944,7 @@ export default function App() {
     [machines, reasons, quickStops, shifts, supervisorPinHash, rates, handoverEmails, configUpdatedAt],
   );
 
-  const sync = useSync({ cfg: syncCfg, onRemoteStops: applyRemoteStops, onRemoteProduction: applyRemoteProduction, onRemoteSessions: applyRemoteSessions, localConfig, onRemoteConfig: applyRemoteConfig });
+  const sync = useSync({ cfg: syncCfg, onRemoteStops: applyRemoteStops, onRemoteProduction: applyRemoteProduction, onRemoteSessions: applyRemoteSessions, onRemoteHandovers: applyRemoteHandovers, localConfig, onRemoteConfig: applyRemoteConfig });
 
   // Change device-local sync config. On first enable, seed the outbox with all
   // existing stops so history uploads, not just future changes.
@@ -2448,7 +2495,7 @@ export default function App() {
           reportBase={buildShiftReport({ operator, machine, myStops: shiftStops, myShift, clearedBefore: shiftStart, activeShift, goalStatus })}
           handoverEmails={handoverEmails} syncCfg={syncCfg}
           lastHandover={handovers[0] || null}
-          onSaved={(rec) => setHandovers((prev) => [rec, ...prev.filter((h) => h.id !== rec.id)])}
+          onSaved={(rec) => { setHandovers((prev) => [rec, ...prev.filter((h) => h.id !== rec.id)]); sync.flush(); }}
           onClose={() => setHandoverOpen(false)}
         />
       )}

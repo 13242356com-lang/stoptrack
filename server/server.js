@@ -100,21 +100,21 @@ const APP_HTML = process.env.APP_HTML
   || "";
 
 // --- persistence (single JSON file) ----------------------------------------
-// Shape: { stops: { [id]: record }, production: { [id]: record }, sessions: { [id]: record }, config: { config, updatedAt } }
+// Shape: { stops, production, sessions, handovers: { [id]: record }, config: { config, updatedAt } }
 // Collections use null-prototype objects and record ids are validated, so a
 // record whose id is "__proto__"/"constructor"/"prototype" can't pollute or
 // corrupt the store.
 const RESERVED_IDS = new Set(["__proto__", "constructor", "prototype"]);
 const safeId = (id) => typeof id === "string" && id.length > 0 && id.length <= 512 && !RESERVED_IDS.has(id);
 function emptyCollections() {
-  return { stops: Object.create(null), production: Object.create(null), sessions: Object.create(null), config: { config: null, updatedAt: 0 } };
+  return { stops: Object.create(null), production: Object.create(null), sessions: Object.create(null), handovers: Object.create(null), config: { config: null, updatedAt: 0 } };
 }
 let db = emptyCollections();
 try {
   if (fs.existsSync(DATA_FILE)) {
     const parsed = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
     db = emptyCollections();
-    for (const coll of ["stops", "production", "sessions"]) {
+    for (const coll of ["stops", "production", "sessions", "handovers"]) {
       const src = parsed && parsed[coll];
       if (src && typeof src === "object") {
         for (const id of Object.keys(src)) if (safeId(id)) db[coll][id] = src[id];
@@ -421,6 +421,29 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, serverTime: now, applied });
     }
 
+    // Shift handovers — the end-of-shift card an operator hands to the next one
+    // (message + their own flags). Same contract as /sessions, so the supervisor
+    // sees handovers from every device rather than only the one they're holding.
+    if (route === "/handovers" && req.method === "GET") {
+      const since = Number(url.searchParams.get("since")) || 0;
+      const records = Object.values(db.handovers).filter((r) => stampOf(r) > since);
+      return send(res, 200, { records, serverTime: now });
+    }
+
+    if (route === "/handovers" && req.method === "POST") {
+      const body = await readBody(req);
+      const incoming = Array.isArray(body.records) ? body.records : [];
+      let saved = 0;
+      for (const r of incoming) {
+        if (!r || !safeId(r.id)) continue;
+        const cur = db.handovers[r.id];
+        if (!cur || stampOf(r, now) >= stampOf(cur, now)) { db.handovers[r.id] = normalizeStamp(r, now); saved++; }
+      }
+      persist();
+      if (saved > 0) log(`saved ${saved} handover(s) from ${ip}`);
+      return send(res, 200, { ok: true, serverTime: now });
+    }
+
     // Shift handover email: { to: [addresses], subject, text }. 501 when SMTP
     // isn't set up so the app can fall back to copy-to-clipboard gracefully.
     if (route === "/report" && req.method === "POST") {
@@ -495,7 +518,7 @@ server.listen(PORT, () => {
   console.log(line);
   console.log("");
   console.log(`Storage:  ${DATA_DIR}   (all data + token live here — back this folder up)`);
-  console.log(`Loaded:   ${Object.keys(db.stops).length} stops, ${Object.keys(db.production).length} production, ${Object.keys(db.sessions).length} sessions`);
+  console.log(`Loaded:   ${Object.keys(db.stops).length} stops, ${Object.keys(db.production).length} production, ${Object.keys(db.sessions).length} sessions, ${Object.keys(db.handovers).length} handovers`);
   console.log(APP_HTML ? `App page: served at "/" from ${APP_HTML}` : `App page: NOT served — no index.html found next to server.js.`);
   console.log(VERBOSE ? "Logging:  verbose (every request)." : "Logging:  activity only (set LOG_VERBOSE=1 for every request).");
   console.log("");

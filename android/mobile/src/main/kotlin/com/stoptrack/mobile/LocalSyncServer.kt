@@ -102,6 +102,7 @@ class LocalSyncServer(
         SyncContract.STOPS -> Collection.STOPS
         SyncContract.PRODUCTION -> Collection.PRODUCTION
         SyncContract.SESSIONS -> Collection.SESSIONS
+        SyncContract.HANDOVERS -> Collection.HANDOVERS
         else -> null
     }
 

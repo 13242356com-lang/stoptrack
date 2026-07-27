@@ -1165,6 +1165,7 @@ const api = {
             catch (_a) {
                 await STORE.set(key, JSON.stringify(record));
             }
+            await this._enqueue(key);
             return { ok: true, record };
         }
         catch (e) {
@@ -1346,7 +1347,8 @@ const api = {
             const stops = await STORE.list("stop:", SHARED);
             const prods = await STORE.list("prod:", SHARED).catch(() => ({ keys: [] }));
             const sess = await STORE.list("sess:", SHARED).catch(() => ({ keys: [] }));
-            await this.setOutbox([...((stops === null || stops === void 0 ? void 0 : stops.keys) || []), ...((prods === null || prods === void 0 ? void 0 : prods.keys) || []), ...((sess === null || sess === void 0 ? void 0 : sess.keys) || [])]);
+            const hand = await STORE.list("hand:", SHARED).catch(() => ({ keys: [] }));
+            await this.setOutbox([...((stops === null || stops === void 0 ? void 0 : stops.keys) || []), ...((prods === null || prods === void 0 ? void 0 : prods.keys) || []), ...((sess === null || sess === void 0 ? void 0 : sess.keys) || []), ...((hand === null || hand === void 0 ? void 0 : hand.keys) || [])]);
         }
         catch (_a) { }
     },
@@ -1424,6 +1426,21 @@ const api = {
             return { ok: false, error: "No server URL" };
         const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/sessions`, { token: cfg.token, method: "POST", body: { records } });
         return res.ok ? { ok: true, serverTime: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.serverTime) || Date.now() } : res;
+    },
+    async remotePushHandovers(records, cfg) {
+        if (!records.length)
+            return { ok: true };
+        const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/handovers`, { token: cfg.token, method: "POST", body: { records } });
+        return res.ok ? { ok: true } : { ok: false, error: res.error || `HTTP ${res.status}` };
+    },
+    async remotePullHandovers(since, cfg) {
+        var _a, _b;
+        if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
+            return { ok: false, records: [] };
+        const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/handovers?since=${since || 0}`, { token: cfg.token });
+        if (!res.ok)
+            return { ok: false, records: [], error: res.error || `HTTP ${res.status}` };
+        return { ok: true, records: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.records) || [], serverTime: ((_b = res.data) === null || _b === void 0 ? void 0 : _b.serverTime) || Date.now() };
     },
     async remotePullSessions(since, cfg) {
         var _a, _b;
@@ -1538,7 +1555,7 @@ function useTimer({ operator, machine }) {
     return { state, elapsed, start, pause, resume, stop, reset, restore };
 }
 const SYNC_INTERVAL_MS = 25000;
-function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, localConfig, onRemoteConfig }) {
+function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, onRemoteHandovers, localConfig, onRemoteConfig }) {
     const [status, setStatus] = useState({
         online: typeof navigator === "undefined" ? true : navigator.onLine,
         lastSync: null, pending: 0, syncing: false, error: null,
@@ -1551,6 +1568,8 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, loc
     onProdRef.current = onRemoteProduction;
     const onSessRef = useRef(onRemoteSessions);
     onSessRef.current = onRemoteSessions;
+    const onHandRef = useRef(onRemoteHandovers);
+    onHandRef.current = onRemoteHandovers;
     const localCfgRef = useRef(localConfig);
     localCfgRef.current = localConfig;
     const onCfgRef = useRef(onRemoteConfig);
@@ -1558,7 +1577,7 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, loc
     const runningRef = useRef(false);
     const enabled = !!(cfg && cfg.enabled && cfg.url);
     const flush = useCallback(async () => {
-        var _a, _b, _c, _d;
+        var _a, _b, _c, _d, _e;
         const c = cfgRef.current;
         if (!c || !c.enabled || !c.url)
             return;
@@ -1577,6 +1596,7 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, loc
                 const stopRows = records.filter((r) => r.key.startsWith("stop:"));
                 const prodRows = records.filter((r) => r.key.startsWith("prod:"));
                 const sessRows = records.filter((r) => r.key.startsWith("sess:"));
+                const handRows = records.filter((r) => r.key.startsWith("hand:"));
                 if (stopRows.length) {
                     const res = await api.remotePush(stopRows, c);
                     if (!res.ok) {
@@ -1595,6 +1615,14 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, loc
                 }
                 if (sessRows.length) {
                     const res = await api.remotePushSessions(sessRows, c);
+                    if (!res.ok) {
+                        setStatus((s) => (Object.assign(Object.assign({}, s), { syncing: false, error: res.error || "Push failed", pending: keys.length })));
+                        runningRef.current = false;
+                        return;
+                    }
+                }
+                if (handRows.length) {
+                    const res = await api.remotePushHandovers(handRows, c);
                     if (!res.ok) {
                         setStatus((s) => (Object.assign(Object.assign({}, s), { syncing: false, error: res.error || "Push failed", pending: keys.length })));
                         runningRef.current = false;
@@ -1632,8 +1660,15 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, loc
                     await ((_d = onSessRef.current) === null || _d === void 0 ? void 0 : _d.call(onSessRef, sessPull.records));
                 await api.setCursor(sessPull.serverTime, "sess");
             }
+            const handSince = await api.getCursor("hand");
+            const handPull = await api.remotePullHandovers(handSince, c);
+            if (handPull.ok) {
+                if (handPull.records.length)
+                    await ((_e = onHandRef.current) === null || _e === void 0 ? void 0 : _e.call(onHandRef, handPull.records));
+                await api.setCursor(handPull.serverTime, "hand");
+            }
             const pending = (await api.getOutbox()).length;
-            const pullErr = !pull.ok ? (pull.error || "Pull failed") : !prodPull.ok ? (prodPull.error || "Pull failed") : !sessPull.ok ? (sessPull.error || "Pull failed") : null;
+            const pullErr = !pull.ok ? (pull.error || "Pull failed") : !prodPull.ok ? (prodPull.error || "Pull failed") : !sessPull.ok ? (sessPull.error || "Pull failed") : !handPull.ok ? (handPull.error || "Pull failed") : null;
             setStatus({ online: true, lastSync: Date.now(), pending, syncing: false, error: pullErr });
         }
         catch (e) {
@@ -1764,6 +1799,8 @@ function App() {
     productionRef.current = production;
     const sessionsRef = useRef(sessions);
     sessionsRef.current = sessions;
+    const handoversRef = useRef(handovers);
+    handoversRef.current = handovers;
     const operatorRef = useRef(operator);
     operatorRef.current = operator;
     const machineRef = useRef(machine);
@@ -1974,6 +2011,22 @@ function App() {
         await Promise.all(writes.map((w) => api.putLocal(w)));
         setSessions([...map.values()]);
     }, []);
+    const applyRemoteHandovers = useCallback(async (incoming) => {
+        const map = new Map(handoversRef.current.map((h) => [h.id, h]));
+        const writes = [];
+        for (const r of incoming) {
+            const local = map.get(r.id);
+            if (!local || stampOf(r) > stampOf(local)) {
+                const rec = Object.assign(Object.assign({}, r), { key: `hand:${r.id}` });
+                map.set(r.id, rec);
+                writes.push(rec);
+            }
+        }
+        if (!writes.length)
+            return;
+        await Promise.all(writes.map((w) => api.putLocal(w)));
+        setHandovers([...map.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)));
+    }, []);
     const applyRemoteConfig = useCallback((cfg) => {
         var _a, _b, _c;
         if ((_a = cfg.machines) === null || _a === void 0 ? void 0 : _a.length)
@@ -1996,7 +2049,7 @@ function App() {
         api.saveConfig(cfg);
     }, []);
     const localConfig = useMemo(() => ({ machines, reasons, quickStops, shifts, shift: legacyShiftOf(shifts), supervisorPinHash, rates, handoverEmails, updatedAt: configUpdatedAt }), [machines, reasons, quickStops, shifts, supervisorPinHash, rates, handoverEmails, configUpdatedAt]);
-    const sync = useSync({ cfg: syncCfg, onRemoteStops: applyRemoteStops, onRemoteProduction: applyRemoteProduction, onRemoteSessions: applyRemoteSessions, localConfig, onRemoteConfig: applyRemoteConfig });
+    const sync = useSync({ cfg: syncCfg, onRemoteStops: applyRemoteStops, onRemoteProduction: applyRemoteProduction, onRemoteSessions: applyRemoteSessions, onRemoteHandovers: applyRemoteHandovers, localConfig, onRemoteConfig: applyRemoteConfig });
     const updateSyncConfig = useCallback(async (next) => {
         await api.saveSyncConfig(next);
         if (next.enabled && next.url) {
@@ -2432,7 +2485,7 @@ function App() {
                     React.createElement("button", { onClick: startNewShift, className: "flex-1 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 rounded-lg" }, "Start new shift"),
                     React.createElement("button", { onClick: () => setNewShiftOpen(false), className: `px-4 ${t.sub} font-semibold` }, "Cancel"))))),
         manualOpen && (React.createElement(ManualStopModal, { t: t, dark: dark, machine: machine, machines: machines, reasons: reasons, quickStops: quickStops, lastReason: lastReason, saving: saving, saveError: saveError, onSave: handleManualSave, onClose: () => setManualOpen(false) })),
-        handoverOpen && (React.createElement(ShiftHandoverModal, { t: t, dark: dark, reportBase: buildShiftReport({ operator, machine, myStops: shiftStops, myShift, clearedBefore: shiftStart, activeShift, goalStatus }), handoverEmails: handoverEmails, syncCfg: syncCfg, lastHandover: handovers[0] || null, onSaved: (rec) => setHandovers((prev) => [rec, ...prev.filter((h) => h.id !== rec.id)]), onClose: () => setHandoverOpen(false) }))));
+        handoverOpen && (React.createElement(ShiftHandoverModal, { t: t, dark: dark, reportBase: buildShiftReport({ operator, machine, myStops: shiftStops, myShift, clearedBefore: shiftStart, activeShift, goalStatus }), handoverEmails: handoverEmails, syncCfg: syncCfg, lastHandover: handovers[0] || null, onSaved: (rec) => { setHandovers((prev) => [rec, ...prev.filter((h) => h.id !== rec.id)]); sync.flush(); }, onClose: () => setHandoverOpen(false) }))));
 }
 function OperatorView(props) {
     const { t, operator, setOperator, machine, setMachine, timer, onStop, pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError, myStops, visibleStops, machines, reasons, quickStops, applyQuickStop, lastReason, shift, shifts, shiftId, onSelectShift, shiftStart, hiddenStopCount, onNewShift, showAll, onToggleShowAll, setupLocked, onLockSetup, onUnlockSetup, onOpenManual, syncStatus, syncOn, rates, myProduction, onSaveProduction, myShift, goalStatus, onOpenHandover, } = props;

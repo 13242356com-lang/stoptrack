@@ -32,6 +32,7 @@ class PhoneStore private constructor(context: Context) {
         Collection.STOPS to mutableMapOf(),
         Collection.PRODUCTION to mutableMapOf(),
         Collection.SESSIONS to mutableMapOf(),
+        Collection.HANDOVERS to mutableMapOf(),
     )
     private var config: JsonObject? = null
     private var configUpdatedAt: Long = 0L
