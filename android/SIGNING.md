@@ -7,8 +7,29 @@ That key is now removed and considered **compromised**. Release APKs are signed
 with a **private key you hold**, provided to CI via encrypted secrets.
 
 Until you add the secrets below, CI still builds — but the release APKs fall back
-to a throwaway debug key (a warning is printed) and are **not authenticity-
-guaranteed**, and won't reliably install over each other. So do this once.
+to a **throwaway debug key that is regenerated on every CI run**. Two consequences,
+the second of which is the one people actually feel:
+
+1. The APKs are **not authenticity-guaranteed**.
+2. **No release can ever be installed as an update.** Android refuses an install
+   whose signing certificate changed, so every new version forces
+   *uninstall → install*, which **wipes local data** and is exactly the kind of
+   friction that makes people stop using an app.
+
+Fixing this is a one-time, ~5-minute job.
+
+## Quickest path
+
+```bash
+bash android/make-signing-key.sh
+```
+
+It generates the key, picks strong passwords, base64-encodes it, and prints the
+four values to paste into GitHub. The key never leaves your machine. Then cut one
+more release: **that build needs one final uninstall** to switch onto the new
+certificate (back up first), and every release after it installs normally.
+
+The manual steps are below if you'd rather do it by hand.
 
 ## 1. Make a private key (keep it safe — losing it means you can't update the apps)
 
