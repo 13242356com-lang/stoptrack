@@ -717,7 +717,14 @@ function saveImage(dataUrl, filename) {
 // The last-write-wins clock for a stop record. Newer records were mutated more
 // recently. Falls back through older fields for records saved before updatedAt
 // existed, so mixed-vintage data still merges sanely.
-const stampOf = (s) => s.updatedAt ?? s.loggedAt ?? s.end ?? s.start ?? 0;
+// The record's last-write clock, CLAMPED to this device's own now. A phone with a
+// wrong clock stamps its records far in the future; without the clamp it never
+// accepts a supervisor's later edit (its local copy always looks newer), and it
+// re-pushes that stale copy on every outbox reseed — so a discard would come back
+// from the dead one round trip later. The server clamps too; both sides must, or
+// the loop stays open. Only the future side is clamped, so a device that has
+// merely been offline still merges correctly.
+const stampOf = (s) => Math.min(s.updatedAt ?? s.loggedAt ?? s.end ?? s.start ?? 0, Date.now());
 
 // SHA-256 hex of a string, used to store the supervisor PIN as a hash rather
 // than plaintext. Implemented in pure JS on purpose: the app is opened from a
@@ -997,9 +1004,8 @@ const api = {
 
   // --- shift handovers -------------------------------------------------------
   // Each handout is kept as a record so the supervisor gets a history and the
-  // next operator can carry forward whatever was still open. Local-only for now
-  // (the sync contract has no /handovers route yet) but shaped like the other
-  // collections, so wiring it to the server later is the same one-line seam.
+  // next operator can carry forward whatever was still open. Synced like the
+  // other collections via /handovers, so the supervisor sees every device's.
   async loadHandovers() {
     try {
       const res = await STORE.list("hand:", SHARED);
@@ -1101,7 +1107,7 @@ const api = {
   },
   async importAll(data) {
     if (!data || data.app !== "stoptrack") throw new Error("Not a StopTrack backup file.");
-    const counts = { stops: 0, production: 0, sessions: 0, configApplied: false };
+    const counts = { stops: 0, production: 0, sessions: 0, handovers: 0, configApplied: false };
     // Config — last-write-wins on updatedAt.
     if (data.config) {
       const cur = await this.loadConfig();
@@ -1409,6 +1415,7 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, onR
   const localCfgRef = useRef(localConfig); localCfgRef.current = localConfig;
   const onCfgRef = useRef(onRemoteConfig); onCfgRef.current = onRemoteConfig;
   const runningRef = useRef(false); // guards against overlapping flushes
+  const configRejectedRef = useRef(false); // server refused our last settings write
 
   const enabled = !!(cfg && cfg.enabled && cfg.url);
 
@@ -1452,10 +1459,15 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, onR
       // 2) CONFIG — last-write-wins both directions.
       const localCfg = localCfgRef.current;
       const remoteCfg = await api.remoteGetConfig(c);
-      if (remoteCfg.ok && remoteCfg.config && (remoteCfg.updatedAt || 0) > (localCfg?.updatedAt || 0)) {
+      const clampAt = (v) => Math.min(Number(v) || 0, Date.now());
+      if (remoteCfg.ok && remoteCfg.config && clampAt(remoteCfg.updatedAt) > clampAt(localCfg?.updatedAt)) {
         onCfgRef.current?.(remoteCfg.config);
-      } else if (localCfg && (localCfg.updatedAt || 0) > (remoteCfg.ok ? (remoteCfg.updatedAt || 0) : 0)) {
-        await api.remotePutConfig(localCfg, c);
+      } else if (localCfg && clampAt(localCfg.updatedAt) > (remoteCfg.ok ? clampAt(remoteCfg.updatedAt) : 0)) {
+        const put = await api.remotePutConfig(localCfg, c);
+        // The server reports when a write lost last-write-wins. Say so rather
+        // than letting the supervisor's settings edit vanish without a word.
+        if (put.ok && put.data && put.data.applied === false) configRejectedRef.current = true;
+        else configRejectedRef.current = false;
       }
 
       // 3) PULL — stops and production, each behind its own cursor.
@@ -1486,6 +1498,12 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, onR
       }
 
       const pending = (await api.getOutbox()).length;
+      if (configRejectedRef.current) {
+        setStatus({ online: true, lastSync: Date.now(), pending, syncing: false,
+          error: "The server has newer settings — your last settings change wasn't applied." });
+        runningRef.current = false;
+        return;
+      }
       const pullErr = !pull.ok ? (pull.error || "Pull failed") : !prodPull.ok ? (prodPull.error || "Pull failed") : !sessPull.ok ? (sessPull.error || "Pull failed") : !handPull.ok ? (handPull.error || "Pull failed") : null;
       setStatus({ online: true, lastSync: Date.now(), pending, syncing: false, error: pullErr });
     } catch (e) {
@@ -2494,7 +2512,7 @@ export default function App() {
           t={t} dark={dark}
           reportBase={buildShiftReport({ operator, machine, myStops: shiftStops, myShift, clearedBefore: shiftStart, activeShift, goalStatus })}
           handoverEmails={handoverEmails} syncCfg={syncCfg}
-          lastHandover={handovers[0] || null}
+          lastHandover={handovers.find((h) => !h.machine || h.machine === machine) || null}
           onSaved={(rec) => { setHandovers((prev) => [rec, ...prev.filter((h) => h.id !== rec.id)]); sync.flush(); }}
           onClose={() => setHandoverOpen(false)}
         />

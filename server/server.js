@@ -109,33 +109,6 @@ const safeId = (id) => typeof id === "string" && id.length > 0 && id.length <= 5
 function emptyCollections() {
   return { stops: Object.create(null), production: Object.create(null), sessions: Object.create(null), handovers: Object.create(null), config: { config: null, updatedAt: 0 } };
 }
-let db = emptyCollections();
-try {
-  if (fs.existsSync(DATA_FILE)) {
-    const parsed = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-    db = emptyCollections();
-    for (const coll of ["stops", "production", "sessions", "handovers"]) {
-      const src = parsed && parsed[coll];
-      if (src && typeof src === "object") {
-        for (const id of Object.keys(src)) if (safeId(id)) db[coll][id] = src[id];
-      }
-    }
-    if (parsed && parsed.config) db.config = parsed.config;
-  }
-} catch (e) { console.error("Could not read data file, starting empty:", e.message); }
-
-let saveTimer = null;
-function persist() {
-  // Debounce writes so a burst of upserts hits disk once.
-  if (saveTimer) return;
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
-    const tmp = DATA_FILE + ".tmp";
-    try { fs.writeFileSync(tmp, JSON.stringify(db)); fs.renameSync(tmp, DATA_FILE); }
-    catch (e) { console.error("Save failed:", e.message); }
-  }, 150);
-}
-
 // The record's last-write clock — mirrors the client's stampOf().
 const rawStampOf = (s) => (s && (s.updatedAt != null ? s.updatedAt
   : s.loggedAt != null ? s.loggedAt
@@ -165,6 +138,47 @@ const normalizeStamp = (r, now) => {
   const clamped = clampStamp(raw, now);
   return clamped === raw && r.updatedAt != null ? r : { ...r, updatedAt: clamped };
 };
+
+let db = emptyCollections();
+let repaired = 0;
+const bootNow = Date.now();
+try {
+  if (fs.existsSync(DATA_FILE)) {
+    const parsed = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+    db = emptyCollections();
+    for (const coll of ["stops", "production", "sessions", "handovers"]) {
+      const src = parsed && parsed[coll];
+      if (src && typeof src === "object") {
+        for (const id of Object.keys(src)) {
+          if (!safeId(id)) continue;
+          const before = rawStampOf(src[id]);
+          const rec = normalizeStamp(src[id], bootNow);
+          if (rawStampOf(rec) !== before) repaired++;
+          db[coll][id] = rec;
+        }
+      }
+    }
+    if (parsed && parsed.config) {
+      db.config = parsed.config;
+      // A future-stamped config from before the clamp would reject every later
+      // supervisor edit forever; pull it back to the boot clock too.
+      const cfgAt = Number(db.config.updatedAt) || 0;
+      if (cfgAt > bootNow) { db.config.updatedAt = bootNow; repaired++; }
+    }
+  }
+} catch (e) { console.error("Could not read data file, starting empty:", e.message); }
+
+let saveTimer = null;
+function persist() {
+  // Debounce writes so a burst of upserts hits disk once.
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    const tmp = DATA_FILE + ".tmp";
+    try { fs.writeFileSync(tmp, JSON.stringify(db)); fs.renameSync(tmp, DATA_FILE); }
+    catch (e) { console.error("Save failed:", e.message); }
+  }, 150);
+}
 
 // --- email (optional) --------------------------------------------------------
 // Shift-handover email via nodemailer, loaded lazily so the server keeps zero
@@ -408,7 +422,7 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const rawAt = Number(body.updatedAt) || (body.config && Number(body.config.updatedAt)) || 0;
       const incomingAt = clampStamp(rawAt, now);
-      const applied = incomingAt >= (db.config.updatedAt || 0);
+      const applied = incomingAt >= clampStamp(db.config.updatedAt || 0, now);
       if (applied) {
         db.config = { config: body.config || null, updatedAt: incomingAt };
         persist();
@@ -518,6 +532,7 @@ server.listen(PORT, () => {
   console.log(line);
   console.log("");
   console.log(`Storage:  ${DATA_DIR}   (all data + token live here — back this folder up)`);
+  if (repaired > 0) console.log(`Repaired: ${repaired} record(s) stamped in the future (a device clock was wrong)`);
   console.log(`Loaded:   ${Object.keys(db.stops).length} stops, ${Object.keys(db.production).length} production, ${Object.keys(db.sessions).length} sessions, ${Object.keys(db.handovers).length} handovers`);
   console.log(APP_HTML ? `App page: served at "/" from ${APP_HTML}` : `App page: NOT served — no index.html found next to server.js.`);
   console.log(VERBOSE ? "Logging:  verbose (every request)." : "Logging:  activity only (set LOG_VERBOSE=1 for every request).");

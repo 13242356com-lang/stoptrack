@@ -70,12 +70,18 @@ class PhoneStore private constructor(context: Context) {
     @Synchronized
     fun getConfig(): Pair<JsonObject?, Long> = config to configUpdatedAt
 
-    /** Replace config if [updatedAt] is newer (LWW), like the server's PUT /config. */
+    /**
+     * Replace config if [updatedAt] is newer (LWW), like the server's PUT /config.
+     * Both sides of the comparison are clamped to this device's clock so a device
+     * with a wrong clock can't pin a future stamp that rejects every later edit.
+     */
     @Synchronized
     fun putConfig(newConfig: JsonObject?, updatedAt: Long): Boolean {
-        if (updatedAt >= configUpdatedAt) {
+        val now = System.currentTimeMillis()
+        val incoming = minOf(updatedAt, now)
+        if (incoming >= minOf(configUpdatedAt, now)) {
             config = newConfig
-            configUpdatedAt = updatedAt
+            configUpdatedAt = incoming
             persist()
             return true
         }

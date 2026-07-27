@@ -100,6 +100,10 @@ only compares `updatedAt`. See the StopTrack data model for fields
 
 ### Clock skew
 
+Records already stored with a future stamp are **repaired at boot** (the count is
+logged), because a stored future stamp re-clamps to the current time on every read
+and would otherwise reject every honest write forever.
+
 Incoming `updatedAt` stamps are **clamped to the server's clock** before the
 last-write-wins comparison, and the clamped value is what gets stored. Without
 this, one device with a wrong clock (no SIM, no NTP) poisons the shared data
@@ -108,7 +112,12 @@ settings change is accepted and then silently reverted, and a discarded stop
 resurrects itself. Only the future side is clamped — a device that has merely been
 offline still wins with a legitimately newer edit. Writes answer with
 `applied` (and `skewed` for `/stops`) so the client can tell the user instead of
-losing their edit quietly; the server also logs a warning naming the device's IP.
+losing their edit quietly — the app surfaces a rejected settings write in the sync
+status; the server also logs a warning naming the device's IP.
+
+The web app and the Android `PhoneStore` clamp identically. All three
+implementations of this contract must, or a skewed device simply re-poisons the
+data through whichever one doesn't.
 
 ## Notes & hardening
 

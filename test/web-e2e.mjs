@@ -12,7 +12,9 @@
 // Run: node test/web-e2e.mjs   (needs `npm install` first for playwright + react)
 
 import { chromium } from "playwright";
-import { readFileSync, existsSync, readdirSync } from "fs";
+import { readFileSync, existsSync, readdirSync, mkdtempSync, rmSync } from "fs";
+import { spawn } from "node:child_process";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "url";
 import path from "path";
 
@@ -332,8 +334,8 @@ async function main() {
   // The pinned shift started 1h ago. A 30h-old open span must therefore report
   // ~1h of manned time, never 30h.
   for (const chip of manned) {
-    assert(chip.ms <= 2 * 3600e3,
-      `manned time must stay within the shift, got ${chip.text} (${(chip.ms / 3600e3).toFixed(1)}h)`);
+    assert(chip.ms > 0.5 * 3600e3 && chip.ms < 1.5 * 3600e3,
+      `manned time should be the ~1h shift elapsed so far, not the 30h span length — got ${chip.text}`);
   }
 
   await ctx2.close();
@@ -371,6 +373,69 @@ async function main() {
   assert(fabricated.length === 0,
     `a fresh install with no sessions must show no manned time, saw ${JSON.stringify(fabricated)}`);
   await ctx3.close();
+
+  // ---- end-to-end against a REAL server ------------------------------------
+  // The two test layers above can BOTH pass while the feature is dead: the server
+  // test posts a payload written by hand, and the web test only checks the outbox.
+  // If the client and server disagreed on the route or the payload key, nothing
+  // would notice. So drive the built index.html against a live server.js.
+  const srvDir = mkdtempSync(path.join(tmpdir(), "stoptrack-e2e-"));
+  const srvPort = 20000 + Math.floor(Math.random() * 20000);
+  const srvToken = "e2e-token";
+  const srv = spawn(process.execPath, [path.join(root, "server", "server.js")], {
+    env: { ...process.env, FACTORY_TOKEN: srvToken, PORT: String(srvPort), DATA_DIR: srvDir },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("server did not start")), 10000);
+      srv.stdout.on("data", (c) => { if (/READY/.test(String(c))) { clearTimeout(t); resolve(); } });
+      srv.on("error", reject);
+    });
+    const srvUrl = `http://127.0.0.1:${srvPort}`;
+
+    const ctx4 = await browser.newContext();
+    const p4 = await ctx4.newPage();
+    await p4.route(/unpkg\.com|cdn\.tailwindcss\.com/, async (route) => {
+      const u = route.request().url();
+      if (u.includes("react-dom")) return route.fulfill({ contentType: "application/javascript", body: reactDomUmd });
+      if (u.includes("react")) return route.fulfill({ contentType: "application/javascript", body: reactUmd });
+      return route.fulfill({ contentType: "application/javascript", body: "/* tailwind stub */" });
+    });
+    await p4.addInitScript(installMockNative);
+    await p4.addInitScript(([url, token]) => {
+      localStorage.setItem("config:sync", JSON.stringify({ url, token, enabled: true }));
+    }, [srvUrl, srvToken]);
+    await p4.goto("file://" + path.join(root, "index.html"));
+    await p4.waitForSelector("text=Start Stop", { timeout: 20000 });
+
+    await p4.fill('input[placeholder="Your name"]', "Dana");
+    await p4.click("text=Handover");
+    await p4.waitForSelector("text=MESSAGE FOR THE NEXT SHIFT", { timeout: 5000 });
+    await p4.fill("textarea", "Guard rail needs a look before the next run.");
+    await p4.fill('input[placeholder="e.g. Asla 2 coolant low"]', "Guard rail worn");
+    await p4.click("text=Add");
+    await p4.waitForSelector('img[alt="Shift handout"]', { timeout: 8000 });
+    await p4.click("text=Save image");
+
+    // Poll the server until the handover arrives (the app flushes on save).
+    let arrived = null;
+    for (let i = 0; i < 40 && !arrived; i++) {
+      const r = await fetch(`${srvUrl}/handovers?since=0`, { headers: { Authorization: `Bearer ${srvToken}` } })
+        .then((x) => x.json()).catch(() => ({ records: [] }));
+      arrived = (r.records || []).find((h) => h.operator === "Dana");
+      if (!arrived) await new Promise((r2) => setTimeout(r2, 500));
+    }
+    assert(arrived, "the handover never reached the server — client and server disagree on the route or payload key");
+    assert(/guard rail/i.test(arrived.note || ""), `the operator's message must reach the server, got ${JSON.stringify(arrived.note)}`);
+    assert((arrived.flags || []).some((f) => /guard rail worn/i.test(f.text)),
+      `the operator's flags must reach the server, got ${JSON.stringify(arrived.flags)}`);
+    await ctx4.close();
+    console.log("web-e2e: PASS — handout reached a live server.js end to end (route + payload key agree)");
+  } finally {
+    srv.kill();
+    rmSync(srvDir, { recursive: true, force: true });
+  }
 
   await browser.close();
   console.log("web-e2e: PASS — stop recorded immediately (operator=Alice, reason=" + chosenReason + ", duration=" + rec.duration + "ms)");

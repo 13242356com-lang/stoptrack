@@ -811,7 +811,7 @@ function saveImage(dataUrl, filename) {
         return { ok: false, error: "Couldn't save the image." };
     }
 }
-const stampOf = (s) => { var _a, _b, _c, _d; return (_d = (_c = (_b = (_a = s.updatedAt) !== null && _a !== void 0 ? _a : s.loggedAt) !== null && _b !== void 0 ? _b : s.end) !== null && _c !== void 0 ? _c : s.start) !== null && _d !== void 0 ? _d : 0; };
+const stampOf = (s) => { var _a, _b, _c, _d; return Math.min((_d = (_c = (_b = (_a = s.updatedAt) !== null && _a !== void 0 ? _a : s.loggedAt) !== null && _b !== void 0 ? _b : s.end) !== null && _c !== void 0 ? _c : s.start) !== null && _d !== void 0 ? _d : 0, Date.now()); };
 async function sha256Hex(str) {
     const K = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -1267,7 +1267,7 @@ const api = {
     async importAll(data) {
         if (!data || data.app !== "stoptrack")
             throw new Error("Not a StopTrack backup file.");
-        const counts = { stops: 0, production: 0, sessions: 0, configApplied: false };
+        const counts = { stops: 0, production: 0, sessions: 0, handovers: 0, configApplied: false };
         if (data.config) {
             const cur = await this.loadConfig();
             if (!cur || (Number(data.config.updatedAt) || 0) >= (Number(cur.updatedAt) || 0)) {
@@ -1575,6 +1575,7 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, onR
     const onCfgRef = useRef(onRemoteConfig);
     onCfgRef.current = onRemoteConfig;
     const runningRef = useRef(false);
+    const configRejectedRef = useRef(false);
     const enabled = !!(cfg && cfg.enabled && cfg.url);
     const flush = useCallback(async () => {
         var _a, _b, _c, _d, _e;
@@ -1633,11 +1634,16 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, onR
             }
             const localCfg = localCfgRef.current;
             const remoteCfg = await api.remoteGetConfig(c);
-            if (remoteCfg.ok && remoteCfg.config && (remoteCfg.updatedAt || 0) > ((localCfg === null || localCfg === void 0 ? void 0 : localCfg.updatedAt) || 0)) {
+            const clampAt = (v) => Math.min(Number(v) || 0, Date.now());
+            if (remoteCfg.ok && remoteCfg.config && clampAt(remoteCfg.updatedAt) > clampAt(localCfg === null || localCfg === void 0 ? void 0 : localCfg.updatedAt)) {
                 (_a = onCfgRef.current) === null || _a === void 0 ? void 0 : _a.call(onCfgRef, remoteCfg.config);
             }
-            else if (localCfg && (localCfg.updatedAt || 0) > (remoteCfg.ok ? (remoteCfg.updatedAt || 0) : 0)) {
-                await api.remotePutConfig(localCfg, c);
+            else if (localCfg && clampAt(localCfg.updatedAt) > (remoteCfg.ok ? clampAt(remoteCfg.updatedAt) : 0)) {
+                const put = await api.remotePutConfig(localCfg, c);
+                if (put.ok && put.data && put.data.applied === false)
+                    configRejectedRef.current = true;
+                else
+                    configRejectedRef.current = false;
             }
             const since = await api.getCursor();
             const pull = await api.remotePull(since, c);
@@ -1668,6 +1674,12 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, onR
                 await api.setCursor(handPull.serverTime, "hand");
             }
             const pending = (await api.getOutbox()).length;
+            if (configRejectedRef.current) {
+                setStatus({ online: true, lastSync: Date.now(), pending, syncing: false,
+                    error: "The server has newer settings — your last settings change wasn't applied." });
+                runningRef.current = false;
+                return;
+            }
             const pullErr = !pull.ok ? (pull.error || "Pull failed") : !prodPull.ok ? (prodPull.error || "Pull failed") : !sessPull.ok ? (sessPull.error || "Pull failed") : !handPull.ok ? (handPull.error || "Pull failed") : null;
             setStatus({ online: true, lastSync: Date.now(), pending, syncing: false, error: pullErr });
         }
@@ -2485,7 +2497,7 @@ function App() {
                     React.createElement("button", { onClick: startNewShift, className: "flex-1 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 rounded-lg" }, "Start new shift"),
                     React.createElement("button", { onClick: () => setNewShiftOpen(false), className: `px-4 ${t.sub} font-semibold` }, "Cancel"))))),
         manualOpen && (React.createElement(ManualStopModal, { t: t, dark: dark, machine: machine, machines: machines, reasons: reasons, quickStops: quickStops, lastReason: lastReason, saving: saving, saveError: saveError, onSave: handleManualSave, onClose: () => setManualOpen(false) })),
-        handoverOpen && (React.createElement(ShiftHandoverModal, { t: t, dark: dark, reportBase: buildShiftReport({ operator, machine, myStops: shiftStops, myShift, clearedBefore: shiftStart, activeShift, goalStatus }), handoverEmails: handoverEmails, syncCfg: syncCfg, lastHandover: handovers[0] || null, onSaved: (rec) => { setHandovers((prev) => [rec, ...prev.filter((h) => h.id !== rec.id)]); sync.flush(); }, onClose: () => setHandoverOpen(false) }))));
+        handoverOpen && (React.createElement(ShiftHandoverModal, { t: t, dark: dark, reportBase: buildShiftReport({ operator, machine, myStops: shiftStops, myShift, clearedBefore: shiftStart, activeShift, goalStatus }), handoverEmails: handoverEmails, syncCfg: syncCfg, lastHandover: handovers.find((h) => !h.machine || h.machine === machine) || null, onSaved: (rec) => { setHandovers((prev) => [rec, ...prev.filter((h) => h.id !== rec.id)]); sync.flush(); }, onClose: () => setHandoverOpen(false) }))));
 }
 function OperatorView(props) {
     const { t, operator, setOperator, machine, setMachine, timer, onStop, pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError, myStops, visibleStops, machines, reasons, quickStops, applyQuickStop, lastReason, shift, shifts, shiftId, onSelectShift, shiftStart, hiddenStopCount, onNewShift, showAll, onToggleShowAll, setupLocked, onLockSetup, onUnlockSetup, onOpenManual, syncStatus, syncOn, rates, myProduction, onSaveProduction, myShift, goalStatus, onOpenHandover, } = props;

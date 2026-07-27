@@ -136,7 +136,69 @@ test("handovers round-trip through the sync contract", async () => {
   assert.equal(back.note, rec.note, "the operator's message must survive the round trip");
   assert.equal(back.flags[0].text, "Guide rail worn", "the operator's flags must survive too");
 
-  // `since` must page it like every other collection.
-  const later = await req("GET", `/handovers?since=${Date.now() + 60_000}`);
-  assert.equal(later.data.records.length, 0, "a future cursor should return nothing");
+  // `since` must actually PAGE: a cursor taken before the write returns it, one
+  // taken after does not. (Asserting only that a future cursor is empty would
+  // pass even with `since` filtering removed entirely.)
+  const before = (await req("GET", `/handovers?since=${rec.createdAt - 1000}`)).data.records;
+  assert.ok(before.some((r) => r.id === id), "a cursor from before the write must return it");
+
+  const cursor = Date.now();
+  await new Promise((r) => setTimeout(r, 5));
+  const after = (await req("GET", `/handovers?since=${cursor}`)).data.records;
+  assert.ok(!after.some((r) => r.id === id), "a cursor from after the write must not return it again");
+});
+
+test("a store poisoned BEFORE the clamp existed is repaired at boot", async () => {
+  // The clamp alone was not enough: a stored future stamp re-clamps to the
+  // CURRENT now on every read, so it ties or beats every honest write forever —
+  // the store stayed permanently unfixable through the API.
+  const dir = mkdtempSync(path.join(tmpdir(), "stoptrack-poisoned-"));
+  const poisoned = Date.now() + 5 * YEAR_MS;
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(path.join(dir, "stoptrack-data.json"), JSON.stringify({
+    stops: { "1700000000000-1": { id: "1700000000000-1", machine: "Line 1", operator: "A",
+      start: 1700000000000, end: 1700000001000, duration: 1000, discarded: false, updatedAt: poisoned } },
+    production: {}, sessions: {}, handovers: {},
+    config: { config: { machines: ["POISONED"] }, updatedAt: poisoned },
+  }));
+
+  // A distinct port: server.js treats PORT=0 as falsy and falls back to 4000,
+  // which the shared instance above already holds.
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  const p2 = spawn(process.execPath, [serverPath], {
+    env: { ...process.env, FACTORY_TOKEN: TOKEN, PORT: String(port), DATA_DIR: dir },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const base2 = await new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error("no start")), 10000);
+    p2.stdout.on("data", (c) => {
+      const m = String(c).match(/http:\/\/(?:localhost|127\.0\.0\.1):(\d+)/);
+      if (m) { clearTimeout(t); resolve(`http://127.0.0.1:${m[1]}`); }
+    });
+  });
+  const call = async (method, route, body) => {
+    const r = await fetch(`${base2}${route}`, {
+      method, headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return r.json().catch(() => ({}));
+  };
+
+  try {
+    const edit = await call("PUT", "/config", { config: { machines: ["Supervisor edit"] }, updatedAt: Date.now() });
+    assert.equal(edit.applied, true, "a supervisor edit must be able to beat a pre-existing poisoned config");
+    assert.deepEqual((await call("GET", "/config")).config.machines, ["Supervisor edit"]);
+
+    await call("POST", "/stops", {
+      stops: [{ id: "1700000000000-1", machine: "Line 1", operator: "A",
+        start: 1700000000000, end: 1700000001000, duration: 1000,
+        discarded: true, discardedAt: Date.now(), updatedAt: Date.now() }],
+    });
+    const got = await call("GET", "/stops?since=0");
+    assert.equal(got.stops.find((s) => s.id === "1700000000000-1").discarded, true,
+      "a discard must stick against a record poisoned before the fix");
+  } finally {
+    p2.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
