@@ -1,255 +1,249 @@
 # StopTrack — improvement backlog
 
-Maintained by the **scout** agent (`.claude/agents/scout.md`), refreshed on a weekly
-Routine. Ranked by (value × confidence) ÷ effort. The scout reads this file before each
-run, so items get **re-ranked and marked done** rather than re-proposed.
+Maintained by the **scout** agent (`.claude/agents/scout.md`), refreshed on a daily
+Routine (16:00 UTC). Ranked by (value × confidence) ÷ effort. The scout reads this
+file before each run, so items get **re-ranked and marked done** rather than
+re-proposed.
 
-- **Last updated:** 2026-07-26 (scouting run #1)
-- **Baseline:** branch `claude/samsung-watch-wear-os-egbl0d`, v0.6, `npm test` green.
+- **Last updated:** 2026-07-27 (scouting run #2)
+- **Baseline:** `main` @ v0.7. `npm test` green (7 server cases, 4 browser phases).
 - Items marked ⚑ were **reproduced empirically**, not just read.
 
-> Owner: feel free to annotate items (`— skip, we don't care about X`). The scout is
-> told to preserve annotations across runs.
+> Owner: annotate freely (`— skip, we don't care about X`). The scout preserves
+> annotations across runs.
+
+## Shipped since run #1 — verified in code
+
+#1 clock skew (partly — see item 5), #2 handovers sync, #3/#11 `showAll` split +
+unnamed-operator guard, #4 clock-derived shift window (partly — see item 6),
+#7 signing script + release warning (secrets still not added). `npm run build` is
+reproducible; no drift between `StopTrack.tsx` and `index.html`.
 
 ---
 
-## 1. ⚑ A wrong device clock permanently poisons shared config and any stop it touches
+## 1. ⚑ The sync pull cursor silently drops records — roughly half of all stops never reach a second device
 
-**Why now.** Reproduced against the real `server/server.js`. A device whose clock reads
-2036 pushes `config.updatedAt` far in the future. From then on the supervisor's edits
-return `{"ok":true}` and are **silently discarded**, and within 25 s the sync pull
-overwrites the supervisor's local state — machines/reasons/shifts/rates/PIN revert
-forever, no error anywhere. Same for records: a future-stamped stop makes **discard and
-"Delete forever" silently un-do themselves** on the next pull.
+The worst item on this list: nothing is corrupted, data is simply **lost from the
+supervisor's view** while sitting on the server the whole time, with no error.
 
-```
-PUT /config updatedAt=2100449021000 {"machines":["SKEWED"]}      -> {"ok":true}
-PUT /config updatedAt=1785089021000 {"machines":["Supervisor…"]} -> {"ok":true}
-GET /config -> machines:["SKEWED"]        # the supervisor's edit is gone
-```
-
-Only recovery is hand-editing `server/data/stoptrack-data.json`. Cheap phones with no
-SIM and no NTP are exactly the fleet this ships to.
-
-- **Where:** `server/server.js:383` (config LWW), `:327` (stops LWW), `:140` (`stampOf`);
-  `StopTrack.tsx:1409-1413`, `:1774-1788`, `:695`; mirrored in
-  `android/mobile/.../PhoneStore.kt:75`, `android/shared/.../Lww.kt:31`.
-- **Effort:** S–M. Server: clamp `incomingAt` to `min(incoming, now + 5min)`; return
-  `{ok:true, applied:false}` when a write loses so the client can surface it. Client:
-  same clamp + a visible "this device's clock is wrong" banner.
-- **Risk:** Clamp only the **future** side — a device that's behind (offline a day) must
-  not lose a legitimately newer edit. `server/` has **zero tests**; ship this with a
-  `node:test` file replaying the sequence above.
-
-## 2. Shift handovers never leave the device — the supervisor's half of v0.6 is dead
-
-**Why now.** Handouts write to `hand:` keys and nothing else: `saveHandover` is the only
-collection saver with no `_enqueue`, there's no `/handovers` route, and `Collection` has
-no `HANDOVERS`. In the intended setup (operator on a phone, supervisor opening the
-server URL) **Supervisor → Shift handovers is permanently empty**, and carry-forward only
-works if the next operator uses the same physical phone.
-
-- **Where:** `StopTrack.tsx:998-1005`, `:978-996`, `:3112`, `:3702`; `server/server.js`
-  (routes end at `/report`); `android/shared/.../SyncContract.kt:31-37`.
-- **Effort:** M — same shape as `/sessions`, which already works end to end. Add the enum
-  member, one GET/POST pair, push/pull + cursor in `useSync`, `_enqueue` in `saveHandover`.
-- **Risk:** Low. Keep `saveHandover` non-blocking; add a test asserting the record leaves
-  storage.
-
-## 3. ⚑ "Show all" silently inflates the shift board — and the handout built from it
-
-**Why now.** Measured on the real `index.html`:
+A stop is stamped `updatedAt = end` (`StopTrack.tsx:2156`) but pushed on the next
+25 s flush. The puller stores `serverTime` as its cursor (`:1478`) and the server
+filters `stampOf(s) > since` (`server/server.js:353`). So any stop that *ended*
+before the other device's last poll is invisible to it — permanently, since the
+cursor only moves forward. Reproduced against the real server:
 
 ```
-default view:      Stops=1  Downtime=5m
-after 'Show all':  Stops=4  Downtime=2h 5m
+supervisor cursor = 1785248321745
+operator pushes a stop that ended 60s ago -> {"ok":true,"applied":1}
+supervisor's next pull (since=cursor):  0 stop(s)
+server actually holds:                  1 stop(s)
 ```
 
-`showAll` is meant to be a *view* toggle for the Recent list, but it feeds `myStops` →
-the stat cards, the by-reason chart, OEE, **and `buildShiftReport`**. Tap it out of
-curiosity, then tap Handover, and the card sent to the supervisor claims 4 stops / 2h 5m
-for a window its own header dates from the cutoff. OEE is worse than wrong: manned time
-is clipped to the cutoff while downtime isn't, so availability collapses toward 0. Same
-family as the `loggedAt` bug this project already paid for once.
+~50% of stops in steady state with both devices polling, and **100% of anything
+logged during an offline gap** — the scenario the app is sold on. Identical for
+`/production` `:378`, `/sessions` `:399` and the new `/handovers` `:443`.
 
-- **Where:** `StopTrack.tsx:2149-2153`, `:2143`, `:2360`, `:2390-2404`, `:2168-2221`.
-- **Effort:** S. Split `shiftStops` (always cutoff-filtered → stats, OEE, report) from
-  `visibleStops` (`showAll`-aware → the Recent list only).
-- **Risk:** Easy to get backwards, and nothing today would catch it — the e2e never sets
-  `clearedBefore`. Add a case that seeds a pre-cutoff stop, toggles Show all, and asserts
-  the Stops card stays at the in-shift count. Do together with #11.
+- **Effort:** M. Stamp a monotonic server-receipt sequence on write and filter GET
+  on that, returning it as the cursor. Keep `updatedAt` for LWW — **the delivery
+  clock and the merge clock must be separate.** Records with no sequence fall back
+  to `stampOf`, so existing stores keep working.
+- **Risk:** Confusing the two clocks either re-delivers everything (harmless,
+  chatty) or repeats this bug. Ship with item 2.
 
-## 4. Shift boundaries only move when someone taps "New Shift"
+## 2. No test proves a record travels from one device to another
 
-**Why now.** `clearedBefore` is written in exactly one place — the button. Shifts already
-have real configured times and `shiftEndAt()` rolls over, but the cutoff never does. Forget
-the button once and: "THIS SHIFT" accumulates for days; the goal card compares multi-day
-output against a one-shift goal; and **production records collide** — the id is
-`${machineSlug}|${clearedBefore}|${operator}`, so today's units *overwrite* yesterday's and
-the supervisor's history disappears with no trace.
+Every gate is green while item 1 is live. `test/web-e2e.mjs:380-430` boots a real
+server and asserts a handover *arrives*; it never opens a second client and never
+asserts anything *comes back*. The whole pull path — cursor arithmetic,
+`applyRemote*`, the cursor names — is uncovered.
 
-- **Where:** `StopTrack.tsx:2132-2140`, `:2052-2072`, `:2183-2186`, `:2226-2233`, `:86-94`.
-- **Effort:** M. Derive the window from the selected shift's clock time; keep the button as
-  a manual "start early". Key the production id on the derived instant.
-- **Risk:** Real — touches the definition of "this shift" everywhere, including existing
-  production ids (must fall back to the stored `shiftStart`). Do after #3.
+- **Effort:** S. Extend phase 4 with a second browser context against the same
+  server; assert the first context's stop appears in the second's storage. Plus a
+  server case: pull (capture cursor) → POST a record stamped 30 s earlier → pull
+  with that cursor → expect it.
+- **Risk:** Timing flake — drive `sync.flush()` rather than sleeping past the 25 s
+  interval.
 
-## 5. ⚑ localStorage fills at ~20,600 stops — then nobody can log a stop, on every device at once
+## 3. CSV exports are formula-injectable *(carried, unchanged)*
 
-**Why now.** Measured in Chromium: `QuotaExceededError` at **20,562** records (~5 MB).
-`loadStops` only purges `discarded`/`deleted` records; active history is never pruned and
-"New Shift" deliberately deletes nothing. Past the ceiling the operator sees "The stop
-didn't save" forever with no in-app remedy. With sync on, every device pulls the entire
-shared history from cursor 0 (no pagination), so a 3-line plant at ~90 stops/day hits the
-wall in ~7 months and **every phone hits it the same week**. Separately: the supervisor log
-renders every filtered row — 3,324 ms for 5,000 rows on desktop-class headless Chromium,
-re-rendered on every search keystroke.
-
-- **Where:** `StopTrack.tsx:849-873`, `:876-888`, `:2793-2802`, `:3004-3016`;
-  `server/server.js:313-317`.
-- **Effort:** M in three small parts: (a) local retention window, purging only what sync
-  has confirmed; (b) cap the supervisor table ~200 rows with "show more" (exports stay
-  unfiltered); (c) `limit`/`since` paging on `GET /stops`.
-- **Risk:** (a) is the dangerous one — purging records the server never received is exactly
-  this project's historical failure mode. Gate on `syncCfg.enabled && outbox empty &&
-  cursor > record.updatedAt`; never purge on a device that has never synced.
-
-## 6. The phone's loopback API is unauthenticated, CORS-`*`, and opts into Private Network Access
-
-**Why now.** `SECURITY.md` frames this as "another app on the same phone". It's broader.
-The server binds a fixed `127.0.0.1:4000`, `authOk` returns true when the token is blank,
-the token **is** blank (`NativeBridge.token()` returns `""`), and every response carries
-`Access-Control-Allow-Origin: *` **plus** `Access-Control-Allow-Private-Network: true` —
-the header that tells Chrome to let a public page reach loopback. So any page the operator
-opens in the phone's browser (an ad frame, a QR link) can read the whole log, or POST
-`{deleted:true}` tombstones that propagate through the phone to the real server and delete
-records everywhere.
-
-- **Where:** `MainActivity.kt:215-217`, `LocalSyncServer.kt:108-112` & `:143-150`,
-  `Prefs.kt:41,56`, `CompanionService.kt:95-97`.
-- **Effort:** S–M code, **blocked on hardware** for verification. Generate a random
-  `localToken` on first run, return it from `token()` (the web app already stores whatever
-  it returns), drop the PNA header, narrow `Allow-Origin`.
-- **Risk:** Getting it wrong bricks the phone app's sync silently. Sequence it: token
-  first, CORS second; keep `syncUrl()`/`token()` atomic.
-
-## 7. Release APKs are signed with a key that changes every CI run
-
-**Why now.** The four signing secrets still aren't set, so both apps fall back to the debug
-config — and a fresh GitHub runner has no debug keystore, so Gradle **generates a different
-certificate every run**. Today's APK won't install over yesterday's; the operator must
-uninstall, which drops localStorage and `companion-data.json` — every stop not yet synced
-or backed up. Across two builds the phone and watch also stop sharing a certificate, so
-Wear pairing breaks with no interpretable error. CI only emits a `::warning::` and
-publishes anyway.
-
-- **Where:** `android/mobile/build.gradle.kts:57` (+ wear), `.github/workflows/android.yml`,
-  `android/SIGNING.md:9-11`.
-- **Effort:** S for the guard (skip publishing, or rename `-UNSIGNED-do-not-distribute`,
-  when the secret is absent). The real fix is **10 minutes of owner action** — nothing in
-  the repo can do it.
-- **Risk:** A hard failure turns `main` red until the secrets are added. That's the point;
-  just don't make it a surprise.
-
-## 8. The PLC gateway cannot deliver a single stop into StopTrack — but the README says it can
-
-**Why now.** `gateway/` is a complete, tested subsystem (S7, OPC UA, sim, rules engine,
-6 pytest files in CI) whose only sinks are **console and file**; `VALID_SINKS` rejects
-anything else. Its event shape isn't a StopTrack record either. Micro-stops are the
-downtime operators never log and the biggest hidden loss on most lines — this is the
-highest-value *new* capability in the repo and it's one adapter away.
-
-- **Where:** `gateway/plc_gateway/sinks/`, `config.py:94-108`, `core/events.py:22-45`;
-  target `server/server.js:319-332`. (README claim: `README.md`.)
-- **Effort:** M, and **fully runnable in this session** (Python + the zero-dep Node server
-  are both here). A `StopTrackSink(url, token)` mapping `stop_ended` → a real record with
-  an on-disk outbox. Add an `auto` badge beside the existing `manual` one.
-- **Risk:** A chatty PLC can flood the store — batch and respect the server's 429. Auto
-  stops must never be attributed to a human, or by-operator analytics become fiction.
-
-## 9. The plain-browser stop flow — the one most operators run — has no test at all
-
-**Why now.** `test/web-e2e.mjs` installs the mock native bridge unconditionally, so
-`inShell` is always true. The browser branch (`useTimer` pause/resume banking,
-`handleStop`, `pendingStop`) is never executed by any test — yet it's the path for anyone
-opening `index.html` in Chrome, and the one CI and the Stop hook certify as green.
-
-- **Where:** `test/web-e2e.mjs:105`; `StopTrack.tsx:1253-1345`, `:1944-1953`, `:2237-2244`.
-- **Effort:** S. Factor the drive-a-stop sequence and run it twice, with and without the
-  mock; in the browser pass add Pause → wait → Resume → End asserting the recorded
-  duration excludes the paused span.
-- **Risk:** None to the product. Use a tolerance window, not an exact number, or it flakes.
-
-## 10. CSV exports are formula-injectable
-
-**Why now.** `exportCSV` quotes and doubles `"` but ignores a leading `=`, `+`, `-`, `@`.
-Every field is user-controlled free text (machine/reason names, operator, notes, discard
-explanations). An operator typing `=HYPERLINK(...)` into a note turns the supervisor's
-Excel open into code execution — and the export is explicitly the artifact meant to leave
+`StopTrack.tsx:3096` quotes `"` but never neutralises a leading `=`, `+`, `-`, `@`.
+Machine names, reasons, operator names, notes and discard explanations are all
+free text typed on the floor, and the CSV is explicitly the artifact that leaves
 the building.
 
-- **Where:** `StopTrack.tsx:2928-2933`.
-- **Effort:** S — prefix `'` when a cell starts with `=+-@`, tab or CR. ~10 lines + a test.
-- **Risk:** Nil. Nothing tests exports today; pair with a round-trip assertion.
+- **Effort:** S — ~10 lines. **Risk:** nil; add a round-trip assertion.
 
-## 11. With the operator name blank, the board shows *everyone's* stops and calls it "this shift"
+## 4. ⚑ The supervisor's custom date range is parsed as UTC
 
-**Why now.** `myStops` filters by operator only when a name is set, and an unlocked session
-**starts blank on every refresh by design** — so this is the default at shift start, after
-any refresh, and after "Unlock name". With sync on, the device holds the whole factory's
-records: the board reads plant-wide stops under "THIS SHIFT", OEE is computed from other
-people's downtime, and a Handover tap sends plant-wide numbers under one machine's name.
+`new Date("2026-07-01")` is UTC midnight. Measured under `TZ=Europe/Berlin`,
+picking 1 Jul → 1 Jul yields `01/07 02:00 → 02/07 02:00`: the night shift's
+22:00–02:00 lands on the wrong date and Jul 1's first two hours vanish. Quietly
+wrong for every deployment not on UTC, and it feeds both exports.
 
-- **Where:** `StopTrack.tsx:2149-2153`, `:1708-1714`, `:2645`.
-- **Effort:** S. Either gate the board until a name is entered, or label it "All operators
-  on this device".
-- **Risk:** Low — make the empty state a prompt, not a dead screen. Fold into #3.
+- **Where:** `StopTrack.tsx:2951-2952`, consumed at `:2961`, `:3095`, `:3100`.
+- **Effort:** S — parse as local. **Risk:** none; pin the test to a non-UTC `TZ`,
+  since CI runs UTC where the bug is invisible.
 
-## 12. If a CDN fetch fails during the APK build, the phone app silently becomes online-only
+## 5. The clock-skew fix is half a fix — the client discards the `serverTime` it already receives
 
-**Why now.** `build-web-asset.mjs` inlines React and Tailwind so the bundled app works with
-no signal — the whole reason the APK exists. On a fetch failure it warns and **continues**,
-and Gradle packages the CDN-referencing asset. The emulator smoke test can't catch it (CI
-has internet); the failure shows up only on a factory phone with no signal.
+`stampOf` clamps to `Date.now()` (`:727`) — but on a phone whose clock reads +1
+year, `Date.now()` *is* +1 year, so the clamp is a no-op **on the device that has
+the problem**. Its local copy keeps the future stamp, a supervisor's discard loses
+the comparison at `:1883` and is not applied there; if it ever re-pushes, the
+un-discarded copy wins on the server too. Every response already carries
+`serverTime` and `useSync` throws it away (`:1441`, `:1475`).
 
-- **Where:** `android/mobile/build-web-asset.mjs:41-48`, `build.gradle.kts` (`prepareWebAsset`).
-- **Effort:** S. Exit non-zero on any failed inline for a release build, or assert the
-  emitted asset contains no `src="https://` before packaging.
-- **Risk:** Ties release builds to CDN reachability — keep the lenient path for local dev.
+Also: `configRejectedRef` is only cleared inside the local-newer branch, so a
+rejected settings warning sticks until the supervisor edits again — and the early
+`return` at `:1504` suppresses every other sync error meanwhile.
+
+- **Effort:** M. Persist `serverOffset = serverTime - Date.now()`; clamp against
+  `Date.now() + serverOffset`; banner when `|offset| > 5 min`. Reset the rejected
+  flag at the top of each flush.
+- **Risk:** `stampOf` feeds eight merge sites — a sign error makes every remote
+  record win. Test with a monkey-patched `Date.now`.
+
+## 6. Shift-window edges: the handout can go out empty, and production re-keys
+
+Both from the v0.7 reform, which was still the right call.
+
+- `shiftStart` moves on the clock, and the production record id embeds it
+  (`:2177`, looked up `:2199`) — so at the boundary `myProduction` becomes null,
+  `ShiftOutputCard` blanks the typed units (`:3546-3549`), and re-entering makes a
+  **second** record that the supervisor's day total double-counts.
+- `buildShiftReport` is fed `shiftStops` (`:2513`), so an operator working 2 h past
+  shift end who taps Handover hands the next shift a card reading **"0 stops · 0m"**
+  for eight hours they worked.
+- ⚑ **DST:** under `TZ=Europe/Berlin` on spring-forward, a 22:00–06:00 shift
+  resolves to a window starting 21:00 — `start -= 24*60*60*1000` (`:116`) and
+  `shiftLengthMs` are wall-clock-minute arithmetic.
+- **Effort:** M. Key production on `shiftId` + the local calendar date; anchor the
+  handout to the shift occurrence; derive window edges by setting hours on a
+  `Date`, not adding fixed ms.
+- **Risk:** Old production ids must still resolve. The e2e pins a shift containing
+  `now`, so it can't see a boundary re-key — add a crossing case.
+
+## 7. The phone bridge's push cursor permanently strands a late watch stop
+
+`RemoteForwarder` pushes `store.since(collection, pushCursor)` where the cursor is
+the max record stamp already pushed. A watch logs at 10:00 out of range; the phone
+forwards its own 10:05 stop; the watch reconnects at 10:10 and delivers 10:00 —
+`since(10:05)` excludes it and **it never leaves the phone at all**. Same root
+cause as item 1, strictly worse. The web client got this right with an explicit
+outbox of keys; make the phone match.
+
+- **Where:** `RemoteForwarder.kt:22-30`, `PhoneStore.kt:62-63`.
+- **Effort:** S code, **blocked on hardware** (emulator CI or a real device).
+- **Risk:** Clear the dirty set only on a 2xx.
+
+## 8. The loopback API is unauthenticated — and the one control that exists breaks the app *(carried, refined)*
+
+`authOk` returns true when the token is blank, and responses carry
+`Access-Control-Allow-Origin: *` **plus** `Access-Control-Allow-Private-Network:
+true` — the header that lets a public page reach loopback. Any page the operator
+opens can read the log or POST `{deleted:true}` tombstones the phone forwards
+onward. **New:** a `localToken` field exists and is editable, but the bridge
+hard-codes `fun token(): String = ""` (`MainActivity.kt:215`) — so an owner who
+sets a token to close the hole gets 401s and sync silently dies. That's a trap.
+
+- **Effort:** S–M, **blocked on hardware**. Random token on first run, return it
+  from `token()`, drop the PNA header, narrow `Allow-Origin`. Token first.
+
+## 9. localStorage fills at ~20,600 stops — and the first sync stops completing long before *(carried, refined)*
+
+Active history is never pruned (`:895-898`); past the ceiling the operator sees
+"The stop didn't save" forever. **New:** the first-enable push sends the entire
+history in one request against an 8 s timeout — ~750 KB at 3,000 stops, which
+times out on factory LTE, never clears the outbox, and re-uploads every 25 s
+forever.
+
+- **Effort:** M in three independent parts: **(a) chunk the push (~15 lines — do
+  this first)**, (b) cap the supervisor table at ~200 rows, (c) bounded local
+  retention.
+- **Risk:** (c) is this project's historical failure mode — gate on
+  `syncEnabled && outbox empty && cursor > record stamp`, never purge on a device
+  that has never synced.
+
+## 10. The browser stop flow — pause/resume banking — is still untested *(carried, partly addressed)*
+
+Phases 2–3 now boot without the mock, so the browser *render* path is covered. But
+the mock is still installed for every phase that **drives a stop**, so `useTimer`'s
+pause/resume banking, `handleStop` and `pendingStop` have never been executed by
+any test — the path for everyone who just opens `index.html` in Chrome.
+
+- **Effort:** S. Run the drive-a-stop sequence once without the mock, with a
+  Pause → wait → Resume → End leg asserting the paused span is excluded.
+
+## 11. The PLC gateway still cannot deliver a stop — and the README says it can *(carried)*
+
+`VALID_SINKS = ("console", "file")`. Micro-stops are the downtime operators never
+log and usually the biggest hidden loss on a line; this is the highest-value *new*
+capability in the repo and it's one adapter away.
+
+- **Effort:** M, **fully runnable in this session**. `StopTrackSink(url, token)`
+  mapping `stop_ended` → a real record with an on-disk outbox, plus an `auto` badge.
+- **Risk:** Batch and honour 429. Auto stops must never carry a human operator name.
+  **Until it exists, fix the README sentence — that part is 2 minutes.**
+
+## 12. An operator can't correct a stop they just logged
+
+Reason is a dropdown tapped with gloves right after an outage, often mis-preselected.
+Once saved, Recent-stops rows are inert divs — the only remedy is a supervisor
+Discard with a written explanation. Realistic outcome: a permanently mis-attributed
+reason feeding the by-reason chart and the handout. `api.updateStop` already exists.
+
+- **Effort:** M. Tappable for ~15 min after `loggedAt` → reason chips + notes.
+- **Risk:** Must never change `start`/`end`/`duration`/`loggedAt` or the stop moves
+  between shifts — the `loggedAt` lesson. Assert that in a test.
+
+## 13. Supervisor analytics rank machines by minutes only — not frequency or money
+
+40 × 2-minute stops and one 80-minute stop look identical but are completely
+different problems. And "which machine is costing me most this month" has no answer:
+rates are units/hour only.
+
+- **Effort:** M. Add stop count + mean duration (~20 lines, data is already there),
+  then an optional per-machine cost-per-hour and a column that appears only when set.
+- **Risk:** Keep cost opt-in and blank by default, and currency-agnostic.
+
+## 14. A failed CDN inline silently ships an online-only APK *(carried)*
+
+`build-web-asset.mjs:42-46` warns and continues, so Gradle packages a
+CDN-referencing asset. The emulator test can't catch it (CI has internet); it
+surfaces only on a factory phone with no signal, as a blank app.
+
+- **Effort:** S — exit non-zero on a failed inline for release builds.
 
 ---
 
 ## TOP 3 NEXT
 
-1. **#1 — clamp the LWW clock.** The only item where the app *lies*: the supervisor's edit
-   and their discard both report success, then quietly undo themselves, permanently, with
-   no recovery but editing JSON on the server. Everything else degrades; this destroys
-   intent silently.
-2. **#2 — sync the handovers.** v0.6's headline feature is half-shipped — the operator
-   writes the handover and the supervisor's log is empty on any multi-device setup. The
-   `/sessions` plumbing already exists to copy.
-3. **#3 — split `showAll` from the shift stats.** An hour's work, measured proof it's wrong,
-   and it corrupts the one document that leaves the app and goes to a human who wasn't
-   there. Shares a function with #11.
+1. **#1 — fix the sync pull cursor, with #2's two-device test in the same PR.**
+   Everything else degrades something; this one *loses* something. Reproducible in
+   under a minute, and every gate in the repo is green while it happens.
+2. **#3 + #4 together — CSV injection and the UTC date range.** Both small, both
+   provably wrong today, both in the export path — the artifact that leaves the
+   building. One afternoon.
+3. **#6 — stabilise the shift-window arithmetic.** v0.7 left two edges that produce
+   a *confidently wrong document*: a handout claiming "0 stops" for a worked shift,
+   and a double-counted day total. Same class as the `loggedAt` bug already paid for.
 
-*(#5 is next in the queue: a dated time-bomb — ~20,600 stops — that takes out every device
-in the same week, and it needs designing before it's urgent, not after.)*
+*(Not code, still real: the four APK signing secrets. Until they're added, every CI
+build gets a fresh certificate, so the app can't be updated in place.)*
 
 ## NOT WORTH DOING
 
-- **Moving the WebView off `file://` onto the loopback server.** `SECURITY.md` calls this
-  the "proper fix", but it makes the app's ability to *render at all* depend on the in-app
-  HTTP server starting — converting a defense-in-depth concern into a new single point of
-  failure for the operator's whole UI. Do #6 (the token) instead: closes the reachable
-  attack for a fraction of the blast radius.
-- **Migrating storage to IndexedDB** to escape the 5 MB ceiling. Rewrites the entire `api`
-  backend chain to buy headroom the app shouldn't need — the server is the system of
-  record. Bounded local retention (#5a) is ~30 lines and fixes the real issue.
-- **Real-time sync (WebSocket/SSE) instead of the 25 s poll.** Downtime is minutes-scale;
-  nobody watches the board for sub-25-second latency. It adds a persistent connection on
-  battery-limited phones and a stateful path through the tunnel for nothing anyone would
-  notice — and the poll is what makes offline-tolerance trivial.
-- **Refactoring `StopTrack.tsx` (3,810 lines) into modules, or adding real types.**
-  Tempting at this size, but the single-file constraint and committed build pipeline are
-  load-bearing, and every bug on this list is a logic or contract bug that no module
-  boundary or type would have caught.
+- **Moving the WebView off `file://` onto the loopback server.** `SECURITY.md` calls
+  it the "proper fix", but it makes the app's ability to *render at all* depend on
+  the in-app HTTP server starting — a new single point of failure for the whole
+  operator UI, on hardware nobody here can test. Do #8's token instead.
+- **Rejecting future-stamped writes instead of clamping them.** A phone with a wrong
+  clock still belongs to an operator logging real stops; rejecting its writes
+  discards the shop floor's data at the door. Clamping keeps the data and demotes
+  the stamp. The missing half is telling the human (item 5), not tightening the server.
+- **Real-time sync (WebSocket/SSE) instead of the 25 s poll.** Item 1 shows the
+  delivery problem is cursor semantics, not latency — a push channel would have
+  shipped the identical bug plus a persistent connection on battery-limited phones.
+- **Refactoring `StopTrack.tsx` (3,975 lines) into modules, or adding types.**
+  Re-listed because the file grew again. Every bug above is a contract, clock or
+  timezone bug; not one would have been caught by a module boundary or a type.
