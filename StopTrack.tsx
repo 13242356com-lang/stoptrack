@@ -1821,7 +1821,9 @@ export default function App() {
         // An open off-machine span survives a reload. It carries its own
         // operator/machine so it stays correctly attributed even when the setup
         // wasn't locked; a span older than this shift is dropped further down.
-        if (prefs.offMachine && prefs.offMachine.start) setOffMachine(prefs.offMachine);
+        // `restored` marks it for the one-time staleness check below; a live
+        // span never carries it, so New Shift can't discard one.
+        if (prefs.offMachine && prefs.offMachine.start) setOffMachine({ ...prefs.offMachine, restored: true });
         // Only a *locked* setup carries the name/machine across a refresh.
         // An unlocked session intentionally starts blank each load.
         if (prefs.setupLocked) {
@@ -1862,8 +1864,11 @@ export default function App() {
       setSessions(records);
       setLoading(false);
 
-      // A locked setup means "I'm working" — presence resumes on load.
-      if (prefs && prefs.setupLocked && prefs.operator) {
+      // A locked setup means "I'm working" — presence resumes on load. Not while
+      // an off-machine span is being restored, though: the operator is away from
+      // every machine, and opening presence here would credit manned time to a
+      // machine they aren't standing at.
+      if (prefs && prefs.setupLocked && prefs.operator && !(prefs.offMachine && prefs.offMachine.start)) {
         openSession(prefs.machine || (cfg?.machines?.[0]) || DEFAULT_MACHINES[0], prefs.operator);
       }
 
@@ -2021,8 +2026,12 @@ export default function App() {
     // operator/machine/setupLocked are persisted so a locked setup survives a
     // page refresh. When unlocked we still write them, but the loader ignores
     // operator/machine unless setupLocked is true.
-    api.savePrefs({ dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId, ...patch });
-  }, [dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId]);
+    // EVERY persisted pref must be listed here: savePrefs REPLACES the blob, so
+    // anything missing from this base is erased by an unrelated write. (An open
+    // `offMachine` span used to vanish the moment someone tapped the dark-mode
+    // toggle, losing the operator's away time silently.)
+    api.savePrefs({ dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId, offMachine, ...patch });
+  }, [dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId, offMachine]);
 
   const updateMachines = (next) => { setMachines(next); persistConfig({ machines: next }); };
   const updateReasons = (next) => { setReasons(next); persistConfig({ reasons: next }); };
@@ -2143,6 +2152,9 @@ export default function App() {
   const lockSetup = () => {
     setSetupLocked(true);
     persistPrefs({ setupLocked: true, operator, machine });
+    // While off machine there is deliberately no open span: opening presence
+    // here would put manned time on a machine the operator isn't standing at.
+    if (offMachine) return;
     const open = openSessRef.current;
     if (!open) openSession(machine, operator);
     else if (open.operator !== operator.trim()) { closeSession(); openSession(machine, operator); }
@@ -2189,30 +2201,43 @@ export default function App() {
   // this, because under this model a false "absent" reading would FABRICATE
   // downtime on a machine, and downtime is the number the app exists to be
   // trusted on.
+  // Is a stop being timed right now? In the Android shell the live timer is the
+  // NATIVE one. Before the first state push `nativeTimer` is still null, and an
+  // unknown timer must count as BUSY: a cold start from the notification while a
+  // stop is already running would otherwise let a span open on top of it.
+  const timerBusy = inShell
+    ? (nativeTimer == null || nativeTimer.running || nativeTimer.paused || !!nativePending)
+    : (timer.state.running || timer.state.paused || !!pendingStop);
+
+  const [offError, setOffError] = useState("");
+  const offSavingRef = useRef(false);
+
   const startOffMachine = useCallback(() => {
     // A timed stop already accounts for this machine being down; opening an
-    // off-machine span on top of it would double-count the same minutes. In the
-    // Android shell the live timer is the NATIVE one, so check that instead.
-    const ts = inShell ? nativeTimer : timer.state;
-    if ((ts && (ts.running || ts.paused)) || (inShell ? nativePending : pendingStop)) return;
+    // off-machine span on top of it would double-count the same minutes.
+    if (timerBusy) return;
     const rec = { machine, operator: operator.trim() || "Unnamed", start: Date.now() };
+    setOffError("");
     setOffMachine(rec);
     persistPrefs({ offMachine: rec });
     closeSession(); // presence ends — they are not at a machine
-  }, [inShell, nativeTimer, nativePending, timer.state, pendingStop, machine, operator, closeSession, persistPrefs]);
+  }, [timerBusy, machine, operator, closeSession, persistPrefs]);
 
   // Ends the span and records it. `nextMachine` lets "tap another machine" be
   // the same gesture as coming back: the stop is still attributed to the machine
-  // that was LEFT, then the operator lands on the new one.
-  const endOffMachine = useCallback(async (nextMachine) => {
+  // that was LEFT, then the operator lands on the new one. `endTs` lets an
+  // auto-close land exactly where the overlapping event began.
+  const endOffMachine = useCallback(async (nextMachine, endTs) => {
     const rec = offMachine;
-    if (!rec) return;
+    // Two dispatches in one task would otherwise write the same span twice.
+    if (!rec || offSavingRef.current) return;
+    offSavingRef.current = true;
     setOffMachine(null);
     persistPrefs({ offMachine: null });
     const target = nextMachine || rec.machine;
 
-    const end = Date.now();
-    const duration = Math.max(0, end - rec.start);
+    const end = Math.max(rec.start, endTs || Date.now());
+    const duration = end - rec.start;
     // A mistap is not a stop.
     if (duration >= 1000) {
       const record = {
@@ -2226,29 +2251,91 @@ export default function App() {
         updatedAt: end,  // last-write-wins clock for sync
       };
       const res = await api.saveStop(record);
-      if (res.ok) { setStops((prev) => [record, ...prev]); sync.flush(); }
-      else setSaveError(res.error || "The off-machine time didn't save.");
+      if (res.ok) { setStops((prev) => [record, ...prev]); setOffError(""); sync.flush(); }
+      else {
+        // Don't swallow the operator's away time. Re-open the span so the clock
+        // keeps running and a retry still records it, and say so where they're
+        // actually looking (the off-machine banner, not the stop-document card).
+        setOffMachine(rec);
+        persistPrefs({ offMachine: rec });
+        // Lead with what the operator should DO. A bare "QuotaExceededError" in
+        // the banner tells someone in gloves nothing.
+        setOffError(`Didn't save — you're still off machine, tap again to retry.${res.error ? ` (${res.error})` : ""}`);
+        offSavingRef.current = false;
+        return;
+      }
     }
 
     setMachine(target);
     openSession(target); // back at a machine → presence resumes
+    offSavingRef.current = false;
   }, [offMachine, persistPrefs, sync, openSession]);
+
+  // Above this, coming back asks first. A forgotten tap is the one way this
+  // button can invent hours of downtime, and unlike a manual report (where the
+  // operator types the duration) nothing else here makes them look at it.
+  const OFF_CONFIRM_MS = 90 * 60 * 1000;
+  const [offConfirm, setOffConfirm] = useState(null); // { target } | null
+
+  // Close the span WITHOUT recording — for the "I forgot to tap back" case,
+  // where the honest answer is no record rather than an invented one.
+  const discardOffMachine = useCallback((next) => {
+    const rec = offMachine;
+    if (!rec) return;
+    setOffMachine(null);
+    persistPrefs({ offMachine: null });
+    setOffError("");
+    const target = next || rec.machine;
+    setMachine(target);
+    openSession(target);
+  }, [offMachine, persistPrefs, openSession]);
+
+  // Returning from off machine. Long spans route through the confirmation.
+  const backOnMachine = useCallback((next) => {
+    if (offMachine && Date.now() - offMachine.start >= OFF_CONFIRM_MS) {
+      setOffConfirm({ target: next || offMachine.machine });
+      return;
+    }
+    endOffMachine(next);
+  }, [offMachine, endOffMachine]);
 
   // Every machine tap in the operator UI routes through here so that returning
   // from off-machine and switching machines are one gesture.
   const chooseMachine = useCallback((next) => {
-    if (offMachine) { endOffMachine(next); return; }
+    if (offMachine) { backOnMachine(next); return; }
     switchMachine(next);
-  }, [offMachine, endOffMachine, switchMachine]);
+  }, [offMachine, backOnMachine, switchMachine]);
 
-  // A restored span that predates the current shift is dropped, not recorded:
-  // the app cannot know when the operator actually came back, and inventing that
-  // duration would put fabricated downtime on the board.
+  // A stop started from OUTSIDE this view — the Android notification or the
+  // floating bubble, which know nothing about off-machine — must not run on top
+  // of an open span, or every minute of it is billed twice as downtime. Close
+  // the span at the moment that stop began.
+  const nativeRunning = inShell && !!nativeTimer && (nativeTimer.running || nativeTimer.paused);
   useEffect(() => {
-    if (!offMachine || !shiftWindow) return;
+    if (!nativeRunning || !offMachine) return;
+    endOffMachine(undefined, nativeTimer.startTs || Date.now());
+  }, [nativeRunning, offMachine, nativeTimer, endOffMachine]);
+
+  // A span RESTORED from a previous session that predates the current shift is
+  // dropped, not recorded: the app cannot know when the operator actually came
+  // back, and inventing that duration would put fabricated downtime on the
+  // board. This runs once per restore and then clears the marker — a LIVE span
+  // must survive "New Shift" (which moves shiftStart to now), or an operator who
+  // taps it on returning from break loses the whole break.
+  // The ref makes this run at most once per load no matter what: it rewrites
+  // `offMachine` with a fresh object, which is its own effect dependency, so
+  // without the latch a dropped condition here becomes an infinite re-render.
+  const offRestoreCheckedRef = useRef(false);
+  useEffect(() => {
+    if (offRestoreCheckedRef.current || !offMachine || !offMachine.restored || !shiftWindow) return;
+    offRestoreCheckedRef.current = true;
     if (offMachine.start < shiftStart) {
       setOffMachine(null);
       persistPrefs({ offMachine: null });
+    } else {
+      const { restored, ...live } = offMachine;
+      setOffMachine(live);
+      persistPrefs({ offMachine: live });
     }
   }, [offMachine, shiftWindow, shiftStart, persistPrefs]);
 
@@ -2524,7 +2611,7 @@ export default function App() {
         {view === "operator" ? (
           <OperatorView
             t={t} operator={operator} setOperator={setOperator} machine={machine} setMachine={chooseMachine}
-            offMachine={offMachine} onOffMachine={startOffMachine} onBackOnMachine={() => endOffMachine()}
+            offMachine={offMachine} onOffMachine={startOffMachine} onBackOnMachine={() => backOnMachine()} offError={offError}
             timer={effectiveTimer} onStop={handleStop}
             pendingStop={effectivePending} reason={reason} setReason={setReason} notes={notes} setNotes={setNotes}
             onSave={handleSave} onDiscardPending={handleDiscardPending} saving={saving} saveError={saveError}
@@ -2584,6 +2671,25 @@ export default function App() {
         </div>
       )}
 
+      {offConfirm && offMachine && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30" onClick={() => setOffConfirm(null)}>
+          <div className={`${dark ? "bg-slate-900" : "bg-white"} rounded-xl shadow-xl p-5 max-w-sm w-full space-y-3`} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center gap-2 font-bold"><AlertCircle size={18} className="text-amber-500" /> Log {fmtDur(Date.now() - offMachine.start)} of downtime?</div>
+            <p className={`text-sm ${t.sub}`}>
+              You've been off machine since {fmtTime(offMachine.start)}. Coming back records that whole
+              stretch as a <b>“{OFF_MACHINE_REASON}”</b> stop on <b>{offMachine.machine}</b>. If you
+              actually returned earlier and forgot to tap, discard it and report the real stop manually instead.
+            </p>
+            <div className="flex gap-2">
+              <button onClick={() => { const c = offConfirm; setOffConfirm(null); endOffMachine(c.target); }}
+                className="flex-1 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 rounded-lg">Yes, log it</button>
+              <button onClick={() => { const c = offConfirm; setOffConfirm(null); discardOffMachine(c.target); }}
+                className={`px-4 ${t.sub} font-semibold`}>Discard</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {manualOpen && (
         <ManualStopModal
           t={t} dark={dark} machine={machine} machines={machines} reasons={reasons} quickStops={quickStops}
@@ -2611,7 +2717,7 @@ export default function App() {
    ========================================================================== */
 function OperatorView(props) {
   const {
-    t, operator, setOperator, machine, setMachine, offMachine, onOffMachine, onBackOnMachine, timer, onStop,
+    t, operator, setOperator, machine, setMachine, offMachine, onOffMachine, onBackOnMachine, offError, timer, onStop,
     pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError,
     myStops, visibleStops, machines, reasons, quickStops, applyQuickStop, lastReason,
     shift, shifts, shiftId, onSelectShift, shiftStart, hiddenStopCount, onNewShift, showAll, onToggleShowAll,
@@ -2755,20 +2861,24 @@ function OperatorView(props) {
           {/* Stepping away from every machine. One tap, the same gesture as a
               machine switch — and because these machines only produce while
               someone is running them, it logs downtime rather than a new
-              category. Hidden while a stop is being timed: that stop already
-              covers the same minutes. */}
-          {!running && !pendingStop && (
-            offMachine ? (
-              <button onClick={onBackOnMachine}
-                className="mt-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-bold bg-emerald-500 text-white shadow transition active:scale-95">
-                <User size={15} /> Back on {offMachine.machine}
-              </button>
-            ) : (
-              <button onClick={onOffMachine}
-                className={`mt-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold ${t.chip} transition active:scale-95`}>
-                <LogOut size={15} /> Off machine
-              </button>
-            )
+              category. */}
+          {offMachine ? (
+            // Never hidden, whatever else is on screen: this is the operator's
+            // only way to stop the clock, and it keeps ticking regardless.
+            // The running total is on the button so a forgotten tap is obvious
+            // BEFORE it lands hours of downtime on a machine.
+            <button onClick={onBackOnMachine}
+              className="mt-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-bold bg-emerald-500 text-white shadow transition active:scale-95">
+              <User size={15} /> Back on {offMachine.machine}
+              <span className="font-mono tabular-nums opacity-90">· {fmtClock(offElapsed)}</span>
+            </button>
+          ) : !running && !pendingStop && (
+            // Amber, not the neutral chip styling of a machine button right
+            // above it — a mistap here starts logging downtime.
+            <button onClick={onOffMachine}
+              className="mt-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold border-2 border-amber-400/70 text-amber-600 dark:text-amber-400 transition active:scale-95">
+              <LogOut size={15} /> Off machine
+            </button>
           )}
         </div>
         {shifts && shifts.length > 1 && (
@@ -2819,8 +2929,8 @@ function OperatorView(props) {
             <LogOut size={18} className="text-amber-500 shrink-0" />
             <div className="min-w-0">
               <div className="text-sm font-bold text-amber-500">Off machine</div>
-              <div className={`text-[11px] ${t.sub}`}>
-                Logging downtime on <b>{offMachine.machine}</b> — tap a machine or “Back on” when you return.
+              <div className={`text-[11px] ${offError ? "text-red-500 font-semibold" : t.sub}`}>
+                {offError || <>Logging downtime on <b>{offMachine.machine}</b> — tap a machine or “Back on” when you return.</>}
               </div>
             </div>
           </div>

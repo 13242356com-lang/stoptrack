@@ -1927,7 +1927,7 @@ function App() {
                 if (prefs.shiftId)
                     setShiftId(prefs.shiftId);
                 if (prefs.offMachine && prefs.offMachine.start)
-                    setOffMachine(prefs.offMachine);
+                    setOffMachine(Object.assign(Object.assign({}, prefs.offMachine), { restored: true }));
                 if (prefs.setupLocked) {
                     setSetupLocked(true);
                     if (prefs.operator)
@@ -1961,7 +1961,7 @@ function App() {
             await api.setCurrentSessionId(null);
             setSessions(records);
             setLoading(false);
-            if (prefs && prefs.setupLocked && prefs.operator) {
+            if (prefs && prefs.setupLocked && prefs.operator && !(prefs.offMachine && prefs.offMachine.start)) {
                 openSession(prefs.machine || ((_c = cfg === null || cfg === void 0 ? void 0 : cfg.machines) === null || _c === void 0 ? void 0 : _c[0]) || DEFAULT_MACHINES[0], prefs.operator);
             }
             const ip = await api.loadInProgress();
@@ -2099,8 +2099,8 @@ function App() {
         return next;
     }, [machines, reasons, quickStops, shifts, supervisorPinHash, rates, handoverEmails, syncCfg]);
     const persistPrefs = useCallback((patch) => {
-        api.savePrefs(Object.assign({ dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId }, patch));
-    }, [dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId]);
+        api.savePrefs(Object.assign({ dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId, offMachine }, patch));
+    }, [dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId, offMachine]);
     const updateMachines = (next) => { setMachines(next); persistConfig({ machines: next }); };
     const updateReasons = (next) => { setReasons(next); persistConfig({ reasons: next }); };
     const updateQuickStops = (next) => { setQuickStops(next); persistConfig({ quickStops: next }); };
@@ -2222,6 +2222,8 @@ function App() {
     const lockSetup = () => {
         setSetupLocked(true);
         persistPrefs({ setupLocked: true, operator, machine });
+        if (offMachine)
+            return;
         const open = openSessRef.current;
         if (!open)
             openSession(machine, operator);
@@ -2260,24 +2262,30 @@ function App() {
         setSaving(false);
         return res.ok;
     };
+    const timerBusy = inShell
+        ? (nativeTimer == null || nativeTimer.running || nativeTimer.paused || !!nativePending)
+        : (timer.state.running || timer.state.paused || !!pendingStop);
+    const [offError, setOffError] = useState("");
+    const offSavingRef = useRef(false);
     const startOffMachine = useCallback(() => {
-        const ts = inShell ? nativeTimer : timer.state;
-        if ((ts && (ts.running || ts.paused)) || (inShell ? nativePending : pendingStop))
+        if (timerBusy)
             return;
         const rec = { machine, operator: operator.trim() || "Unnamed", start: Date.now() };
+        setOffError("");
         setOffMachine(rec);
         persistPrefs({ offMachine: rec });
         closeSession();
-    }, [inShell, nativeTimer, nativePending, timer.state, pendingStop, machine, operator, closeSession, persistPrefs]);
-    const endOffMachine = useCallback(async (nextMachine) => {
+    }, [timerBusy, machine, operator, closeSession, persistPrefs]);
+    const endOffMachine = useCallback(async (nextMachine, endTs) => {
         const rec = offMachine;
-        if (!rec)
+        if (!rec || offSavingRef.current)
             return;
+        offSavingRef.current = true;
         setOffMachine(null);
         persistPrefs({ offMachine: null });
         const target = nextMachine || rec.machine;
-        const end = Date.now();
-        const duration = Math.max(0, end - rec.start);
+        const end = Math.max(rec.start, endTs || Date.now());
+        const duration = end - rec.start;
         if (duration >= 1000) {
             const record = {
                 id: `${rec.start}-${Math.floor(Math.random() * 1e6)}`,
@@ -2292,27 +2300,67 @@ function App() {
             const res = await api.saveStop(record);
             if (res.ok) {
                 setStops((prev) => [record, ...prev]);
+                setOffError("");
                 sync.flush();
             }
-            else
-                setSaveError(res.error || "The off-machine time didn't save.");
+            else {
+                setOffMachine(rec);
+                persistPrefs({ offMachine: rec });
+                setOffError(`Didn't save — you're still off machine, tap again to retry.${res.error ? ` (${res.error})` : ""}`);
+                offSavingRef.current = false;
+                return;
+            }
         }
         setMachine(target);
         openSession(target);
+        offSavingRef.current = false;
     }, [offMachine, persistPrefs, sync, openSession]);
+    const OFF_CONFIRM_MS = 90 * 60 * 1000;
+    const [offConfirm, setOffConfirm] = useState(null);
+    const discardOffMachine = useCallback((next) => {
+        const rec = offMachine;
+        if (!rec)
+            return;
+        setOffMachine(null);
+        persistPrefs({ offMachine: null });
+        setOffError("");
+        const target = next || rec.machine;
+        setMachine(target);
+        openSession(target);
+    }, [offMachine, persistPrefs, openSession]);
+    const backOnMachine = useCallback((next) => {
+        if (offMachine && Date.now() - offMachine.start >= OFF_CONFIRM_MS) {
+            setOffConfirm({ target: next || offMachine.machine });
+            return;
+        }
+        endOffMachine(next);
+    }, [offMachine, endOffMachine]);
     const chooseMachine = useCallback((next) => {
         if (offMachine) {
-            endOffMachine(next);
+            backOnMachine(next);
             return;
         }
         switchMachine(next);
-    }, [offMachine, endOffMachine, switchMachine]);
+    }, [offMachine, backOnMachine, switchMachine]);
+    const nativeRunning = inShell && !!nativeTimer && (nativeTimer.running || nativeTimer.paused);
     useEffect(() => {
-        if (!offMachine || !shiftWindow)
+        if (!nativeRunning || !offMachine)
             return;
+        endOffMachine(undefined, nativeTimer.startTs || Date.now());
+    }, [nativeRunning, offMachine, nativeTimer, endOffMachine]);
+    const offRestoreCheckedRef = useRef(false);
+    useEffect(() => {
+        if (offRestoreCheckedRef.current || !offMachine || !offMachine.restored || !shiftWindow)
+            return;
+        offRestoreCheckedRef.current = true;
         if (offMachine.start < shiftStart) {
             setOffMachine(null);
             persistPrefs({ offMachine: null });
+        }
+        else {
+            const { restored } = offMachine, live = __rest(offMachine, ["restored"]);
+            setOffMachine(live);
+            persistPrefs({ offMachine: live });
         }
     }, [offMachine, shiftWindow, shiftStart, persistPrefs]);
     const handleSaveProduction = async ({ unitsProduced, scrapCount }) => {
@@ -2531,7 +2579,7 @@ function App() {
                     React.createElement("button", { onClick: pickRestore, className: "bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-1.5 rounded-lg" }, "Restore backup"),
                     React.createElement("button", { onClick: () => setNeedsRestore(false), className: `text-sm ${t.sub} px-2 py-1.5` }, "Not now"))),
             restoreMsg && React.createElement("p", { className: "max-w-3xl mx-auto text-xs text-red-500 mt-1" }, restoreMsg))),
-        React.createElement("main", { className: "max-w-3xl mx-auto p-4 pb-24" }, view === "operator" ? (React.createElement(OperatorView, { t: t, operator: operator, setOperator: setOperator, machine: machine, setMachine: chooseMachine, offMachine: offMachine, onOffMachine: startOffMachine, onBackOnMachine: () => endOffMachine(), timer: effectiveTimer, onStop: handleStop, pendingStop: effectivePending, reason: reason, setReason: setReason, notes: notes, setNotes: setNotes, onSave: handleSave, onDiscardPending: handleDiscardPending, saving: saving, saveError: saveError, myStops: shiftStops, visibleStops: visibleStops, machines: machines, reasons: reasons, quickStops: quickStops, applyQuickStop: applyQuickStop, lastReason: lastReason, shift: activeShift, shifts: shifts, shiftId: shiftId, onSelectShift: selectShift, shiftStart: shiftStart, hiddenStopCount: hiddenStopCount, onNewShift: () => setNewShiftOpen(true), showAll: showAll, onToggleShowAll: toggleShowAll, setupLocked: setupLocked, onLockSetup: lockSetup, onUnlockSetup: unlockSetup, onOpenManual: () => { setSaveError(""); setManualOpen(true); }, syncStatus: sync.status, syncOn: syncOn, rates: rates, myProduction: myProduction, onSaveProduction: handleSaveProduction, myShift: myShift, goalStatus: goalStatus, onOpenHandover: () => setHandoverOpen(true) })) : (supervisorPinHash && !supervisorUnlocked) ? (React.createElement(PinGate, { t: t, pinHash: supervisorPinHash, onUnlock: () => setSupervisorUnlocked(true) })) : (React.createElement(SupervisorView, { t: t, stops: stops, loading: loading, onRefresh: refreshStops, machines: machines, reasons: reasons, quickStops: quickStops, shifts: shifts, updateMachines: updateMachines, updateReasons: updateReasons, updateQuickStops: updateQuickStops, updateShifts: updateShifts, discardStop: discardStop, deleteStop: deleteStop, hasPin: !!supervisorPinHash, updatePin: updatePin, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: sync.status, onSyncNow: sync.flush, rates: rates, updateRates: updateRates, production: production, sessions: sessions, handovers: handovers, handoverEmails: handoverEmails, updateHandoverEmails: updateHandoverEmails, onDownloadBackup: downloadBackup, onRestore: pickRestore, restoreMsg: restoreMsg }))),
+        React.createElement("main", { className: "max-w-3xl mx-auto p-4 pb-24" }, view === "operator" ? (React.createElement(OperatorView, { t: t, operator: operator, setOperator: setOperator, machine: machine, setMachine: chooseMachine, offMachine: offMachine, onOffMachine: startOffMachine, onBackOnMachine: () => backOnMachine(), offError: offError, timer: effectiveTimer, onStop: handleStop, pendingStop: effectivePending, reason: reason, setReason: setReason, notes: notes, setNotes: setNotes, onSave: handleSave, onDiscardPending: handleDiscardPending, saving: saving, saveError: saveError, myStops: shiftStops, visibleStops: visibleStops, machines: machines, reasons: reasons, quickStops: quickStops, applyQuickStop: applyQuickStop, lastReason: lastReason, shift: activeShift, shifts: shifts, shiftId: shiftId, onSelectShift: selectShift, shiftStart: shiftStart, hiddenStopCount: hiddenStopCount, onNewShift: () => setNewShiftOpen(true), showAll: showAll, onToggleShowAll: toggleShowAll, setupLocked: setupLocked, onLockSetup: lockSetup, onUnlockSetup: unlockSetup, onOpenManual: () => { setSaveError(""); setManualOpen(true); }, syncStatus: sync.status, syncOn: syncOn, rates: rates, myProduction: myProduction, onSaveProduction: handleSaveProduction, myShift: myShift, goalStatus: goalStatus, onOpenHandover: () => setHandoverOpen(true) })) : (supervisorPinHash && !supervisorUnlocked) ? (React.createElement(PinGate, { t: t, pinHash: supervisorPinHash, onUnlock: () => setSupervisorUnlocked(true) })) : (React.createElement(SupervisorView, { t: t, stops: stops, loading: loading, onRefresh: refreshStops, machines: machines, reasons: reasons, quickStops: quickStops, shifts: shifts, updateMachines: updateMachines, updateReasons: updateReasons, updateQuickStops: updateQuickStops, updateShifts: updateShifts, discardStop: discardStop, deleteStop: deleteStop, hasPin: !!supervisorPinHash, updatePin: updatePin, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: sync.status, onSyncNow: sync.flush, rates: rates, updateRates: updateRates, production: production, sessions: sessions, handovers: handovers, handoverEmails: handoverEmails, updateHandoverEmails: updateHandoverEmails, onDownloadBackup: downloadBackup, onRestore: pickRestore, restoreMsg: restoreMsg }))),
         recovered && (React.createElement("div", { className: "fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30" },
             React.createElement("div", { className: `${dark ? "bg-slate-900" : "bg-white"} rounded-xl shadow-xl p-5 max-w-sm w-full space-y-3` },
                 React.createElement("div", { className: "flex items-center gap-2 font-bold" },
@@ -2556,11 +2604,32 @@ function App() {
                 React.createElement("div", { className: "flex gap-2" },
                     React.createElement("button", { onClick: startNewShift, className: "flex-1 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 rounded-lg" }, "Start new shift"),
                     React.createElement("button", { onClick: () => setNewShiftOpen(false), className: `px-4 ${t.sub} font-semibold` }, "Cancel"))))),
+        offConfirm && offMachine && (React.createElement("div", { className: "fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30", onClick: () => setOffConfirm(null) },
+            React.createElement("div", { className: `${dark ? "bg-slate-900" : "bg-white"} rounded-xl shadow-xl p-5 max-w-sm w-full space-y-3`, onClick: (e) => e.stopPropagation() },
+                React.createElement("div", { className: "flex items-center gap-2 font-bold" },
+                    React.createElement(AlertCircle, { size: 18, className: "text-amber-500" }),
+                    " Log ",
+                    fmtDur(Date.now() - offMachine.start),
+                    " of downtime?"),
+                React.createElement("p", { className: `text-sm ${t.sub}` },
+                    "You've been off machine since ",
+                    fmtTime(offMachine.start),
+                    ". Coming back records that whole stretch as a ",
+                    React.createElement("b", null,
+                        "\u201C",
+                        OFF_MACHINE_REASON,
+                        "\u201D"),
+                    " stop on ",
+                    React.createElement("b", null, offMachine.machine),
+                    ". If you actually returned earlier and forgot to tap, discard it and report the real stop manually instead."),
+                React.createElement("div", { className: "flex gap-2" },
+                    React.createElement("button", { onClick: () => { const c = offConfirm; setOffConfirm(null); endOffMachine(c.target); }, className: "flex-1 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 rounded-lg" }, "Yes, log it"),
+                    React.createElement("button", { onClick: () => { const c = offConfirm; setOffConfirm(null); discardOffMachine(c.target); }, className: `px-4 ${t.sub} font-semibold` }, "Discard"))))),
         manualOpen && (React.createElement(ManualStopModal, { t: t, dark: dark, machine: machine, machines: machines, reasons: reasons, quickStops: quickStops, lastReason: lastReason, saving: saving, saveError: saveError, onSave: handleManualSave, onClose: () => setManualOpen(false) })),
         handoverOpen && (React.createElement(ShiftHandoverModal, { t: t, dark: dark, reportBase: buildShiftReport({ operator, machine, myStops: shiftStops, myShift, clearedBefore: shiftStart, activeShift, goalStatus }), handoverEmails: handoverEmails, syncCfg: syncCfg, lastHandover: handovers.find((h) => !h.machine || h.machine === machine) || null, onSaved: (rec) => { setHandovers((prev) => [rec, ...prev.filter((h) => h.id !== rec.id)]); sync.flush(); }, onClose: () => setHandoverOpen(false) }))));
 }
 function OperatorView(props) {
-    const { t, operator, setOperator, machine, setMachine, offMachine, onOffMachine, onBackOnMachine, timer, onStop, pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError, myStops, visibleStops, machines, reasons, quickStops, applyQuickStop, lastReason, shift, shifts, shiftId, onSelectShift, shiftStart, hiddenStopCount, onNewShift, showAll, onToggleShowAll, setupLocked, onLockSetup, onUnlockSetup, onOpenManual, syncStatus, syncOn, rates, myProduction, onSaveProduction, myShift, goalStatus, onOpenHandover, } = props;
+    const { t, operator, setOperator, machine, setMachine, offMachine, onOffMachine, onBackOnMachine, offError, timer, onStop, pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError, myStops, visibleStops, machines, reasons, quickStops, applyQuickStop, lastReason, shift, shifts, shiftId, onSelectShift, shiftStart, hiddenStopCount, onNewShift, showAll, onToggleShowAll, setupLocked, onLockSetup, onUnlockSetup, onOpenManual, syncStatus, syncOn, rates, myProduction, onSaveProduction, myShift, goalStatus, onOpenHandover, } = props;
     const { state, elapsed, start, pause, resume } = timer;
     const { running, paused } = state;
     const [offTick, setOffTick] = useState(0);
@@ -2657,12 +2726,15 @@ function OperatorView(props) {
                         m,
                         timingHere && React.createElement("span", { className: "absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse", title: "Stop being timed here" })));
                 }))) : (React.createElement("select", { value: machine, onChange: (e) => setMachine(e.target.value), className: `border rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }, machines.map((m) => React.createElement("option", { key: m }, m)))),
-                !running && !pendingStop && (offMachine ? (React.createElement("button", { onClick: onBackOnMachine, className: "mt-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-bold bg-emerald-500 text-white shadow transition active:scale-95" },
+                offMachine ? (React.createElement("button", { onClick: onBackOnMachine, className: "mt-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-bold bg-emerald-500 text-white shadow transition active:scale-95" },
                     React.createElement(User, { size: 15 }),
                     " Back on ",
-                    offMachine.machine)) : (React.createElement("button", { onClick: onOffMachine, className: `mt-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold ${t.chip} transition active:scale-95` },
+                    offMachine.machine,
+                    React.createElement("span", { className: "font-mono tabular-nums opacity-90" },
+                        "\u00B7 ",
+                        fmtClock(offElapsed)))) : !running && !pendingStop && (React.createElement("button", { onClick: onOffMachine, className: "mt-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold border-2 border-amber-400/70 text-amber-600 dark:text-amber-400 transition active:scale-95" },
                     React.createElement(LogOut, { size: 15 }),
-                    " Off machine")))),
+                    " Off machine"))),
             shifts && shifts.length > 1 && (React.createElement("div", { className: "flex flex-col gap-1" },
                 React.createElement("span", { className: `text-xs font-semibold ${t.sub} flex items-center gap-1` },
                     React.createElement(Clock, { size: 13 }),
@@ -2691,10 +2763,10 @@ function OperatorView(props) {
                 React.createElement(LogOut, { size: 18, className: "text-amber-500 shrink-0" }),
                 React.createElement("div", { className: "min-w-0" },
                     React.createElement("div", { className: "text-sm font-bold text-amber-500" }, "Off machine"),
-                    React.createElement("div", { className: `text-[11px] ${t.sub}` },
+                    React.createElement("div", { className: `text-[11px] ${offError ? "text-red-500 font-semibold" : t.sub}` }, offError || React.createElement(React.Fragment, null,
                         "Logging downtime on ",
                         React.createElement("b", null, offMachine.machine),
-                        " \u2014 tap a machine or \u201CBack on\u201D when you return."))),
+                        " \u2014 tap a machine or \u201CBack on\u201D when you return.")))),
             React.createElement("div", { className: "font-mono font-bold tabular-nums text-amber-500 text-lg shrink-0" }, fmtClock(offElapsed)))),
         React.createElement("div", { className: `${t.card} rounded-xl p-6 flex flex-col items-center` },
             React.createElement("div", { className: `text-xs font-semibold tracking-wide ${t.sub} mb-1` }, paused ? `PAUSED — ${state.machine || machine}` : running ? `${(state.machine || machine).toUpperCase()} STOPPED — TIMING` : "READY"),

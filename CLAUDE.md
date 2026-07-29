@@ -134,10 +134,25 @@ Rules that must not be reintroduced-around:
   Tapping another machine is a valid way to come back (`chooseMachine`).
 - **No double counting.** Off machine is unavailable while a stop is being timed,
   and Start Stop is disabled while off machine — either alone already covers
-  those minutes.
-- A restored span older than the current shift is **dropped, not recorded**: the
-  app can't know when the operator came back, so inventing the duration would put
-  fabricated downtime on the board.
+  those minutes. In the shell an **unknown** native timer (`nativeTimer == null`,
+  before the first state push) counts as BUSY, or a cold start from the
+  notification during a running stop opens a span on top of it. A native stop
+  started from the notification/bubble **auto-closes** the span at that stop's
+  `startTs`, since those surfaces know nothing about off-machine.
+- A span older than the current shift is **dropped, not recorded** — but only on
+  the *restore* path (marked `restored`, latched by a ref so the rewrite can't
+  loop). A **live** span must survive "New Shift", which moves `shiftStart` to
+  now; otherwise an operator tapping it on returning from break loses the break.
+- **Presence stays closed while off machine.** Both `lockSetup` and the load path
+  skip `openSession` — otherwise manned time lands on a machine nobody is at.
+- **Every persisted pref must be in the `persistPrefs` base object.** `savePrefs`
+  REPLACES the blob, so anything missing is erased by an unrelated write (an open
+  span used to vanish when someone tapped the dark-mode toggle).
+- **A failed save re-opens the span** rather than dropping it, and says so in the
+  banner in words an operator can act on — never a raw storage exception.
+- Coming back after **90+ minutes asks first**, with a Discard option: a forgotten
+  tap is the one way this button can invent hours of downtime, and unlike a manual
+  report the operator never typed the duration.
 
 Still open (deliberately not built): a per-machine "runs unattended" flag, for
 automatic equipment where absence is *not* downtime. Today every machine is
