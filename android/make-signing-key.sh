@@ -28,10 +28,17 @@ if [ -e "$OUT" ]; then
   exit 1
 fi
 
-# Random passwords: nothing to invent, nothing to forget — they're printed below.
-rand() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32; }
+# A random password: nothing to invent, nothing to forget — it's printed below.
+# ONE password, used for both store and key: modern keytool writes a PKCS12
+# keystore, which has no separate key password — passing a different -keypass is
+# ignored with a warning, and the build then fails with "keystore password was
+# incorrect" when Gradle tries the key password it was given.
+# Read a BOUNDED chunk of /dev/urandom: piping the endless device into `head`
+# kills `tr` with SIGPIPE, and `set -o pipefail` then aborts the whole script
+# before the key is ever generated.
+rand() { head -c 1024 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-32; }
 STORE_PW="$(rand)"
-KEY_PW="$(rand)"
+KEY_PW="$STORE_PW"
 
 keytool -genkeypair -v \
   -keystore "$OUT" \

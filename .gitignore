@@ -22,6 +22,13 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 
+# app signing key — NEVER commit. android/make-signing-key.sh writes
+# stoptrack-release.jks into the current directory, which is usually this repo.
+*.jks
+*.keystore
+keystore.b64
+SETUP-github-secrets.txt
+
 # machine-specific / local (absolute Node path, per-machine)
 .claude/launch.json
 .venv/

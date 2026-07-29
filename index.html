@@ -106,14 +106,16 @@ const Unlock = I(React.createElement(React.Fragment, null, React.createElement("
 const PencilLine = I(React.createElement(React.Fragment, null, React.createElement("path", { d: "M12 20h9" }), React.createElement("path", { d: "M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" })));
 const Target = I(React.createElement(React.Fragment, null, React.createElement("circle", { cx: "12", cy: "12", r: "10" }), React.createElement("circle", { cx: "12", cy: "12", r: "6" }), React.createElement("circle", { cx: "12", cy: "12", r: "2" })));
 const Share2 = I(React.createElement(React.Fragment, null, React.createElement("circle", { cx: "18", cy: "5", r: "3" }), React.createElement("circle", { cx: "6", cy: "12", r: "3" }), React.createElement("circle", { cx: "18", cy: "19", r: "3" }), React.createElement("line", { x1: "8.59", y1: "13.51", x2: "15.42", y2: "17.49" }), React.createElement("line", { x1: "15.41", y1: "6.51", x2: "8.59", y2: "10.49" })));
+const LogOut = I(React.createElement(React.Fragment, null, React.createElement("path", { d: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" }), React.createElement("polyline", { points: "16 17 21 12 16 7" }), React.createElement("line", { x1: "21", y1: "12", x2: "9", y2: "12" })));
 const DEFAULT_MACHINES = [
     "Line 1", "Line 2", "Line 3", "Packaging", "Assembly",
 ];
 const DEFAULT_REASONS = [
     "Mechanical fault", "Quality check", "Waiting on maintenance", "Tooling change",
     "Cleaning", "Material shortage", "Changeover / Setup", "Material jam",
-    "Operator break", "Electrical fault", "Other",
+    "Operator break", "Electrical fault", "No operator", "Other",
 ];
+const OFF_MACHINE_REASON = "No operator";
 const DEFAULT_QUICK_STOPS = [
     { label: "Mechanical fault", reason: "Mechanical fault" },
     { label: "Quality check", reason: "Quality check" },
@@ -262,12 +264,21 @@ function buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, 
     myStops.forEach((s) => { byReason[s.reason] = (byReason[s.reason] || 0) + s.duration; });
     const topReasons = Object.entries(byReason).sort((a, b) => b[1] - a[1]);
     const longest = myStops.reduce((best, s) => (!best || s.duration > best.duration ? s : best), null);
+    const perMachine = {};
+    myStops.forEach((s) => {
+        const bag = (perMachine[s.machine] = perMachine[s.machine] || {});
+        bag[s.reason] = (bag[s.reason] || 0) + s.duration;
+    });
+    const machines = (myShift.rows || []).map((row) => {
+        const top = Object.entries(perMachine[row.machine] || {}).sort((a, b) => b[1] - a[1])[0];
+        return Object.assign(Object.assign({}, row), { topReason: top ? top[0] : null, topReasonMs: top ? top[1] : 0 });
+    }).sort((a, b) => (b.downtimeMs - a.downtimeMs) || (b.mannedMs - a.mannedMs));
     return {
         operator: operator.trim() || "Unnamed", machine,
         shiftName: (activeShift === null || activeShift === void 0 ? void 0 : activeShift.name) || null,
         windowStart: clearedBefore || null, windowEnd: Date.now(),
         stopCount: myStops.length, downtimeMs, topReasons, longest,
-        machines: myShift.rows, hasSessions: myShift.hasSessions,
+        machines, hasSessions: myShift.hasSessions,
         oee: myShift.overall, goal: goalStatus || null,
         notes: myStops.filter((s) => s.notes).map((s) => ({ reason: s.reason, notes: s.notes })),
         note: (note || "").trim(),
@@ -312,6 +323,8 @@ function formatReportText(r) {
                 bits.push(`${fmtDur(m.downtimeMs)} down`);
             if (m.units || m.scrap)
                 bits.push(`${m.units} units / ${m.scrap} scrap`);
+            if (m.topReason)
+                bits.push(`mostly ${m.topReason} (${fmtDur(m.topReasonMs)})`);
             lines.push(`  - ${m.machine}: ${bits.join(" · ")}`);
         });
     }
@@ -446,15 +459,17 @@ function drawHandout(r, scale = 2.5) {
     const noteLines = r.note ? wrapText(meas, r.note, contentW - 32) : [];
     const flagRows = r.flags && r.flags.length ? layoutFlags(meas, r.flags, contentW - 32) : [];
     const reasons = (r.topReasons || []).slice(0, 5);
+    const machineRows = (r.machines || []).length > 1 ? r.machines.slice(0, 6) : [];
     const showGoal = r.goalPct != null;
     const hHeader = 74, hWho = 40, hTiles = 2 * 74 + 1, hGoal = showGoal ? 92 : 0;
+    const hMachines = machineRows.length ? 34 + machineRows.length * 32 + 12 : 0;
     const hReasons = reasons.length ? 34 + reasons.length * 23 + (r.longest ? 22 : 0) + 12 : 0;
     const hNoteBox = (noteLines.length || flagRows.length)
         ? 16 + 24 + noteLines.length * 19 + (flagRows.length ? 8 + flagRows.length * 27 : 0) + 14
         : 0;
     const hNote = hNoteBox ? hNoteBox + 26 : 0;
     const hFoot = 42;
-    const total = hHeader + hWho + hTiles + hGoal + hReasons + hNote + hFoot;
+    const total = hHeader + hWho + hTiles + hGoal + hMachines + hReasons + hNote + hFoot;
     const cv = document.createElement("canvas");
     cv.width = Math.round(H.W * scale);
     cv.height = Math.round(total * scale);
@@ -634,6 +649,47 @@ function drawHandout(r, scale = 2.5) {
         y += hGoal;
         rule(y);
     }
+    if (machineRows.length) {
+        label("Downtime by machine", H.PAD, y + 24);
+        const maxDown = machineRows.reduce((mx, m) => Math.max(mx, m.downtimeMs || 0), 0) || 1;
+        const nameW = 132, valW = 50;
+        const barX = H.PAD + nameW + 10;
+        const barW = H.W - H.PADR - valW - 8 - barX;
+        machineRows.forEach((m, i) => {
+            const ry = y + 34 + i * 32;
+            c.font = `700 12.5px ${H.sans}`;
+            c.fillStyle = H.ink;
+            c.fillText(ellipsize(c, m.machine, nameW), H.PAD, ry + 11);
+            const bits = [`${m.stops} stop${m.stops === 1 ? "" : "s"}`];
+            if (r.hasSessions && m.mannedMs)
+                bits.push(shortDur(m.mannedMs));
+            if (m.topReason)
+                bits.push(m.topReason);
+            c.font = `10.5px ${H.sans}`;
+            c.fillStyle = H.ink3;
+            c.fillText(ellipsize(c, bits.join(" · "), nameW + 40), H.PAD, ry + 25);
+            c.fillStyle = H.surf2;
+            roundRect(c, barX, ry, barW, 14, 4);
+            c.fill();
+            c.strokeStyle = H.line;
+            c.lineWidth = 1;
+            c.stroke();
+            const w = Math.max(3, barW * ((m.downtimeMs || 0) / maxDown));
+            const g3 = c.createLinearGradient(barX, 0, barX + w, 0);
+            g3.addColorStop(0, "#b23636");
+            g3.addColorStop(1, H.down);
+            c.fillStyle = g3;
+            roundRect(c, barX, ry, w, 14, 4);
+            c.fill();
+            c.font = `12px ${H.mono}`;
+            c.fillStyle = H.ink2;
+            c.textAlign = "right";
+            c.fillText(shortDur(m.downtimeMs || 0), H.W - H.PADR, ry + 11);
+            c.textAlign = "left";
+        });
+        y += hMachines;
+        rule(y);
+    }
     if (reasons.length) {
         label("Downtime by reason", H.PAD, y + 24);
         const max = reasons[0][1] || 1;
@@ -673,7 +729,8 @@ function drawHandout(r, scale = 2.5) {
             const ly = y + 34 + reasons.length * 23 + 12;
             c.font = `12px ${H.sans}`;
             c.fillStyle = H.ink2;
-            c.fillText(`Longest: ${r.longest.reason} · ${shortDur(r.longest.duration)} · ${shortTime(r.longest.start)}`, H.PAD, ly);
+            const lw = machineRows.length ? `${r.longest.machine} · ` : "";
+            c.fillText(ellipsize(c, `Longest: ${lw}${r.longest.reason} · ${shortDur(r.longest.duration)} · ${shortTime(r.longest.start)}`, contentW), H.PAD, ly);
         }
         y += hReasons;
         rule(y);
@@ -1785,6 +1842,7 @@ function App() {
     const [handoverEmails, setHandoverEmails] = useState([]);
     const [production, setProduction] = useState([]);
     const [sessions, setSessions] = useState([]);
+    const [offMachine, setOffMachine] = useState(null);
     const [handoverOpen, setHandoverOpen] = useState(false);
     const [handovers, setHandovers] = useState([]);
     const [needsRestore, setNeedsRestore] = useState(false);
@@ -1923,6 +1981,8 @@ function App() {
                     setClearedBefore(prefs.clearedBefore);
                 if (prefs.shiftId)
                     setShiftId(prefs.shiftId);
+                if (prefs.offMachine && prefs.offMachine.start)
+                    setOffMachine(Object.assign(Object.assign({}, prefs.offMachine), { restored: true }));
                 if (prefs.setupLocked) {
                     setSetupLocked(true);
                     if (prefs.operator)
@@ -1956,7 +2016,7 @@ function App() {
             await api.setCurrentSessionId(null);
             setSessions(records);
             setLoading(false);
-            if (prefs && prefs.setupLocked && prefs.operator) {
+            if (prefs && prefs.setupLocked && prefs.operator && !(prefs.offMachine && prefs.offMachine.start)) {
                 openSession(prefs.machine || ((_c = cfg === null || cfg === void 0 ? void 0 : cfg.machines) === null || _c === void 0 ? void 0 : _c[0]) || DEFAULT_MACHINES[0], prefs.operator);
             }
             const ip = await api.loadInProgress();
@@ -2094,8 +2154,8 @@ function App() {
         return next;
     }, [machines, reasons, quickStops, shifts, supervisorPinHash, rates, handoverEmails, syncCfg]);
     const persistPrefs = useCallback((patch) => {
-        api.savePrefs(Object.assign({ dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId }, patch));
-    }, [dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId]);
+        api.savePrefs(Object.assign({ dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId, offMachine }, patch));
+    }, [dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId, offMachine]);
     const updateMachines = (next) => { setMachines(next); persistConfig({ machines: next }); };
     const updateReasons = (next) => { setReasons(next); persistConfig({ reasons: next }); };
     const updateQuickStops = (next) => { setQuickStops(next); persistConfig({ quickStops: next }); };
@@ -2217,6 +2277,8 @@ function App() {
     const lockSetup = () => {
         setSetupLocked(true);
         persistPrefs({ setupLocked: true, operator, machine });
+        if (offMachine)
+            return;
         const open = openSessRef.current;
         if (!open)
             openSession(machine, operator);
@@ -2255,6 +2317,107 @@ function App() {
         setSaving(false);
         return res.ok;
     };
+    const timerBusy = inShell
+        ? (nativeTimer == null || nativeTimer.running || nativeTimer.paused || !!nativePending)
+        : (timer.state.running || timer.state.paused || !!pendingStop);
+    const [offError, setOffError] = useState("");
+    const offSavingRef = useRef(false);
+    const startOffMachine = useCallback(() => {
+        if (timerBusy)
+            return;
+        const rec = { machine, operator: operator.trim() || "Unnamed", start: Date.now() };
+        setOffError("");
+        setOffMachine(rec);
+        persistPrefs({ offMachine: rec });
+        closeSession();
+    }, [timerBusy, machine, operator, closeSession, persistPrefs]);
+    const endOffMachine = useCallback(async (nextMachine, endTs) => {
+        const rec = offMachine;
+        if (!rec || offSavingRef.current)
+            return;
+        offSavingRef.current = true;
+        setOffMachine(null);
+        persistPrefs({ offMachine: null });
+        const target = nextMachine || rec.machine;
+        const end = Math.max(rec.start, endTs || Date.now());
+        const duration = end - rec.start;
+        if (duration >= 1000) {
+            const record = {
+                id: `${rec.start}-${Math.floor(Math.random() * 1e6)}`,
+                machine: rec.machine,
+                operator: rec.operator,
+                start: rec.start, end, duration,
+                reason: OFF_MACHINE_REASON, notes: "",
+                offMachine: true, discarded: false,
+                loggedAt: end,
+                updatedAt: end,
+            };
+            const res = await api.saveStop(record);
+            if (res.ok) {
+                setStops((prev) => [record, ...prev]);
+                setOffError("");
+                sync.flush();
+            }
+            else {
+                setOffMachine(rec);
+                persistPrefs({ offMachine: rec });
+                setOffError(`Didn't save — you're still off machine, tap again to retry.${res.error ? ` (${res.error})` : ""}`);
+                offSavingRef.current = false;
+                return;
+            }
+        }
+        setMachine(target);
+        openSession(target);
+        offSavingRef.current = false;
+    }, [offMachine, persistPrefs, sync, openSession]);
+    const OFF_CONFIRM_MS = 90 * 60 * 1000;
+    const [offConfirm, setOffConfirm] = useState(null);
+    const discardOffMachine = useCallback((next) => {
+        const rec = offMachine;
+        if (!rec)
+            return;
+        setOffMachine(null);
+        persistPrefs({ offMachine: null });
+        setOffError("");
+        const target = next || rec.machine;
+        setMachine(target);
+        openSession(target);
+    }, [offMachine, persistPrefs, openSession]);
+    const backOnMachine = useCallback((next) => {
+        if (offMachine && Date.now() - offMachine.start >= OFF_CONFIRM_MS) {
+            setOffConfirm({ target: next || offMachine.machine });
+            return;
+        }
+        endOffMachine(next);
+    }, [offMachine, endOffMachine]);
+    const chooseMachine = useCallback((next) => {
+        if (offMachine) {
+            backOnMachine(next);
+            return;
+        }
+        switchMachine(next);
+    }, [offMachine, backOnMachine, switchMachine]);
+    const nativeRunning = inShell && !!nativeTimer && (nativeTimer.running || nativeTimer.paused);
+    useEffect(() => {
+        if (!nativeRunning || !offMachine)
+            return;
+        endOffMachine(undefined, nativeTimer.startTs || Date.now());
+    }, [nativeRunning, offMachine, nativeTimer, endOffMachine]);
+    const offRestoreCheckedRef = useRef(false);
+    useEffect(() => {
+        if (offRestoreCheckedRef.current || !offMachine || !offMachine.restored || !shiftWindow)
+            return;
+        offRestoreCheckedRef.current = true;
+        if (offMachine.start < shiftStart) {
+            setOffMachine(null);
+            persistPrefs({ offMachine: null });
+        }
+        else {
+            const { restored } = offMachine, live = __rest(offMachine, ["restored"]);
+            setOffMachine(live);
+            persistPrefs({ offMachine: live });
+        }
+    }, [offMachine, shiftWindow, shiftStart, persistPrefs]);
     const handleSaveProduction = async ({ unitsProduced, scrapCount }) => {
         const now = Date.now();
         const op = operator.trim() || "Unnamed";
@@ -2471,7 +2634,7 @@ function App() {
                     React.createElement("button", { onClick: pickRestore, className: "bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-1.5 rounded-lg" }, "Restore backup"),
                     React.createElement("button", { onClick: () => setNeedsRestore(false), className: `text-sm ${t.sub} px-2 py-1.5` }, "Not now"))),
             restoreMsg && React.createElement("p", { className: "max-w-3xl mx-auto text-xs text-red-500 mt-1" }, restoreMsg))),
-        React.createElement("main", { className: "max-w-3xl mx-auto p-4 pb-24" }, view === "operator" ? (React.createElement(OperatorView, { t: t, operator: operator, setOperator: setOperator, machine: machine, setMachine: switchMachine, timer: effectiveTimer, onStop: handleStop, pendingStop: effectivePending, reason: reason, setReason: setReason, notes: notes, setNotes: setNotes, onSave: handleSave, onDiscardPending: handleDiscardPending, saving: saving, saveError: saveError, myStops: shiftStops, visibleStops: visibleStops, machines: machines, reasons: reasons, quickStops: quickStops, applyQuickStop: applyQuickStop, lastReason: lastReason, shift: activeShift, shifts: shifts, shiftId: shiftId, onSelectShift: selectShift, shiftStart: shiftStart, hiddenStopCount: hiddenStopCount, onNewShift: () => setNewShiftOpen(true), showAll: showAll, onToggleShowAll: toggleShowAll, setupLocked: setupLocked, onLockSetup: lockSetup, onUnlockSetup: unlockSetup, onOpenManual: () => { setSaveError(""); setManualOpen(true); }, syncStatus: sync.status, syncOn: syncOn, rates: rates, myProduction: myProduction, onSaveProduction: handleSaveProduction, myShift: myShift, goalStatus: goalStatus, onOpenHandover: () => setHandoverOpen(true) })) : (supervisorPinHash && !supervisorUnlocked) ? (React.createElement(PinGate, { t: t, pinHash: supervisorPinHash, onUnlock: () => setSupervisorUnlocked(true) })) : (React.createElement(SupervisorView, { t: t, stops: stops, loading: loading, onRefresh: refreshStops, machines: machines, reasons: reasons, quickStops: quickStops, shifts: shifts, updateMachines: updateMachines, updateReasons: updateReasons, updateQuickStops: updateQuickStops, updateShifts: updateShifts, discardStop: discardStop, deleteStop: deleteStop, hasPin: !!supervisorPinHash, updatePin: updatePin, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: sync.status, onSyncNow: sync.flush, rates: rates, updateRates: updateRates, production: production, sessions: sessions, handovers: handovers, handoverEmails: handoverEmails, updateHandoverEmails: updateHandoverEmails, onDownloadBackup: downloadBackup, onRestore: pickRestore, restoreMsg: restoreMsg }))),
+        React.createElement("main", { className: "max-w-3xl mx-auto p-4 pb-24" }, view === "operator" ? (React.createElement(OperatorView, { t: t, operator: operator, setOperator: setOperator, machine: machine, setMachine: chooseMachine, offMachine: offMachine, onOffMachine: startOffMachine, onBackOnMachine: () => backOnMachine(), offError: offError, timer: effectiveTimer, onStop: handleStop, pendingStop: effectivePending, reason: reason, setReason: setReason, notes: notes, setNotes: setNotes, onSave: handleSave, onDiscardPending: handleDiscardPending, saving: saving, saveError: saveError, myStops: shiftStops, visibleStops: visibleStops, machines: machines, reasons: reasons, quickStops: quickStops, applyQuickStop: applyQuickStop, lastReason: lastReason, shift: activeShift, shifts: shifts, shiftId: shiftId, onSelectShift: selectShift, shiftStart: shiftStart, hiddenStopCount: hiddenStopCount, onNewShift: () => setNewShiftOpen(true), showAll: showAll, onToggleShowAll: toggleShowAll, setupLocked: setupLocked, onLockSetup: lockSetup, onUnlockSetup: unlockSetup, onOpenManual: () => { setSaveError(""); setManualOpen(true); }, syncStatus: sync.status, syncOn: syncOn, rates: rates, myProduction: myProduction, onSaveProduction: handleSaveProduction, myShift: myShift, goalStatus: goalStatus, onOpenHandover: () => setHandoverOpen(true) })) : (supervisorPinHash && !supervisorUnlocked) ? (React.createElement(PinGate, { t: t, pinHash: supervisorPinHash, onUnlock: () => setSupervisorUnlocked(true) })) : (React.createElement(SupervisorView, { t: t, stops: stops, loading: loading, onRefresh: refreshStops, machines: machines, reasons: reasons, quickStops: quickStops, shifts: shifts, updateMachines: updateMachines, updateReasons: updateReasons, updateQuickStops: updateQuickStops, updateShifts: updateShifts, discardStop: discardStop, deleteStop: deleteStop, hasPin: !!supervisorPinHash, updatePin: updatePin, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: sync.status, onSyncNow: sync.flush, rates: rates, updateRates: updateRates, production: production, sessions: sessions, handovers: handovers, handoverEmails: handoverEmails, updateHandoverEmails: updateHandoverEmails, onDownloadBackup: downloadBackup, onRestore: pickRestore, restoreMsg: restoreMsg }))),
         recovered && (React.createElement("div", { className: "fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30" },
             React.createElement("div", { className: `${dark ? "bg-slate-900" : "bg-white"} rounded-xl shadow-xl p-5 max-w-sm w-full space-y-3` },
                 React.createElement("div", { className: "flex items-center gap-2 font-bold" },
@@ -2496,13 +2659,42 @@ function App() {
                 React.createElement("div", { className: "flex gap-2" },
                     React.createElement("button", { onClick: startNewShift, className: "flex-1 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 rounded-lg" }, "Start new shift"),
                     React.createElement("button", { onClick: () => setNewShiftOpen(false), className: `px-4 ${t.sub} font-semibold` }, "Cancel"))))),
+        offConfirm && offMachine && (React.createElement("div", { className: "fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30", onClick: () => setOffConfirm(null) },
+            React.createElement("div", { className: `${dark ? "bg-slate-900" : "bg-white"} rounded-xl shadow-xl p-5 max-w-sm w-full space-y-3`, onClick: (e) => e.stopPropagation() },
+                React.createElement("div", { className: "flex items-center gap-2 font-bold" },
+                    React.createElement(AlertCircle, { size: 18, className: "text-amber-500" }),
+                    " Log ",
+                    fmtDur(Date.now() - offMachine.start),
+                    " of downtime?"),
+                React.createElement("p", { className: `text-sm ${t.sub}` },
+                    "You've been off machine since ",
+                    fmtTime(offMachine.start),
+                    ". Coming back records that whole stretch as a ",
+                    React.createElement("b", null,
+                        "\u201C",
+                        OFF_MACHINE_REASON,
+                        "\u201D"),
+                    " stop on ",
+                    React.createElement("b", null, offMachine.machine),
+                    ". If you actually returned earlier and forgot to tap, discard it and report the real stop manually instead."),
+                React.createElement("div", { className: "flex gap-2" },
+                    React.createElement("button", { onClick: () => { const c = offConfirm; setOffConfirm(null); endOffMachine(c.target); }, className: "flex-1 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 rounded-lg" }, "Yes, log it"),
+                    React.createElement("button", { onClick: () => { const c = offConfirm; setOffConfirm(null); discardOffMachine(c.target); }, className: `px-4 ${t.sub} font-semibold` }, "Discard"))))),
         manualOpen && (React.createElement(ManualStopModal, { t: t, dark: dark, machine: machine, machines: machines, reasons: reasons, quickStops: quickStops, lastReason: lastReason, saving: saving, saveError: saveError, onSave: handleManualSave, onClose: () => setManualOpen(false) })),
         handoverOpen && (React.createElement(ShiftHandoverModal, { t: t, dark: dark, reportBase: buildShiftReport({ operator, machine, myStops: shiftStops, myShift, clearedBefore: shiftStart, activeShift, goalStatus }), handoverEmails: handoverEmails, syncCfg: syncCfg, lastHandover: handovers.find((h) => !h.machine || h.machine === machine) || null, onSaved: (rec) => { setHandovers((prev) => [rec, ...prev.filter((h) => h.id !== rec.id)]); sync.flush(); }, onClose: () => setHandoverOpen(false) }))));
 }
 function OperatorView(props) {
-    const { t, operator, setOperator, machine, setMachine, timer, onStop, pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError, myStops, visibleStops, machines, reasons, quickStops, applyQuickStop, lastReason, shift, shifts, shiftId, onSelectShift, shiftStart, hiddenStopCount, onNewShift, showAll, onToggleShowAll, setupLocked, onLockSetup, onUnlockSetup, onOpenManual, syncStatus, syncOn, rates, myProduction, onSaveProduction, myShift, goalStatus, onOpenHandover, } = props;
+    const { t, operator, setOperator, machine, setMachine, offMachine, onOffMachine, onBackOnMachine, offError, timer, onStop, pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError, myStops, visibleStops, machines, reasons, quickStops, applyQuickStop, lastReason, shift, shifts, shiftId, onSelectShift, shiftStart, hiddenStopCount, onNewShift, showAll, onToggleShowAll, setupLocked, onLockSetup, onUnlockSetup, onOpenManual, syncStatus, syncOn, rates, myProduction, onSaveProduction, myShift, goalStatus, onOpenHandover, } = props;
     const { state, elapsed, start, pause, resume } = timer;
     const { running, paused } = state;
+    const [offTick, setOffTick] = useState(0);
+    useEffect(() => {
+        if (!offMachine)
+            return;
+        const iv = setInterval(() => setOffTick((n) => n + 1), 1000);
+        return () => clearInterval(iv);
+    }, [offMachine]);
+    const offElapsed = useMemo(() => (offMachine ? Math.max(0, Date.now() - offMachine.start) : 0), [offMachine, offTick]);
     const downtimeMs = useMemo(() => myStops.reduce((a, s) => a + s.duration, 0), [myStops]);
     const lastHourCount = useMemo(() => {
         const cutoff = Date.now() - 60 * 60 * 1000;
@@ -2583,12 +2775,21 @@ function OperatorView(props) {
                     React.createElement(Factory, { size: 13 }),
                     " MACHINE \u2014 tap to switch"),
                 machines.length <= 8 ? (React.createElement("div", { className: "flex flex-wrap gap-1.5" }, machines.map((m) => {
-                    const activeChip = m === machine;
+                    const activeChip = m === machine && !offMachine;
                     const timingHere = (running || paused) && state.machine === m;
                     return (React.createElement("button", { key: m, onClick: () => setMachine(m), className: `relative px-3 py-2.5 rounded-lg text-sm font-semibold transition active:scale-95 ${activeChip ? "bg-emerald-500 text-white shadow" : t.chip}` },
                         m,
                         timingHere && React.createElement("span", { className: "absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse", title: "Stop being timed here" })));
-                }))) : (React.createElement("select", { value: machine, onChange: (e) => setMachine(e.target.value), className: `border rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }, machines.map((m) => React.createElement("option", { key: m }, m))))),
+                }))) : (React.createElement("select", { value: machine, onChange: (e) => setMachine(e.target.value), className: `border rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }, machines.map((m) => React.createElement("option", { key: m }, m)))),
+                offMachine ? (React.createElement("button", { onClick: onBackOnMachine, className: "mt-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-bold bg-emerald-500 text-white shadow transition active:scale-95" },
+                    React.createElement(User, { size: 15 }),
+                    " Back on ",
+                    offMachine.machine,
+                    React.createElement("span", { className: "font-mono tabular-nums opacity-90" },
+                        "\u00B7 ",
+                        fmtClock(offElapsed)))) : !running && !pendingStop && (React.createElement("button", { onClick: onOffMachine, className: "mt-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold border-2 border-amber-400/70 text-amber-600 dark:text-amber-400 transition active:scale-95" },
+                    React.createElement(LogOut, { size: 15 }),
+                    " Off machine"))),
             shifts && shifts.length > 1 && (React.createElement("div", { className: "flex flex-col gap-1" },
                 React.createElement("span", { className: `text-xs font-semibold ${t.sub} flex items-center gap-1` },
                     React.createElement(Clock, { size: 13 }),
@@ -2612,10 +2813,20 @@ function OperatorView(props) {
                 ? "Stops are saved on this device only — turn on Server sync (Supervisor → Settings) to share with the supervisor."
                 : "Storage is unavailable, so stops are kept only until you close this tab. Export before leaving.")),
         syncOn && React.createElement(SyncStatusBadge, { t: t, status: syncStatus }),
+        offMachine && (React.createElement("div", { className: `${t.card} rounded-xl border-2 border-amber-400 p-4 flex items-center justify-between gap-3` },
+            React.createElement("div", { className: "flex items-center gap-2 min-w-0" },
+                React.createElement(LogOut, { size: 18, className: "text-amber-500 shrink-0" }),
+                React.createElement("div", { className: "min-w-0" },
+                    React.createElement("div", { className: "text-sm font-bold text-amber-500" }, "Off machine"),
+                    React.createElement("div", { className: `text-[11px] ${offError ? "text-red-500 font-semibold" : t.sub}` }, offError || React.createElement(React.Fragment, null,
+                        "Logging downtime on ",
+                        React.createElement("b", null, offMachine.machine),
+                        " \u2014 tap a machine or \u201CBack on\u201D when you return.")))),
+            React.createElement("div", { className: "font-mono font-bold tabular-nums text-amber-500 text-lg shrink-0" }, fmtClock(offElapsed)))),
         React.createElement("div", { className: `${t.card} rounded-xl p-6 flex flex-col items-center` },
             React.createElement("div", { className: `text-xs font-semibold tracking-wide ${t.sub} mb-1` }, paused ? `PAUSED — ${state.machine || machine}` : running ? `${(state.machine || machine).toUpperCase()} STOPPED — TIMING` : "READY"),
             React.createElement("div", { className: `text-6xl font-mono font-bold mb-5 tabular-nums ${paused ? "text-amber-500" : running ? "text-red-500" : t.sub}` }, fmtClock(elapsed)),
-            !running ? (React.createElement("button", { onClick: start, disabled: !!pendingStop, className: "flex items-center gap-2 bg-red-500 hover:bg-red-600 disabled:opacity-40 text-white font-bold text-lg px-12 py-5 rounded-full shadow-lg transition active:scale-95" },
+            !running ? (React.createElement("button", { onClick: start, disabled: !!pendingStop || !!offMachine, className: "flex items-center gap-2 bg-red-500 hover:bg-red-600 disabled:opacity-40 text-white font-bold text-lg px-12 py-5 rounded-full shadow-lg transition active:scale-95" },
                 React.createElement(Play, { size: 24, fill: "white" }),
                 " Start Stop")) : (React.createElement("div", { className: "flex gap-3" },
                 !paused ? (React.createElement("button", { onClick: pause, className: "flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-white font-bold px-7 py-5 rounded-full shadow-lg transition active:scale-95" },
@@ -2626,8 +2837,10 @@ function OperatorView(props) {
                 React.createElement("button", { onClick: onStop, className: "flex items-center gap-2 bg-slate-800 hover:bg-slate-900 text-white font-bold px-7 py-5 rounded-full shadow-lg transition active:scale-95" },
                     React.createElement(Square, { size: 20, fill: "white" }),
                     " End Stop"))),
-            React.createElement("p", { className: `text-xs ${t.sub} mt-3 text-center max-w-xs` }, "Tap \u201CStart Stop\u201D when the machine stops. Pause for short interruptions; \u201CEnd Stop\u201D when it runs again."),
-            !running && !pendingStop && (React.createElement("button", { onClick: onOpenManual, className: `mt-4 flex items-center gap-2 text-sm font-semibold ${t.chip} px-4 py-2.5 rounded-full active:scale-95 transition` },
+            React.createElement("p", { className: `text-xs ${t.sub} mt-3 text-center max-w-xs` }, offMachine
+                ? "You're off machine — that time is already being logged as downtime. Come back to a machine to time a stop."
+                : "Tap “Start Stop” when the machine stops. Pause for short interruptions; “End Stop” when it runs again."),
+            !running && !pendingStop && !offMachine && (React.createElement("button", { onClick: onOpenManual, className: `mt-4 flex items-center gap-2 text-sm font-semibold ${t.chip} px-4 py-2.5 rounded-full active:scale-95 transition` },
                 React.createElement(PencilLine, { size: 16 }),
                 " Report a stop manually"))),
         pendingStop && (React.createElement("div", { className: `${t.card} rounded-xl border-2 border-emerald-400 p-4 space-y-3` },
@@ -2955,7 +3168,7 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
     };
     const exportCSV = () => {
         const rows = [["Machine", "Reason", "Operator", "Start", "End", "Duration (s)", "Entry", "Notes", "Discarded", "Discard Reason"]];
-        logFiltered.forEach((s) => rows.push([s.machine, s.reason, s.operator, new Date(s.start).toISOString(), new Date(s.end).toISOString(), Math.round(s.duration / 1000), s.manual ? "manual" : "timed", s.notes || "", s.discarded ? "yes" : "no", s.discardReason || ""]));
+        logFiltered.forEach((s) => rows.push([s.machine, s.reason, s.operator, new Date(s.start).toISOString(), new Date(s.end).toISOString(), Math.round(s.duration / 1000), s.offMachine ? "off-machine" : s.manual ? "manual" : "timed", s.notes || "", s.discarded ? "yes" : "no", s.discardReason || ""]));
         const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
         downloadFile(csv, `stoptrack_export_${Date.now()}.csv`, "text/csv");
     };
@@ -3019,7 +3232,9 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
                     React.createElement("td", { className: `px-3 py-2 font-semibold ${s.discarded ? "line-through" : ""}` }, s.machine),
                     React.createElement("td", { className: "px-3 py-2" },
                         React.createElement("span", { className: s.discarded ? "line-through" : "" }, s.reason),
-                        s.manual && React.createElement("span", { className: "ml-1 text-[10px] uppercase tracking-wide bg-slate-400/20 text-slate-400 rounded px-1.5 py-0.5 align-middle" }, "manual"),
+                        s.offMachine
+                            ? React.createElement("span", { className: "ml-1 text-[10px] uppercase tracking-wide bg-amber-400/20 text-amber-500 rounded px-1.5 py-0.5 align-middle" }, "off machine")
+                            : s.manual && React.createElement("span", { className: "ml-1 text-[10px] uppercase tracking-wide bg-slate-400/20 text-slate-400 rounded px-1.5 py-0.5 align-middle" }, "manual"),
                         s.notes && React.createElement("div", { className: `text-xs ${t.sub}` }, s.notes),
                         s.discarded && React.createElement("div", { className: "text-xs text-amber-500 mt-0.5" },
                             "Discarded: ",
@@ -3657,6 +3872,11 @@ function ShiftHandoverModal({ t, dark, reportBase, handoverEmails, syncCfg, last
             operator: report.operator,
             machine: report.machineLabel || report.machine,
             machines: (report.machines || []).map((m) => m.machine),
+            machineStats: (report.machines || []).map((m) => ({
+                machine: m.machine, stops: m.stops, downtimeMs: m.downtimeMs,
+                mannedMs: Math.round(m.mannedMs || 0), units: m.units, scrap: m.scrap,
+                topReason: m.topReason || null, topReasonMs: m.topReasonMs || 0,
+            })),
             shiftName: report.shiftName || null,
             windowStart: report.windowStart, windowEnd: report.windowEnd,
             stopCount: report.stopCount, downtimeMs: report.downtimeMs,

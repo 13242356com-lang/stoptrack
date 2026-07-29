@@ -39,10 +39,15 @@ On any machine with Java installed (`keytool` ships with the JDK):
 keytool -genkeypair -v \
   -keystore stoptrack-release.jks \
   -alias stoptrack -keyalg RSA -keysize 2048 -validity 10000 \
-  -storepass "CHOOSE-A-STORE-PASSWORD" \
-  -keypass  "CHOOSE-A-KEY-PASSWORD" \
+  -storepass "CHOOSE-A-PASSWORD" \
+  -keypass  "CHOOSE-A-PASSWORD" \
   -dname "CN=StopTrack, O=Your Company, C=US"
 ```
+
+Use the **same** value for `-storepass` and `-keypass`. Modern `keytool` writes a
+PKCS12 keystore, which has no separate key password — a different `-keypass` is
+ignored with a warning, and the build later fails with *"keystore password was
+incorrect"* when Gradle tries the key password you gave it.
 
 Back up `stoptrack-release.jks` somewhere safe (a password manager / private
 drive). **Do not commit it.**
@@ -64,7 +69,7 @@ repository secret**. Add these four:
 | `SIGNING_KEYSTORE_B64` | the entire contents of `keystore.b64` |
 | `SIGNING_STORE_PASSWORD` | the store password you chose |
 | `SIGNING_KEY_ALIAS` | `stoptrack` |
-| `SIGNING_KEY_PASSWORD` | the key password you chose |
+| `SIGNING_KEY_PASSWORD` | the same password again (see step 1) |
 
 That's it. The next release build signs both apps with your private key. Verify:
 download a release APK and run `apksigner verify --print-certs StopTrack-phone.apk`

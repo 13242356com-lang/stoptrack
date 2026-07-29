@@ -3,7 +3,7 @@ import {
   Play, Square, Pause, Clock, Factory, AlertCircle, BarChart3, List, User,
   RefreshCw, Trash2, CheckCircle, Settings, Plus, X, Download, Search,
   Moon, Sun, TrendingUp, RotateCcw, Zap, Archive, Sparkles, Lock, Unlock, PencilLine, Target,
-  Share2,
+  Share2, LogOut,
 } from "lucide-react";
 
 /* ============================================================================
@@ -21,8 +21,12 @@ const DEFAULT_MACHINES = [
 const DEFAULT_REASONS = [
   "Mechanical fault", "Quality check", "Waiting on maintenance", "Tooling change",
   "Cleaning", "Material shortage", "Changeover / Setup", "Material jam",
-  "Operator break", "Electrical fault", "Other",
+  "Operator break", "Electrical fault", "No operator", "Other",
 ];
+// The reason written by the "Off machine" button. These machines only produce
+// while they run, and they only run with someone at them — so an operator being
+// away IS downtime, recorded as an ordinary stop rather than a separate bucket.
+const OFF_MACHINE_REASON = "No operator";
 // Quick-stop buttons shown on the operator timer (reason + optional default note).
 const DEFAULT_QUICK_STOPS = [
   { label: "Mechanical fault", reason: "Mechanical fault" },
@@ -220,12 +224,27 @@ function buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, 
   myStops.forEach((s) => { byReason[s.reason] = (byReason[s.reason] || 0) + s.duration; });
   const topReasons = Object.entries(byReason).sort((a, b) => b[1] - a[1]);
   const longest = myStops.reduce((best, s) => (!best || s.duration > best.duration ? s : best), null);
+
+  // Per-machine reasons. Without this the handout is one blended total: a
+  // roaming operator's three machines all read the same downtime, and the next
+  // shift can't tell which one is actually in trouble. Worst machine first,
+  // because that's the one they need to know about.
+  const perMachine = {};
+  myStops.forEach((s) => {
+    const bag = (perMachine[s.machine] = perMachine[s.machine] || {});
+    bag[s.reason] = (bag[s.reason] || 0) + s.duration;
+  });
+  const machines = (myShift.rows || []).map((row) => {
+    const top = Object.entries(perMachine[row.machine] || {}).sort((a, b) => b[1] - a[1])[0];
+    return { ...row, topReason: top ? top[0] : null, topReasonMs: top ? top[1] : 0 };
+  }).sort((a, b) => (b.downtimeMs - a.downtimeMs) || (b.mannedMs - a.mannedMs));
+
   return {
     operator: operator.trim() || "Unnamed", machine,
     shiftName: activeShift?.name || null,
     windowStart: clearedBefore || null, windowEnd: Date.now(),
     stopCount: myStops.length, downtimeMs, topReasons, longest,
-    machines: myShift.rows, hasSessions: myShift.hasSessions,
+    machines, hasSessions: myShift.hasSessions,
     oee: myShift.overall, goal: goalStatus || null,
     notes: myStops.filter((s) => s.notes).map((s) => ({ reason: s.reason, notes: s.notes })),
     // The human layer, written by the operator at handover time.
@@ -264,6 +283,7 @@ function formatReportText(r) {
       bits.push(`${m.stops} stop${m.stops === 1 ? "" : "s"}`);
       if (m.downtimeMs) bits.push(`${fmtDur(m.downtimeMs)} down`);
       if (m.units || m.scrap) bits.push(`${m.units} units / ${m.scrap} scrap`);
+      if (m.topReason) bits.push(`mostly ${m.topReason} (${fmtDur(m.topReasonMs)})`);
       lines.push(`  - ${m.machine}: ${bits.join(" · ")}`);
     });
   }
@@ -409,15 +429,20 @@ function drawHandout(r, scale = 2.5) {
   const flagRows = r.flags && r.flags.length ? layoutFlags(meas, r.flags, contentW - 32) : [];
   const reasons = (r.topReasons || []).slice(0, 5);
 
+  // Per-machine rows, worst first. Only when the operator actually roamed —
+  // for a single machine the tiles above already say everything.
+  const machineRows = (r.machines || []).length > 1 ? r.machines.slice(0, 6) : [];
+
   const showGoal = r.goalPct != null;
   const hHeader = 74, hWho = 40, hTiles = 2 * 74 + 1, hGoal = showGoal ? 92 : 0;
+  const hMachines = machineRows.length ? 34 + machineRows.length * 32 + 12 : 0;
   const hReasons = reasons.length ? 34 + reasons.length * 23 + (r.longest ? 22 : 0) + 12 : 0;
   const hNoteBox = (noteLines.length || flagRows.length)
     ? 16 + 24 + noteLines.length * 19 + (flagRows.length ? 8 + flagRows.length * 27 : 0) + 14
     : 0;
   const hNote = hNoteBox ? hNoteBox + 26 : 0;
   const hFoot = 42;
-  const total = hHeader + hWho + hTiles + hGoal + hReasons + hNote + hFoot;
+  const total = hHeader + hWho + hTiles + hGoal + hMachines + hReasons + hNote + hFoot;
 
   const cv = document.createElement("canvas");
   cv.width = Math.round(H.W * scale);
@@ -552,6 +577,38 @@ function drawHandout(r, scale = 2.5) {
     y += hGoal; rule(y);
   }
 
+  // ---- per machine ----------------------------------------------------------
+  // The fix for a roaming operator's handout: without this every machine reads
+  // the same blended downtime and the next shift can't tell which one is sick.
+  if (machineRows.length) {
+    label("Downtime by machine", H.PAD, y + 24);
+    const maxDown = machineRows.reduce((mx, m) => Math.max(mx, m.downtimeMs || 0), 0) || 1;
+    const nameW = 132, valW = 50;
+    const barX = H.PAD + nameW + 10;
+    const barW = H.W - H.PADR - valW - 8 - barX;
+    machineRows.forEach((m, i) => {
+      const ry = y + 34 + i * 32;
+      c.font = `700 12.5px ${H.sans}`; c.fillStyle = H.ink;
+      c.fillText(ellipsize(c, m.machine, nameW), H.PAD, ry + 11);
+      // What actually happened on THIS machine, not the shift average.
+      const bits = [`${m.stops} stop${m.stops === 1 ? "" : "s"}`];
+      if (r.hasSessions && m.mannedMs) bits.push(shortDur(m.mannedMs));
+      if (m.topReason) bits.push(m.topReason);
+      c.font = `10.5px ${H.sans}`; c.fillStyle = H.ink3;
+      c.fillText(ellipsize(c, bits.join(" · "), nameW + 40), H.PAD, ry + 25);
+
+      c.fillStyle = H.surf2; roundRect(c, barX, ry, barW, 14, 4); c.fill();
+      c.strokeStyle = H.line; c.lineWidth = 1; c.stroke();
+      const w = Math.max(3, barW * ((m.downtimeMs || 0) / maxDown));
+      const g3 = c.createLinearGradient(barX, 0, barX + w, 0);
+      g3.addColorStop(0, "#b23636"); g3.addColorStop(1, H.down);
+      c.fillStyle = g3; roundRect(c, barX, ry, w, 14, 4); c.fill();
+      c.font = `12px ${H.mono}`; c.fillStyle = H.ink2; c.textAlign = "right";
+      c.fillText(shortDur(m.downtimeMs || 0), H.W - H.PADR, ry + 11); c.textAlign = "left";
+    });
+    y += hMachines; rule(y);
+  }
+
   // ---- downtime by reason ---------------------------------------------------
   if (reasons.length) {
     label("Downtime by reason", H.PAD, y + 24);
@@ -578,7 +635,10 @@ function drawHandout(r, scale = 2.5) {
     if (r.longest) {
       const ly = y + 34 + reasons.length * 23 + 12;
       c.font = `12px ${H.sans}`; c.fillStyle = H.ink2;
-      c.fillText(`Longest: ${r.longest.reason} · ${shortDur(r.longest.duration)} · ${shortTime(r.longest.start)}`, H.PAD, ly);
+      // Name the machine when there was more than one — "Longest: Tooling
+      // change, 40m" is useless to the next shift if they don't know where.
+      const lw = machineRows.length ? `${r.longest.machine} · ` : "";
+      c.fillText(ellipsize(c, `Longest: ${lw}${r.longest.reason} · ${shortDur(r.longest.duration)} · ${shortTime(r.longest.start)}`, contentW), H.PAD, ly);
     }
     y += hReasons; rule(y);
   }
@@ -1646,6 +1706,11 @@ export default function App() {
   const [production, setProduction] = useState([]);
   // machine sessions (operator presence spans) — synced like stops.
   const [sessions, setSessions] = useState([]);
+  // An open "off machine" span: the operator has stepped away from every
+  // machine. Closing it writes an ordinary stop, so downtime, the reason
+  // breakdown, exports and the handout all pick it up with no new plumbing.
+  // { machine, operator, start } | null
+  const [offMachine, setOffMachine] = useState(null);
   // shift handover report dialog + the log of handouts already given
   const [handoverOpen, setHandoverOpen] = useState(false);
   const [handovers, setHandovers] = useState([]);
@@ -1809,6 +1874,12 @@ export default function App() {
         if (prefs.lastReason) setLastReason(prefs.lastReason);
         if (prefs.clearedBefore) setClearedBefore(prefs.clearedBefore);
         if (prefs.shiftId) setShiftId(prefs.shiftId);
+        // An open off-machine span survives a reload. It carries its own
+        // operator/machine so it stays correctly attributed even when the setup
+        // wasn't locked; a span older than this shift is dropped further down.
+        // `restored` marks it for the one-time staleness check below; a live
+        // span never carries it, so New Shift can't discard one.
+        if (prefs.offMachine && prefs.offMachine.start) setOffMachine({ ...prefs.offMachine, restored: true });
         // Only a *locked* setup carries the name/machine across a refresh.
         // An unlocked session intentionally starts blank each load.
         if (prefs.setupLocked) {
@@ -1849,8 +1920,11 @@ export default function App() {
       setSessions(records);
       setLoading(false);
 
-      // A locked setup means "I'm working" — presence resumes on load.
-      if (prefs && prefs.setupLocked && prefs.operator) {
+      // A locked setup means "I'm working" — presence resumes on load. Not while
+      // an off-machine span is being restored, though: the operator is away from
+      // every machine, and opening presence here would credit manned time to a
+      // machine they aren't standing at.
+      if (prefs && prefs.setupLocked && prefs.operator && !(prefs.offMachine && prefs.offMachine.start)) {
         openSession(prefs.machine || (cfg?.machines?.[0]) || DEFAULT_MACHINES[0], prefs.operator);
       }
 
@@ -2008,8 +2082,12 @@ export default function App() {
     // operator/machine/setupLocked are persisted so a locked setup survives a
     // page refresh. When unlocked we still write them, but the loader ignores
     // operator/machine unless setupLocked is true.
-    api.savePrefs({ dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId, ...patch });
-  }, [dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId]);
+    // EVERY persisted pref must be listed here: savePrefs REPLACES the blob, so
+    // anything missing from this base is erased by an unrelated write. (An open
+    // `offMachine` span used to vanish the moment someone tapped the dark-mode
+    // toggle, losing the operator's away time silently.)
+    api.savePrefs({ dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId, offMachine, ...patch });
+  }, [dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId, offMachine]);
 
   const updateMachines = (next) => { setMachines(next); persistConfig({ machines: next }); };
   const updateReasons = (next) => { setReasons(next); persistConfig({ reasons: next }); };
@@ -2130,6 +2208,9 @@ export default function App() {
   const lockSetup = () => {
     setSetupLocked(true);
     persistPrefs({ setupLocked: true, operator, machine });
+    // While off machine there is deliberately no open span: opening presence
+    // here would put manned time on a machine the operator isn't standing at.
+    if (offMachine) return;
     const open = openSessRef.current;
     if (!open) openSession(machine, operator);
     else if (open.operator !== operator.trim()) { closeSession(); openSession(machine, operator); }
@@ -2167,6 +2248,152 @@ export default function App() {
     setSaving(false);
     return res.ok;
   };
+
+  // ---- off machine ---------------------------------------------------------
+  // "I'm not at any machine." For equipment that only produces while it runs and
+  // only runs while someone is there, that absence is downtime — so ending the
+  // span writes a normal stop on the machine that was left, reason "No operator".
+  // Nothing is ever inferred from silence: only an explicit tap opens or closes
+  // this, because under this model a false "absent" reading would FABRICATE
+  // downtime on a machine, and downtime is the number the app exists to be
+  // trusted on.
+  // Is a stop being timed right now? In the Android shell the live timer is the
+  // NATIVE one. Before the first state push `nativeTimer` is still null, and an
+  // unknown timer must count as BUSY: a cold start from the notification while a
+  // stop is already running would otherwise let a span open on top of it.
+  const timerBusy = inShell
+    ? (nativeTimer == null || nativeTimer.running || nativeTimer.paused || !!nativePending)
+    : (timer.state.running || timer.state.paused || !!pendingStop);
+
+  const [offError, setOffError] = useState("");
+  const offSavingRef = useRef(false);
+
+  const startOffMachine = useCallback(() => {
+    // A timed stop already accounts for this machine being down; opening an
+    // off-machine span on top of it would double-count the same minutes.
+    if (timerBusy) return;
+    const rec = { machine, operator: operator.trim() || "Unnamed", start: Date.now() };
+    setOffError("");
+    setOffMachine(rec);
+    persistPrefs({ offMachine: rec });
+    closeSession(); // presence ends — they are not at a machine
+  }, [timerBusy, machine, operator, closeSession, persistPrefs]);
+
+  // Ends the span and records it. `nextMachine` lets "tap another machine" be
+  // the same gesture as coming back: the stop is still attributed to the machine
+  // that was LEFT, then the operator lands on the new one. `endTs` lets an
+  // auto-close land exactly where the overlapping event began.
+  const endOffMachine = useCallback(async (nextMachine, endTs) => {
+    const rec = offMachine;
+    // Two dispatches in one task would otherwise write the same span twice.
+    if (!rec || offSavingRef.current) return;
+    offSavingRef.current = true;
+    setOffMachine(null);
+    persistPrefs({ offMachine: null });
+    const target = nextMachine || rec.machine;
+
+    const end = Math.max(rec.start, endTs || Date.now());
+    const duration = end - rec.start;
+    // A mistap is not a stop.
+    if (duration >= 1000) {
+      const record = {
+        id: `${rec.start}-${Math.floor(Math.random() * 1e6)}`,
+        machine: rec.machine,
+        operator: rec.operator,
+        start: rec.start, end, duration,
+        reason: OFF_MACHINE_REASON, notes: "",
+        offMachine: true, discarded: false,
+        loggedAt: end,   // recorded now → belongs to the current shift
+        updatedAt: end,  // last-write-wins clock for sync
+      };
+      const res = await api.saveStop(record);
+      if (res.ok) { setStops((prev) => [record, ...prev]); setOffError(""); sync.flush(); }
+      else {
+        // Don't swallow the operator's away time. Re-open the span so the clock
+        // keeps running and a retry still records it, and say so where they're
+        // actually looking (the off-machine banner, not the stop-document card).
+        setOffMachine(rec);
+        persistPrefs({ offMachine: rec });
+        // Lead with what the operator should DO. A bare "QuotaExceededError" in
+        // the banner tells someone in gloves nothing.
+        setOffError(`Didn't save — you're still off machine, tap again to retry.${res.error ? ` (${res.error})` : ""}`);
+        offSavingRef.current = false;
+        return;
+      }
+    }
+
+    setMachine(target);
+    openSession(target); // back at a machine → presence resumes
+    offSavingRef.current = false;
+  }, [offMachine, persistPrefs, sync, openSession]);
+
+  // Above this, coming back asks first. A forgotten tap is the one way this
+  // button can invent hours of downtime, and unlike a manual report (where the
+  // operator types the duration) nothing else here makes them look at it.
+  const OFF_CONFIRM_MS = 90 * 60 * 1000;
+  const [offConfirm, setOffConfirm] = useState(null); // { target } | null
+
+  // Close the span WITHOUT recording — for the "I forgot to tap back" case,
+  // where the honest answer is no record rather than an invented one.
+  const discardOffMachine = useCallback((next) => {
+    const rec = offMachine;
+    if (!rec) return;
+    setOffMachine(null);
+    persistPrefs({ offMachine: null });
+    setOffError("");
+    const target = next || rec.machine;
+    setMachine(target);
+    openSession(target);
+  }, [offMachine, persistPrefs, openSession]);
+
+  // Returning from off machine. Long spans route through the confirmation.
+  const backOnMachine = useCallback((next) => {
+    if (offMachine && Date.now() - offMachine.start >= OFF_CONFIRM_MS) {
+      setOffConfirm({ target: next || offMachine.machine });
+      return;
+    }
+    endOffMachine(next);
+  }, [offMachine, endOffMachine]);
+
+  // Every machine tap in the operator UI routes through here so that returning
+  // from off-machine and switching machines are one gesture.
+  const chooseMachine = useCallback((next) => {
+    if (offMachine) { backOnMachine(next); return; }
+    switchMachine(next);
+  }, [offMachine, backOnMachine, switchMachine]);
+
+  // A stop started from OUTSIDE this view — the Android notification or the
+  // floating bubble, which know nothing about off-machine — must not run on top
+  // of an open span, or every minute of it is billed twice as downtime. Close
+  // the span at the moment that stop began.
+  const nativeRunning = inShell && !!nativeTimer && (nativeTimer.running || nativeTimer.paused);
+  useEffect(() => {
+    if (!nativeRunning || !offMachine) return;
+    endOffMachine(undefined, nativeTimer.startTs || Date.now());
+  }, [nativeRunning, offMachine, nativeTimer, endOffMachine]);
+
+  // A span RESTORED from a previous session that predates the current shift is
+  // dropped, not recorded: the app cannot know when the operator actually came
+  // back, and inventing that duration would put fabricated downtime on the
+  // board. This runs once per restore and then clears the marker — a LIVE span
+  // must survive "New Shift" (which moves shiftStart to now), or an operator who
+  // taps it on returning from break loses the whole break.
+  // The ref makes this run at most once per load no matter what: it rewrites
+  // `offMachine` with a fresh object, which is its own effect dependency, so
+  // without the latch a dropped condition here becomes an infinite re-render.
+  const offRestoreCheckedRef = useRef(false);
+  useEffect(() => {
+    if (offRestoreCheckedRef.current || !offMachine || !offMachine.restored || !shiftWindow) return;
+    offRestoreCheckedRef.current = true;
+    if (offMachine.start < shiftStart) {
+      setOffMachine(null);
+      persistPrefs({ offMachine: null });
+    } else {
+      const { restored, ...live } = offMachine;
+      setOffMachine(live);
+      persistPrefs({ offMachine: live });
+    }
+  }, [offMachine, shiftWindow, shiftStart, persistPrefs]);
 
   // ---- shift output (production for OEE) -----------------------------------
   // One record per (machine, shift, operator), upserted — re-entering counts
@@ -2439,7 +2666,8 @@ export default function App() {
       <main className="max-w-3xl mx-auto p-4 pb-24">
         {view === "operator" ? (
           <OperatorView
-            t={t} operator={operator} setOperator={setOperator} machine={machine} setMachine={switchMachine}
+            t={t} operator={operator} setOperator={setOperator} machine={machine} setMachine={chooseMachine}
+            offMachine={offMachine} onOffMachine={startOffMachine} onBackOnMachine={() => backOnMachine()} offError={offError}
             timer={effectiveTimer} onStop={handleStop}
             pendingStop={effectivePending} reason={reason} setReason={setReason} notes={notes} setNotes={setNotes}
             onSave={handleSave} onDiscardPending={handleDiscardPending} saving={saving} saveError={saveError}
@@ -2499,6 +2727,25 @@ export default function App() {
         </div>
       )}
 
+      {offConfirm && offMachine && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30" onClick={() => setOffConfirm(null)}>
+          <div className={`${dark ? "bg-slate-900" : "bg-white"} rounded-xl shadow-xl p-5 max-w-sm w-full space-y-3`} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center gap-2 font-bold"><AlertCircle size={18} className="text-amber-500" /> Log {fmtDur(Date.now() - offMachine.start)} of downtime?</div>
+            <p className={`text-sm ${t.sub}`}>
+              You've been off machine since {fmtTime(offMachine.start)}. Coming back records that whole
+              stretch as a <b>“{OFF_MACHINE_REASON}”</b> stop on <b>{offMachine.machine}</b>. If you
+              actually returned earlier and forgot to tap, discard it and report the real stop manually instead.
+            </p>
+            <div className="flex gap-2">
+              <button onClick={() => { const c = offConfirm; setOffConfirm(null); endOffMachine(c.target); }}
+                className="flex-1 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 rounded-lg">Yes, log it</button>
+              <button onClick={() => { const c = offConfirm; setOffConfirm(null); discardOffMachine(c.target); }}
+                className={`px-4 ${t.sub} font-semibold`}>Discard</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {manualOpen && (
         <ManualStopModal
           t={t} dark={dark} machine={machine} machines={machines} reasons={reasons} quickStops={quickStops}
@@ -2526,7 +2773,7 @@ export default function App() {
    ========================================================================== */
 function OperatorView(props) {
   const {
-    t, operator, setOperator, machine, setMachine, timer, onStop,
+    t, operator, setOperator, machine, setMachine, offMachine, onOffMachine, onBackOnMachine, offError, timer, onStop,
     pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError,
     myStops, visibleStops, machines, reasons, quickStops, applyQuickStop, lastReason,
     shift, shifts, shiftId, onSelectShift, shiftStart, hiddenStopCount, onNewShift, showAll, onToggleShowAll,
@@ -2537,6 +2784,19 @@ function OperatorView(props) {
 
   const { state, elapsed, start, pause, resume } = timer;
   const { running, paused } = state;
+
+  // Live clock for the off-machine banner. The stop timer's own interval only
+  // ticks while a stop is being timed, so this needs its own.
+  const [offTick, setOffTick] = useState(0);
+  useEffect(() => {
+    if (!offMachine) return;
+    const iv = setInterval(() => setOffTick((n) => n + 1), 1000);
+    return () => clearInterval(iv);
+  }, [offMachine]);
+  const offElapsed = useMemo(
+    () => (offMachine ? Math.max(0, Date.now() - offMachine.start) : 0),
+    [offMachine, offTick],
+  );
 
   // ---- current-shift stats (own, non-discarded, inside the shift window) ---
   // Total downtime shown on the current board.
@@ -2637,7 +2897,7 @@ function OperatorView(props) {
           {machines.length <= 8 ? (
             <div className="flex flex-wrap gap-1.5">
               {machines.map((m) => {
-                const activeChip = m === machine;
+                const activeChip = m === machine && !offMachine;
                 const timingHere = (running || paused) && state.machine === m;
                 return (
                   <button key={m} onClick={() => setMachine(m)}
@@ -2653,6 +2913,28 @@ function OperatorView(props) {
               className={`border rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}`}>
               {machines.map((m) => <option key={m}>{m}</option>)}
             </select>
+          )}
+          {/* Stepping away from every machine. One tap, the same gesture as a
+              machine switch — and because these machines only produce while
+              someone is running them, it logs downtime rather than a new
+              category. */}
+          {offMachine ? (
+            // Never hidden, whatever else is on screen: this is the operator's
+            // only way to stop the clock, and it keeps ticking regardless.
+            // The running total is on the button so a forgotten tap is obvious
+            // BEFORE it lands hours of downtime on a machine.
+            <button onClick={onBackOnMachine}
+              className="mt-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-bold bg-emerald-500 text-white shadow transition active:scale-95">
+              <User size={15} /> Back on {offMachine.machine}
+              <span className="font-mono tabular-nums opacity-90">· {fmtClock(offElapsed)}</span>
+            </button>
+          ) : !running && !pendingStop && (
+            // Amber, not the neutral chip styling of a machine button right
+            // above it — a mistap here starts logging downtime.
+            <button onClick={onOffMachine}
+              className="mt-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-semibold border-2 border-amber-400/70 text-amber-600 dark:text-amber-400 transition active:scale-95">
+              <LogOut size={15} /> Off machine
+            </button>
           )}
         </div>
         {shifts && shifts.length > 1 && (
@@ -2696,6 +2978,22 @@ function OperatorView(props) {
       {/* server-sync status — only shown when sync is configured */}
       {syncOn && <SyncStatusBadge t={t} status={syncStatus} />}
 
+      {/* off machine — downtime is accruing on the machine that was left */}
+      {offMachine && (
+        <div className={`${t.card} rounded-xl border-2 border-amber-400 p-4 flex items-center justify-between gap-3`}>
+          <div className="flex items-center gap-2 min-w-0">
+            <LogOut size={18} className="text-amber-500 shrink-0" />
+            <div className="min-w-0">
+              <div className="text-sm font-bold text-amber-500">Off machine</div>
+              <div className={`text-[11px] ${offError ? "text-red-500 font-semibold" : t.sub}`}>
+                {offError || <>Logging downtime on <b>{offMachine.machine}</b> — tap a machine or “Back on” when you return.</>}
+              </div>
+            </div>
+          </div>
+          <div className="font-mono font-bold tabular-nums text-amber-500 text-lg shrink-0">{fmtClock(offElapsed)}</div>
+        </div>
+      )}
+
       {/* timer */}
       <div className={`${t.card} rounded-xl p-6 flex flex-col items-center`}>
 
@@ -2706,7 +3004,9 @@ function OperatorView(props) {
           {fmtClock(elapsed)}
         </div>
         {!running ? (
-          <button onClick={start} disabled={!!pendingStop}
+          // Off machine already counts these minutes as downtime — timing a stop
+          // on top would double-count them.
+          <button onClick={start} disabled={!!pendingStop || !!offMachine}
             className="flex items-center gap-2 bg-red-500 hover:bg-red-600 disabled:opacity-40 text-white font-bold text-lg px-12 py-5 rounded-full shadow-lg transition active:scale-95">
             <Play size={24} fill="white" /> Start Stop
           </button>
@@ -2720,8 +3020,12 @@ function OperatorView(props) {
             <button onClick={onStop} className="flex items-center gap-2 bg-slate-800 hover:bg-slate-900 text-white font-bold px-7 py-5 rounded-full shadow-lg transition active:scale-95"><Square size={20} fill="white" /> End Stop</button>
           </div>
         )}
-        <p className={`text-xs ${t.sub} mt-3 text-center max-w-xs`}>Tap “Start Stop” when the machine stops. Pause for short interruptions; “End Stop” when it runs again.</p>
-        {!running && !pendingStop && (
+        <p className={`text-xs ${t.sub} mt-3 text-center max-w-xs`}>
+          {offMachine
+            ? "You're off machine — that time is already being logged as downtime. Come back to a machine to time a stop."
+            : "Tap “Start Stop” when the machine stops. Pause for short interruptions; “End Stop” when it runs again."}
+        </p>
+        {!running && !pendingStop && !offMachine && (
           <button onClick={onOpenManual} className={`mt-4 flex items-center gap-2 text-sm font-semibold ${t.chip} px-4 py-2.5 rounded-full active:scale-95 transition`}>
             <PencilLine size={16} /> Report a stop manually
           </button>
@@ -3092,7 +3396,7 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
 
   const exportCSV = () => {
     const rows = [["Machine", "Reason", "Operator", "Start", "End", "Duration (s)", "Entry", "Notes", "Discarded", "Discard Reason"]];
-    logFiltered.forEach((s) => rows.push([s.machine, s.reason, s.operator, new Date(s.start).toISOString(), new Date(s.end).toISOString(), Math.round(s.duration / 1000), s.manual ? "manual" : "timed", s.notes || "", s.discarded ? "yes" : "no", s.discardReason || ""]));
+    logFiltered.forEach((s) => rows.push([s.machine, s.reason, s.operator, new Date(s.start).toISOString(), new Date(s.end).toISOString(), Math.round(s.duration / 1000), s.offMachine ? "off-machine" : s.manual ? "manual" : "timed", s.notes || "", s.discarded ? "yes" : "no", s.discardReason || ""]));
     const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
     downloadFile(csv, `stoptrack_export_${Date.now()}.csv`, "text/csv");
   };
@@ -3169,7 +3473,9 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
                   {logFiltered.map((s) => (
                     <tr key={s.id} className={`border-t ${t.border} ${s.discarded ? "opacity-50" : t.rowHover}`}>
                       <td className={`px-3 py-2 font-semibold ${s.discarded ? "line-through" : ""}`}>{s.machine}</td>
-                      <td className="px-3 py-2"><span className={s.discarded ? "line-through" : ""}>{s.reason}</span>{s.manual && <span className="ml-1 text-[10px] uppercase tracking-wide bg-slate-400/20 text-slate-400 rounded px-1.5 py-0.5 align-middle">manual</span>}{s.notes && <div className={`text-xs ${t.sub}`}>{s.notes}</div>}{s.discarded && <div className="text-xs text-amber-500 mt-0.5">Discarded: {s.discardReason}</div>}</td>
+                      <td className="px-3 py-2"><span className={s.discarded ? "line-through" : ""}>{s.reason}</span>{s.offMachine
+                        ? <span className="ml-1 text-[10px] uppercase tracking-wide bg-amber-400/20 text-amber-500 rounded px-1.5 py-0.5 align-middle">off machine</span>
+                        : s.manual && <span className="ml-1 text-[10px] uppercase tracking-wide bg-slate-400/20 text-slate-400 rounded px-1.5 py-0.5 align-middle">manual</span>}{s.notes && <div className={`text-xs ${t.sub}`}>{s.notes}</div>}{s.discarded && <div className="text-xs text-amber-500 mt-0.5">Discarded: {s.discardReason}</div>}</td>
                       <td className={`px-3 py-2 ${t.sub}`}>{s.operator}</td>
                       <td className={`px-3 py-2 ${t.sub} text-xs whitespace-nowrap`}>{fmtTime(s.start)}</td>
                       <td className={`px-3 py-2 text-right font-mono font-bold whitespace-nowrap ${s.discarded ? `${t.sub} line-through` : "text-red-500"}`}>{fmtDur(s.duration)}</td>
@@ -3810,6 +4116,14 @@ function ShiftHandoverModal({ t, dark, reportBase, handoverEmails, syncCfg, last
       operator: report.operator,
       machine: report.machineLabel || report.machine,
       machines: (report.machines || []).map((m) => m.machine),
+      // The per-machine split, not just the names: a filed handover for a
+      // roaming operator was otherwise one blended total, so the supervisor's
+      // log couldn't say which machine the downtime belonged to either.
+      machineStats: (report.machines || []).map((m) => ({
+        machine: m.machine, stops: m.stops, downtimeMs: m.downtimeMs,
+        mannedMs: Math.round(m.mannedMs || 0), units: m.units, scrap: m.scrap,
+        topReason: m.topReason || null, topReasonMs: m.topReasonMs || 0,
+      })),
       shiftName: report.shiftName || null,
       windowStart: report.windowStart, windowEnd: report.windowEnd,
       stopCount: report.stopCount, downtimeMs: report.downtimeMs,
