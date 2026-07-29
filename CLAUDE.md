@@ -98,6 +98,7 @@ seam clean.
   reason,        // from the configurable reasons list
   notes,         // optional
   manual,        // true if entered via manual report (else absent/false)
+  offMachine,    // true if produced by the "Off machine" button (see below)
   discarded,     // soft-discard flag (kept in storage + exports)
   discardReason, // set when discarded
   discardedAt,   // epoch ms; auto-purged after 60 days
@@ -115,6 +116,33 @@ the supervisor view. This was a real bug; the fix was `loggedAt`. Filter uses
 
 ---
 
+### "Off machine" — absence is downtime, not a new bucket
+StopTrack targets equipment that only produces while it runs, and only runs with
+someone at it. So an operator being away from **every** machine is downtime, and
+the `— Off machine —` button models it as an **ordinary stop** (reason
+`OFF_MACHINE_REASON` = "No operator", `offMachine: true`) rather than a separate
+category. That's deliberate: stats, the reason breakdown, exports and the handout
+all pick it up with no extra plumbing.
+
+Rules that must not be reintroduced-around:
+- **Never infer absence from silence.** The presence heartbeat is a `setInterval`
+  in the page (`StopTrack.tsx`, "Heartbeat"), and a pocketed phone throttles or
+  suspends it. Under this model a false "absent" reading would *fabricate*
+  downtime on a machine — the one number the app has to be trusted on. Only an
+  explicit tap opens or closes the span.
+- **The stop belongs to the machine that was LEFT**, not the one returned to.
+  Tapping another machine is a valid way to come back (`chooseMachine`).
+- **No double counting.** Off machine is unavailable while a stop is being timed,
+  and Start Stop is disabled while off machine — either alone already covers
+  those minutes.
+- A restored span older than the current shift is **dropped, not recorded**: the
+  app can't know when the operator came back, so inventing the duration would put
+  fabricated downtime on the board.
+
+Still open (deliberately not built): a per-machine "runs unattended" flag, for
+automatic equipment where absence is *not* downtime. Today every machine is
+treated as needing an operator.
+
 ## Features (current state)
 
 **Operator view**
@@ -125,6 +153,8 @@ the supervisor view. This was a real bug; the fix was `loggedAt`. Filter uses
 - Live timer: Start / Pause / Resume / End Stop.
 - **Report a stop manually** button → duration-based entry (min + sec), reason,
   notes. Saved as a normal record with `manual: true`.
+- **Off machine** button under the machine picker → logs the away time as a
+  "No operator" stop on the machine that was left (see above).
 - Document-stop flow after ending a timer (reason, quick-stops, notes).
 - "This shift" summary + **New Shift** button (with confirmation): hides current
   stops from view via a `clearedBefore` cutoff. **Never deletes** — data stays in

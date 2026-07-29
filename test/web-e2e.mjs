@@ -374,6 +374,99 @@ async function main() {
     `a fresh install with no sessions must show no manned time, saw ${JSON.stringify(fabricated)}`);
   await ctx3.close();
 
+  // ---- off machine ---------------------------------------------------------
+  // Stepping away from every machine is DOWNTIME on the machine that was left:
+  // this equipment only produces while it runs, and only runs with someone at
+  // it. So the button must write an ordinary stop — not a new bucket that the
+  // stats, exports and handout would all have to learn about separately.
+  // No mock native here: this is the plain-browser path.
+  const ctxOff = await browser.newContext();
+  const pOff = await ctxOff.newPage();
+  await pOff.route(/unpkg\.com|cdn\.tailwindcss\.com/, async (route) => {
+    const u = route.request().url();
+    if (u.includes("react-dom")) return route.fulfill({ contentType: "application/javascript", body: reactDomUmd });
+    if (u.includes("react")) return route.fulfill({ contentType: "application/javascript", body: reactUmd });
+    return route.fulfill({ contentType: "application/javascript", body: "/* tailwind stub */" });
+  });
+  await pOff.addInitScript(() => {
+    const now = Date.now();
+    const hhmm = (ms) => {
+      const d = new Date(ms);
+      return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    };
+    localStorage.setItem("config:lists", JSON.stringify({
+      machines: ["Line 1", "Line 2"],
+      // "No operator" is deliberately NOT in this list: an existing supervisor's
+      // reasons must not need editing for the button to work.
+      reasons: ["Cleaning", "Material jam"], quickStops: [],
+      shifts: [{ id: "t1", name: "Test", start: hhmm(now - 3600e3), end: hhmm(now + 7 * 3600e3), goals: {} }],
+      rates: {}, handoverEmails: [], updatedAt: now,
+    }));
+    localStorage.setItem("config:prefs", JSON.stringify({ operator: "Bob", setupLocked: true, machine: "Line 1" }));
+  });
+  await pOff.goto("file://" + path.join(root, "index.html"));
+  await pOff.waitForSelector("text=Start Stop", { timeout: 20000 });
+
+  const offStops = () => pOff.evaluate(() => {
+    const out = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k.startsWith("stop:")) { try { out.push(JSON.parse(localStorage.getItem(k))); } catch { /* skip */ } }
+    }
+    return out.sort((a, b) => a.start - b.start);
+  });
+  assert((await offStops()).length === 0, "the off-machine phase must start with no stops");
+
+  const offBtn = pOff.locator('button:has-text("Off machine")');
+  assert(await offBtn.count() === 1, "the operator view must offer an 'Off machine' button");
+
+  await offBtn.click();
+  await pOff.waitForSelector('button:has-text("Back on Line 1")', { timeout: 5000 });
+
+  // While off machine the stop timer must be unavailable: those minutes are
+  // ALREADY being counted as downtime, so timing a stop would double-count them.
+  const startDisabled = await pOff.locator('button:has-text("Start Stop")').isDisabled();
+  assert(startDisabled, "Start Stop must be disabled while off machine (it would double-count the downtime)");
+
+  await pOff.waitForTimeout(1200); // clear the sub-second mistap guard
+  await pOff.click('button:has-text("Back on Line 1")');
+  await pOff.waitForSelector('button:has-text("Off machine")', { timeout: 5000 });
+
+  const afterFirst = await offStops();
+  assert(afterFirst.length === 1, `returning to the machine must record exactly 1 stop, got ${afterFirst.length}`);
+  const off1 = afterFirst[0];
+  assert(off1.reason === "No operator", `off-machine stop reason should be "No operator", got ${JSON.stringify(off1.reason)}`);
+  assert(off1.offMachine === true, "the record must be flagged offMachine so exports can label it");
+  assert(off1.machine === "Line 1", `off-machine downtime belongs to the machine that was left, got ${off1.machine}`);
+  assert(off1.operator === "Bob", `off-machine stop attribution wrong, got ${off1.operator}`);
+  assert(off1.duration >= 1000, `off-machine duration should cover the away time, got ${off1.duration}`);
+  assert(off1.discarded === false, "off-machine stop should not be discarded");
+
+  // It must reach the operator's live board as downtime — the whole point is
+  // that this needs no separate accounting.
+  const offStatStops = (await pOff
+    .locator("div.rounded-xl.p-3.text-center", { hasText: "Stops" })
+    .first().locator("div.font-bold").innerText()).trim();
+  assert(offStatStops === "1", `off-machine time must count on the operator's board, saw ${offStatStops}`);
+
+  // Coming back by tapping a DIFFERENT machine is the same gesture. The stop
+  // still belongs to the machine that was LEFT (easy to get backwards), and the
+  // operator lands on the new one.
+  await pOff.click('button:has-text("Off machine")');
+  await pOff.waitForSelector('button:has-text("Back on Line 1")', { timeout: 5000 });
+  await pOff.waitForTimeout(1200);
+  await pOff.click('button:has-text("Line 2")');
+  await pOff.waitForSelector('button:has-text("Off machine")', { timeout: 5000 });
+
+  const afterSecond = await offStops();
+  assert(afterSecond.length === 2, `tapping another machine must also close the span, got ${afterSecond.length} stops`);
+  const off2 = afterSecond[1];
+  assert(off2.machine === "Line 1",
+    `the stop belongs to the machine left, not the one returned to — got ${off2.machine}`);
+  const landedOn = await pOff.locator('button.bg-emerald-500:has-text("Line 2")').count();
+  assert(landedOn === 1, "tapping Line 2 to come back must leave the operator on Line 2");
+  await ctxOff.close();
+
   // ---- end-to-end against a REAL server ------------------------------------
   // The two test layers above can BOTH pass while the feature is dead: the server
   // test posts a payload written by hand, and the web test only checks the outbox.
@@ -441,6 +534,7 @@ async function main() {
   console.log("web-e2e: PASS — stop recorded immediately (operator=Alice, reason=" + chosenReason + ", duration=" + rec.duration + "ms)");
   console.log("web-e2e: PASS — shift window is clock-derived (7h/9h/8h incl. overnight); Show all reveals stops without inflating the stats");
   console.log(`web-e2e: PASS — handout rendered ${shot.w}x${shot.h} PNG, shared via native, filed with note + ${h.flags.length} operator flag(s)`);
+  console.log(`web-e2e: PASS — Off machine logs downtime on the machine left (${off1.duration}ms as "No operator"), Start Stop blocked while away`);
 }
 
 main().catch((e) => { console.error("web-e2e: FAIL —", e.message); process.exit(1); });
