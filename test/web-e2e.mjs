@@ -374,6 +374,119 @@ async function main() {
     `a fresh install with no sessions must show no manned time, saw ${JSON.stringify(fabricated)}`);
   await ctx3.close();
 
+  // ---- handout for a ROAMING operator --------------------------------------
+  // The handout used to be one blended total: three machines, one downtime
+  // number, so every machine appeared to have had the exact same downtime and
+  // the next shift couldn't tell which one was actually in trouble.
+  const ctxRoam = await browser.newContext();
+  const pRoam = await ctxRoam.newPage();
+  await pRoam.route(/unpkg\.com|cdn\.tailwindcss\.com/, async (route) => {
+    const u = route.request().url();
+    if (u.includes("react-dom")) return route.fulfill({ contentType: "application/javascript", body: reactDomUmd });
+    if (u.includes("react")) return route.fulfill({ contentType: "application/javascript", body: reactUmd });
+    return route.fulfill({ contentType: "application/javascript", body: "/* tailwind stub */" });
+  });
+  // Route "Save image" through the mock shell: the plain-browser fallback is an
+  // anchor download, which tears down the page's execution context mid-test.
+  await pRoam.addInitScript(installMockNative);
+  await pRoam.addInitScript(() => {
+    const now = Date.now();
+    const hhmm = (ms) => {
+      const d = new Date(ms);
+      return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    };
+    localStorage.setItem("config:lists", JSON.stringify({
+      machines: ["Line 1", "Line 2", "Line 3"],
+      reasons: ["Mechanical fault", "Cleaning", "Material jam"], quickStops: [],
+      shifts: [{ id: "t1", name: "Test", start: hhmm(now - 3600e3), end: hhmm(now + 7 * 3600e3), goals: {} }],
+      rates: {}, handoverEmails: [], updatedAt: now,
+    }));
+    localStorage.setItem("config:prefs", JSON.stringify({ operator: "Cara", setupLocked: true, machine: "Line 1" }));
+    // Deliberately UNEQUAL downtime per machine — the whole point.
+    const stop = (id, machine, ago, dur, reason) => localStorage.setItem(`stop:${id}`, JSON.stringify({
+      id, machine, operator: "Cara", start: now - ago, end: now - ago + dur, duration: dur,
+      reason, notes: "", discarded: false, loggedAt: now - ago, updatedAt: now - ago,
+    }));
+    stop("r1", "Line 1", 30 * 60e3, 20 * 60e3, "Mechanical fault");
+    stop("r2", "Line 1", 20 * 60e3, 10 * 60e3, "Cleaning");
+    stop("r3", "Line 2", 15 * 60e3, 5 * 60e3, "Material jam");
+    stop("r4", "Line 3", 10 * 60e3, 60e3, "Cleaning");
+    // Presence on all three, so the roaming (hasSessions) path is exercised.
+    // Deliberately INVERTED against downtime — the machine with the least
+    // downtime (Line 3) gets the most manned time. The rows arrive sorted by
+    // manned time, so "worst first" only holds if the handout re-sorts by
+    // downtime; without this the ordering assertion passes for free.
+    const sess = (id, machine, fromAgo, toAgo) => localStorage.setItem(`sess:${id}`, JSON.stringify({
+      id, kind: "session", operator: "Cara", machine,
+      start: now - fromAgo * 60e3, end: now - toAgo * 60e3, loggedAt: now, updatedAt: now,
+    }));
+    sess("s1", "Line 1", 50, 45);   //  5 min manned, most downtime
+    sess("s2", "Line 2", 45, 35);   // 10 min manned
+    sess("s3", "Line 3", 35, 5);    // 30 min manned, least downtime
+  });
+  await pRoam.goto("file://" + path.join(root, "index.html"));
+  await pRoam.waitForSelector("text=Start Stop", { timeout: 20000 });
+
+  await pRoam.click("text=Handover");
+  await pRoam.waitForSelector("text=MESSAGE FOR THE NEXT SHIFT", { timeout: 5000 });
+  await pRoam.waitForSelector('img[alt="Shift handout"]', { timeout: 8000 });
+
+  // The handout must carry a per-machine split with the REAL, different numbers.
+  await pRoam.click("text=Save image");
+  await pRoam.waitForTimeout(400);
+  const filed = await pRoam.evaluate(() => {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k.startsWith("hand:")) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }
+    }
+    return null;
+  });
+  assert(filed, "the roaming handover must be filed");
+  const ms = filed.machineStats || [];
+  assert(ms.length === 3, `the handout must break down all 3 machines, got ${ms.length}`);
+
+  const by = Object.fromEntries(ms.map((m) => [m.machine, m]));
+  assert(by["Line 1"].downtimeMs === 30 * 60e3, `Line 1 downtime wrong: ${by["Line 1"].downtimeMs}`);
+  assert(by["Line 2"].downtimeMs === 5 * 60e3, `Line 2 downtime wrong: ${by["Line 2"].downtimeMs}`);
+  assert(by["Line 3"].downtimeMs === 60e3, `Line 3 downtime wrong: ${by["Line 3"].downtimeMs}`);
+
+  // The actual reported bug: identical numbers across machines.
+  const distinct = new Set(ms.map((m) => m.downtimeMs));
+  assert(distinct.size === 3,
+    `each machine must carry ITS OWN downtime — got ${JSON.stringify(ms.map((m) => [m.machine, m.downtimeMs]))}`);
+  assert(by["Line 1"].stops === 2 && by["Line 2"].stops === 1,
+    "per-machine stop counts must be split too");
+  assert(by["Line 1"].topReason === "Mechanical fault",
+    `the worst reason must be per-machine, got ${by["Line 1"].topReason}`);
+  assert(ms[0].machine === "Line 1", "worst machine must come first so the next shift sees it");
+
+  // Worst-first ordering and the machine section must reach the IMAGE, not just
+  // the record: with >1 machine the canvas is taller than the same shift drawn
+  // as a single machine.
+  const heights = await pRoam.evaluate(() => {
+    const base = {
+      operator: "Cara", machine: "Line 1", shiftName: "Test",
+      windowStart: Date.now() - 3600e3, windowEnd: Date.now(),
+      stopCount: 4, downtimeMs: 36 * 60e3, topReasons: [["Mechanical fault", 20 * 60e3]],
+      longest: { machine: "Line 1", reason: "Mechanical fault", duration: 20 * 60e3, start: Date.now() - 1800e3 },
+      hasSessions: true, oee: { a: 0.8, p: null, q: null, oee: 0.8, partial: true },
+      goal: null, notes: [], note: "", flags: [],
+    };
+    const mk = (n) => Array.from({ length: n }, (_, i) => ({
+      machine: `Line ${i + 1}`, mannedMs: 600000, downtimeMs: 600000 - i * 1000,
+      stops: 1, units: 0, scrap: 0, topReason: "Cleaning", topReasonMs: 1000,
+    }));
+    return [
+      drawHandout(handoutViewModel({ ...base, machines: mk(1) }), 1).height,
+      drawHandout(handoutViewModel({ ...base, machines: mk(3) }), 1).height,
+    ];
+  });
+  // Three machine rows' worth of extra canvas: proof the section is actually
+  // drawn, not just present in the record.
+  assert(heights[1] - heights[0] >= 3 * 32,
+    `the rendered handout must gain a per-machine section when roaming (1 machine: ${heights[0]}px, 3: ${heights[1]}px)`);
+  await ctxRoam.close();
+
   // ---- off machine ---------------------------------------------------------
   // Stepping away from every machine is DOWNTIME on the machine that was left:
   // this equipment only produces while it runs, and only runs with someone at
@@ -862,6 +975,7 @@ async function main() {
   console.log("web-e2e: PASS — shift window is clock-derived (7h/9h/8h incl. overnight); Show all reveals stops without inflating the stats");
   console.log(`web-e2e: PASS — handout rendered ${shot.w}x${shot.h} PNG, shared via native, filed with note + ${h.flags.length} operator flag(s)`);
   console.log(`web-e2e: PASS — Off machine logs downtime on the machine left (${off1.duration}ms as "No operator"), Start Stop blocked while away`);
+  console.log(`web-e2e: PASS — roaming handout splits downtime per machine (${ms.map((m) => `${m.machine} ${Math.round(m.downtimeMs / 60e3)}m`).join(", ")}), worst first`);
 }
 
 main().catch((e) => { console.error("web-e2e: FAIL —", e.message); process.exit(1); });

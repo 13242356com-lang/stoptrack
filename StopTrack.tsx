@@ -224,12 +224,27 @@ function buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, 
   myStops.forEach((s) => { byReason[s.reason] = (byReason[s.reason] || 0) + s.duration; });
   const topReasons = Object.entries(byReason).sort((a, b) => b[1] - a[1]);
   const longest = myStops.reduce((best, s) => (!best || s.duration > best.duration ? s : best), null);
+
+  // Per-machine reasons. Without this the handout is one blended total: a
+  // roaming operator's three machines all read the same downtime, and the next
+  // shift can't tell which one is actually in trouble. Worst machine first,
+  // because that's the one they need to know about.
+  const perMachine = {};
+  myStops.forEach((s) => {
+    const bag = (perMachine[s.machine] = perMachine[s.machine] || {});
+    bag[s.reason] = (bag[s.reason] || 0) + s.duration;
+  });
+  const machines = (myShift.rows || []).map((row) => {
+    const top = Object.entries(perMachine[row.machine] || {}).sort((a, b) => b[1] - a[1])[0];
+    return { ...row, topReason: top ? top[0] : null, topReasonMs: top ? top[1] : 0 };
+  }).sort((a, b) => (b.downtimeMs - a.downtimeMs) || (b.mannedMs - a.mannedMs));
+
   return {
     operator: operator.trim() || "Unnamed", machine,
     shiftName: activeShift?.name || null,
     windowStart: clearedBefore || null, windowEnd: Date.now(),
     stopCount: myStops.length, downtimeMs, topReasons, longest,
-    machines: myShift.rows, hasSessions: myShift.hasSessions,
+    machines, hasSessions: myShift.hasSessions,
     oee: myShift.overall, goal: goalStatus || null,
     notes: myStops.filter((s) => s.notes).map((s) => ({ reason: s.reason, notes: s.notes })),
     // The human layer, written by the operator at handover time.
@@ -268,6 +283,7 @@ function formatReportText(r) {
       bits.push(`${m.stops} stop${m.stops === 1 ? "" : "s"}`);
       if (m.downtimeMs) bits.push(`${fmtDur(m.downtimeMs)} down`);
       if (m.units || m.scrap) bits.push(`${m.units} units / ${m.scrap} scrap`);
+      if (m.topReason) bits.push(`mostly ${m.topReason} (${fmtDur(m.topReasonMs)})`);
       lines.push(`  - ${m.machine}: ${bits.join(" · ")}`);
     });
   }
@@ -413,15 +429,20 @@ function drawHandout(r, scale = 2.5) {
   const flagRows = r.flags && r.flags.length ? layoutFlags(meas, r.flags, contentW - 32) : [];
   const reasons = (r.topReasons || []).slice(0, 5);
 
+  // Per-machine rows, worst first. Only when the operator actually roamed —
+  // for a single machine the tiles above already say everything.
+  const machineRows = (r.machines || []).length > 1 ? r.machines.slice(0, 6) : [];
+
   const showGoal = r.goalPct != null;
   const hHeader = 74, hWho = 40, hTiles = 2 * 74 + 1, hGoal = showGoal ? 92 : 0;
+  const hMachines = machineRows.length ? 34 + machineRows.length * 32 + 12 : 0;
   const hReasons = reasons.length ? 34 + reasons.length * 23 + (r.longest ? 22 : 0) + 12 : 0;
   const hNoteBox = (noteLines.length || flagRows.length)
     ? 16 + 24 + noteLines.length * 19 + (flagRows.length ? 8 + flagRows.length * 27 : 0) + 14
     : 0;
   const hNote = hNoteBox ? hNoteBox + 26 : 0;
   const hFoot = 42;
-  const total = hHeader + hWho + hTiles + hGoal + hReasons + hNote + hFoot;
+  const total = hHeader + hWho + hTiles + hGoal + hMachines + hReasons + hNote + hFoot;
 
   const cv = document.createElement("canvas");
   cv.width = Math.round(H.W * scale);
@@ -556,6 +577,38 @@ function drawHandout(r, scale = 2.5) {
     y += hGoal; rule(y);
   }
 
+  // ---- per machine ----------------------------------------------------------
+  // The fix for a roaming operator's handout: without this every machine reads
+  // the same blended downtime and the next shift can't tell which one is sick.
+  if (machineRows.length) {
+    label("Downtime by machine", H.PAD, y + 24);
+    const maxDown = machineRows.reduce((mx, m) => Math.max(mx, m.downtimeMs || 0), 0) || 1;
+    const nameW = 132, valW = 50;
+    const barX = H.PAD + nameW + 10;
+    const barW = H.W - H.PADR - valW - 8 - barX;
+    machineRows.forEach((m, i) => {
+      const ry = y + 34 + i * 32;
+      c.font = `700 12.5px ${H.sans}`; c.fillStyle = H.ink;
+      c.fillText(ellipsize(c, m.machine, nameW), H.PAD, ry + 11);
+      // What actually happened on THIS machine, not the shift average.
+      const bits = [`${m.stops} stop${m.stops === 1 ? "" : "s"}`];
+      if (r.hasSessions && m.mannedMs) bits.push(shortDur(m.mannedMs));
+      if (m.topReason) bits.push(m.topReason);
+      c.font = `10.5px ${H.sans}`; c.fillStyle = H.ink3;
+      c.fillText(ellipsize(c, bits.join(" · "), nameW + 40), H.PAD, ry + 25);
+
+      c.fillStyle = H.surf2; roundRect(c, barX, ry, barW, 14, 4); c.fill();
+      c.strokeStyle = H.line; c.lineWidth = 1; c.stroke();
+      const w = Math.max(3, barW * ((m.downtimeMs || 0) / maxDown));
+      const g3 = c.createLinearGradient(barX, 0, barX + w, 0);
+      g3.addColorStop(0, "#b23636"); g3.addColorStop(1, H.down);
+      c.fillStyle = g3; roundRect(c, barX, ry, w, 14, 4); c.fill();
+      c.font = `12px ${H.mono}`; c.fillStyle = H.ink2; c.textAlign = "right";
+      c.fillText(shortDur(m.downtimeMs || 0), H.W - H.PADR, ry + 11); c.textAlign = "left";
+    });
+    y += hMachines; rule(y);
+  }
+
   // ---- downtime by reason ---------------------------------------------------
   if (reasons.length) {
     label("Downtime by reason", H.PAD, y + 24);
@@ -582,7 +635,10 @@ function drawHandout(r, scale = 2.5) {
     if (r.longest) {
       const ly = y + 34 + reasons.length * 23 + 12;
       c.font = `12px ${H.sans}`; c.fillStyle = H.ink2;
-      c.fillText(`Longest: ${r.longest.reason} · ${shortDur(r.longest.duration)} · ${shortTime(r.longest.start)}`, H.PAD, ly);
+      // Name the machine when there was more than one — "Longest: Tooling
+      // change, 40m" is useless to the next shift if they don't know where.
+      const lw = machineRows.length ? `${r.longest.machine} · ` : "";
+      c.fillText(ellipsize(c, `Longest: ${lw}${r.longest.reason} · ${shortDur(r.longest.duration)} · ${shortTime(r.longest.start)}`, contentW), H.PAD, ly);
     }
     y += hReasons; rule(y);
   }
@@ -4060,6 +4116,14 @@ function ShiftHandoverModal({ t, dark, reportBase, handoverEmails, syncCfg, last
       operator: report.operator,
       machine: report.machineLabel || report.machine,
       machines: (report.machines || []).map((m) => m.machine),
+      // The per-machine split, not just the names: a filed handover for a
+      // roaming operator was otherwise one blended total, so the supervisor's
+      // log couldn't say which machine the downtime belonged to either.
+      machineStats: (report.machines || []).map((m) => ({
+        machine: m.machine, stops: m.stops, downtimeMs: m.downtimeMs,
+        mannedMs: Math.round(m.mannedMs || 0), units: m.units, scrap: m.scrap,
+        topReason: m.topReason || null, topReasonMs: m.topReasonMs || 0,
+      })),
       shiftName: report.shiftName || null,
       windowStart: report.windowStart, windowEnd: report.windowEnd,
       stopCount: report.stopCount, downtimeMs: report.downtimeMs,
