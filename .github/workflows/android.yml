@@ -34,28 +34,42 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      # Every action in this job is pinned to a full commit SHA, not a moving tag
+      # (`@v4` can be repointed at new code by whoever owns the action). This is
+      # the job that decodes the release signing key, so a retagged action would
+      # run with the keystore on disk. Bump a pin deliberately; keep the version
+      # comment in step with the SHA.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
 
       # Node lets :mobile's prepareWebAsset task inline React + Tailwind into the
       # bundled web app so the phone app works offline on the factory floor.
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
 
       # Decode the private release signing key from a repo secret (if set). Both
       # apps then sign with the SAME real key (Data-Layer pairing + updatable).
       # Without the secret the release build falls back to a debug key and warns.
+      #
+      # ONLY main and v* tags get the key. This workflow also builds `claude/**`
+      # branches and pull requests, which are unreviewed code; without this guard
+      # every such push wrote the keystore to the runner's disk and put its
+      # passwords in the environment of a Gradle build it controls. Branch builds
+      # still build — they just fall through to the debug key below. Consequence:
+      # a manual `release_tag` dispatch has to be run from main (or a v* tag) to
+      # produce a signed release.
       - name: Configure signing key
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         env:
           KS_B64: ${{ secrets.SIGNING_KEYSTORE_B64 }}
           STORE_PW: ${{ secrets.SIGNING_STORE_PASSWORD }}
@@ -64,18 +78,43 @@ jobs:
         run: |
           if [ -n "$KS_B64" ]; then
             echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/stoptrack-release.jks"
+            # Heredoc form for every secret VALUE. `NAME=$VAL` is newline-injectable:
+            # a value containing a newline would let the rest of it define arbitrary
+            # variables in GITHUB_ENV. The delimiter is random per run so it can't
+            # be embedded in a value either.
+            DELIM="STOPTRACK_EOF_$(openssl rand -hex 16)"
             {
               echo "STOPTRACK_KEYSTORE=$RUNNER_TEMP/stoptrack-release.jks"
-              echo "STOPTRACK_STORE_PASSWORD=$STORE_PW"
-              echo "STOPTRACK_KEY_ALIAS=$ALIAS"
-              echo "STOPTRACK_KEY_PASSWORD=$KEY_PW"
+              echo "STOPTRACK_STORE_PASSWORD<<$DELIM"
+              echo "$STORE_PW"
+              echo "$DELIM"
+              echo "STOPTRACK_KEY_ALIAS<<$DELIM"
+              echo "$ALIAS"
+              echo "$DELIM"
+              echo "STOPTRACK_KEY_PASSWORD<<$DELIM"
+              echo "$KEY_PW"
+              echo "$DELIM"
             } >> "$GITHUB_ENV"
             echo "Release APKs will be signed with the private key from secrets."
             echo "SIGNED=yes" >> "$GITHUB_ENV"
           else
             echo "::warning::No SIGNING_KEYSTORE_B64 secret set — release APKs are debug-signed (NOT authentic) and CANNOT be installed as an update. See android/SIGNING.md."
-            echo "SIGNED=no" >> "$GITHUB_ENV"
+            {
+              echo "SIGNED=no"
+              echo "SIGN_REASON=nosecret"
+            } >> "$GITHUB_ENV"
           fi
+
+      # The step above is skipped on branches and PRs, which is the point — but
+      # say so in the log so "unsigned" is never a silent surprise.
+      - name: Note unsigned branch build
+        if: github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/v')
+        run: |
+          {
+            echo "SIGNED=no"
+            echo "SIGN_REASON=branch"
+          } >> "$GITHUB_ENV"
+          echo "::notice::Branch/PR build — the release signing key is only used on main and v* tags, so these APKs are debug-signed and cannot be installed as an update over a signed build."
 
       # Say it in the release itself, not just in a log nobody reads: an
       # unsigned build forces an uninstall+reinstall (which wipes local data),
@@ -93,8 +132,14 @@ jobs:
               echo "> certificate on every run. You will have to uninstall the previous version first,"
               echo "> which wipes local data — take a backup from Supervisor → Settings → Backup & Restore."
               echo ">"
-              echo "> To fix this permanently (once, ~5 minutes): run \`bash android/make-signing-key.sh\`"
-              echo "> and add the four repository secrets it prints. See [android/SIGNING.md](android/SIGNING.md)."
+              if [ "${SIGN_REASON:-nosecret}" = "branch" ]; then
+                echo "> This build came off a branch, and the signing key is only used on \`main\` and \`v*\`"
+                echo "> tags (branches are unreviewed code — they don't get the key). Cut the release from"
+                echo "> \`main\`, or push a \`v*\` tag, to get a signed build."
+              else
+                echo "> To fix this permanently (once, ~5 minutes): run \`bash android/make-signing-key.sh\`"
+                echo "> and add the four repository secrets it prints. See [android/SIGNING.md](android/SIGNING.md)."
+              fi
               echo "EOM"
             } >> "$GITHUB_ENV"
           fi
@@ -104,7 +149,7 @@ jobs:
         run: ./gradlew :mobile:assembleRelease :wear:assembleRelease --stacktrace --no-daemon
 
       - name: Upload APKs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: stoptrack-apks
           if-no-files-found: error
@@ -125,7 +170,7 @@ jobs:
       # Rolling "latest" release, refreshed on every push to main.
       - name: Publish latest release
         if: github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: latest
           name: Latest StopTrack build (phone + watch APKs)
@@ -147,7 +192,7 @@ jobs:
       # environments where tag pushes are restricted.
       - name: Publish versioned release
         if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.release_tag }}
           name: StopTrack ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.release_tag }}

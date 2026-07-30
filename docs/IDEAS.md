@@ -5,12 +5,30 @@ Routine (16:00 UTC). Ranked by (value × confidence) ÷ effort. The scout reads 
 file before each run, so items get **re-ranked and marked done** rather than
 re-proposed.
 
-- **Last updated:** 2026-07-27 (scouting run #2)
+- **Last updated:** 2026-07-30 (security audit round; scouting run #2 before that)
 - **Baseline:** `main` @ v0.7. `npm test` green (7 server cases, 4 browser phases).
 - Items marked ⚑ were **reproduced empirically**, not just read.
 
 > Owner: annotate freely (`— skip, we don't care about X`). The scout preserves
 > annotations across runs.
+
+## Being fixed in the 2026-07-30 security audit round
+
+Don't re-propose these. Items 15–17 are **done in the tree** (CI + docs). Items 3,
+8 and 18 are **claimed done by the code workers in the same round but were not
+verifiable when this list was written** — confirm in code before deleting them,
+and if a fix didn't land, un-tick it rather than assuming.
+
+| Item | Status |
+|------|--------|
+| #3 CSV formula injection | fix in flight (web worker) — verify `StopTrack.tsx` export |
+| #8 loopback bridge unauthenticated | fix in flight (Android worker) — hardware-verify |
+| #15 CI signing key on branches | **fixed** — `.github/workflows/android.yml` |
+| #16 `GITHUB_ENV` injection | **fixed** — heredoc form, random delimiter |
+| #17 actions pinned by mutable tag | **fixed** — SHA pins in the signing job |
+| #18 `X-Forwarded-For` rate-limit bypass | fix in flight (server worker) — verify `TRUST_PROXY` |
+| #19 supervisor PIN clearable by any token holder | **open** — documented, not fixed |
+| #20 old signing key still in git history | **won't fix** — documented instead |
 
 ## Shipped since run #1 — verified in code
 
@@ -64,7 +82,7 @@ asserts anything *comes back*. The whole pull path — cursor arithmetic,
 - **Risk:** Timing flake — drive `sync.flush()` rather than sleeping past the 25 s
   interval.
 
-## 3. CSV exports are formula-injectable *(carried, unchanged)*
+## 3. CSV exports are formula-injectable *(fix in flight — 2026-07-30 audit)*
 
 `StopTrack.tsx:3096` quotes `"` but never neutralises a leading `=`, `+`, `-`, `@`.
 Machine names, reasons, operator names, notes and discard explanations are all
@@ -72,6 +90,9 @@ free text typed on the floor, and the CSV is explicitly the artifact that leaves
 the building.
 
 - **Effort:** S — ~10 lines. **Risk:** nil; add a round-trip assertion.
+- **Status:** picked up in the 2026-07-30 audit round by the web worker. Not
+  verified from this file — check the export helper and that a round-trip test
+  exists before dropping this item.
 
 ## 4. ⚑ The supervisor's custom date range is parsed as UTC
 
@@ -136,7 +157,7 @@ outbox of keys; make the phone match.
 - **Effort:** S code, **blocked on hardware** (emulator CI or a real device).
 - **Risk:** Clear the dirty set only on a 2xx.
 
-## 8. The loopback API is unauthenticated — and the one control that exists breaks the app *(carried, refined)*
+## 8. The loopback API is unauthenticated — and the one control that exists breaks the app *(fix in flight — 2026-07-30 audit)*
 
 `authOk` returns true when the token is blank, and responses carry
 `Access-Control-Allow-Origin: *` **plus** `Access-Control-Allow-Private-Network:
@@ -148,6 +169,13 @@ sets a token to close the hole gets 401s and sync silently dies. That's a trap.
 
 - **Effort:** S–M, **blocked on hardware**. Random token on first run, return it
   from `token()`, drop the PNA header, narrow `Allow-Origin`. Token first.
+- **Sharpened by the 2026-07-30 audit:** the exposure is worse than "another app on
+  the phone". `Allow-Origin: *` **plus** `Allow-Private-Network: true` is exactly
+  the header pair that lets a page on the public internet reach loopback, so any
+  website the operator opens can read the log *and* the supervisor config
+  (`supervisorPinHash` included) and post tombstones the phone forwards onward.
+- **Status:** picked up in the same round by the Android worker. Code-verify, then
+  hardware-verify — the fix is invisible to every gate in this repo.
 
 ## 9. localStorage fills at ~20,600 stops — and the first sync stops completing long before *(carried, refined)*
 
@@ -216,20 +244,101 @@ surfaces only on a factory phone with no signal, as a blank app.
 
 ---
 
+# Filed by the 2026-07-30 security audit
+
+## 15. ✅ CI handed the release signing key to every unreviewed branch *(fixed)*
+
+`.github/workflows/android.yml` builds `push: branches: [main, "claude/**"]`, and
+the "Configure signing key" step had no `if:` — so every agent-pushed branch
+decoded the keystore to the runner's disk and ran a Gradle build *defined by that
+same branch* with `STOPTRACK_STORE_PASSWORD` / `STOPTRACK_KEY_PASSWORD` in its
+environment. One commit to a `claude/**` branch was enough to exfiltrate the
+release key, which is the credential that can't be rotated without forcing every
+operator to uninstall and lose local data.
+
+- **Fixed:** step gated to `main` + `v*` tags. Branch builds still build, falling
+  through to the debug-key path Gradle already handled.
+- **Follow-up, not done:** the `build` job keeps `contents: write` on branch runs
+  (GitHub scopes permissions per job, not per step). Splitting build and publish
+  into two jobs closes it. Effort S, lower stakes — a run token expires.
+
+## 16. ✅ `GITHUB_ENV` was newline-injectable *(fixed)*
+
+`echo "STOPTRACK_STORE_PASSWORD=$STORE_PW" >> $GITHUB_ENV` — a secret containing a
+newline defines arbitrary variables for every later step. Now the heredoc form
+with a per-run random delimiter, for all three secret values.
+
+## 17. ✅ Actions in the signing job were pinned by mutable tag *(fixed)*
+
+`@v4` / `@v3` / `@v2` are tags the action owner can repoint at any time; in the one
+job that holds the keystore that's a direct supply-chain path to it. All six are
+now full commit SHAs with `# vX.Y.Z` comments.
+
+- **Deliberately not done:** the other workflows (`ci.yml`, `web-test.yml`,
+  `android-emulator.yml`) still use tags. They hold no secrets, so pinning them is
+  churn plus a maintenance burden. Revisit if one ever gains a secret.
+
+## 18. `X-Forwarded-For` defeated the auth rate limiter *(fix in flight)*
+
+`clientIp()` (`server/server.js:40-43`) trusts `CF-Connecting-IP` /
+`X-Forwarded-For` from any caller. Behind the Cloudflare tunnel the tunnel
+overwrites them and the cap holds — but on the **LAN deployment this project
+documents**, nothing strips them, so an attacker gets a fresh 20-failed-auths
+budget per forged header value and can guess the token at line speed.
+`SECURITY.md` credited this limiter with throttling token guessing; that claim is
+now corrected there.
+
+- **Fix in flight (server worker):** `TRUST_PROXY` opt-in, default off, keying on
+  the socket address otherwise. Verify it exists, and that a test covers a forged
+  header not resetting the counter.
+
+## 19. Any token holder can seize or clear the supervisor PIN on every device
+
+The PIN hash is an ordinary synced-config field (`StopTrack.tsx:2035`); the server
+treats `/config` as opaque and never checks that a PIN change came from someone
+who knew the old PIN — `updatePin` verifies that in the browser only (`:2133`),
+which a direct `PUT /config` skips. So a token holder can push a config with no
+`supervisorPinHash` and every device that pulls sets its PIN to null (`:2027`),
+opening Settings everywhere; or push a hash of their own and lock the real
+supervisor out of Settings on every device at once.
+
+- **Documented in `SECURITY.md`, not fixed.** Under the stated model a token holder
+  is fully trusted, so this is arguably in-model — but it deserves a decision
+  rather than an accident, because the PIN's whole *appearance* is that it
+  protects Settings from whoever is holding a phone.
+- **Effort:** M and awkward — a real fix needs the server to hold the PIN and
+  verify old-PIN-before-change, which means the config blob stops being opaque.
+  Cheap partial: refuse to *clear* a PIN via sync (only via a local unlock), so a
+  remote write can't silently disarm the gate.
+
+## 20. ❎ The old signing key is still recoverable from git history *(won't fix)*
+
+`git rev-list --all --objects` still resolves
+`android/keystore/stoptrack-debug.jks`; it was deleted from the tip, not purged.
+**Not worth rewriting history:** the key was committed while the repo was public,
+so it is burned whether or not the objects are purged, and the repo is private
+now. The mitigation is that the key is permanently retired and never reused —
+`SECURITY.md` now says that plainly instead of claiming the key was "removed".
+
+---
+
 ## TOP 3 NEXT
 
 1. **#1 — fix the sync pull cursor, with #2's two-device test in the same PR.**
    Everything else degrades something; this one *loses* something. Reproducible in
    under a minute, and every gate in the repo is green while it happens.
-2. **#3 + #4 together — CSV injection and the UTC date range.** Both small, both
-   provably wrong today, both in the export path — the artifact that leaves the
-   building. One afternoon.
+2. **#4 — the UTC date range** (#3, its old partner, is being fixed in the audit
+   round). Small, provably wrong today, and in the export path — the artifact that
+   leaves the building. Ship it with #3 so the export path is tested once.
 3. **#6 — stabilise the shift-window arithmetic.** v0.7 left two edges that produce
    a *confidently wrong document*: a handout claiming "0 stops" for a worked shift,
    and a double-counted day total. Same class as the `loggedAt` bug already paid for.
 
 *(Not code, still real: the four APK signing secrets. Until they're added, every CI
-build gets a fresh certificate, so the app can't be updated in place.)*
+build gets a fresh certificate, so the app can't be updated in place. Note also
+that after #15, **only `main` and `v*` tags are signed at all** — a release cut by
+`workflow_dispatch` from a feature branch is deliberately unsigned, and the release
+banner now says which of the two reasons applies.)*
 
 ## NOT WORTH DOING
 
