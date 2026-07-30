@@ -31,6 +31,8 @@ SETUP-github-secrets.txt
 
 # machine-specific / local (absolute Node path, per-machine)
 .claude/launch.json
+# transient per-agent git worktrees (auto-created, auto-cleaned) — never commit
+.claude/worktrees/
 .venv/
 .env
 
