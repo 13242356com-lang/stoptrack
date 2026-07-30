@@ -72,6 +72,15 @@ starts** → action **Start a program** → browse to your
 > a fresh install just re-syncs from here. (Not using the server? Use the app's
 > **Supervisor → Settings → Backup & Restore** before updating instead.)
 
+> **If it ever stops, it starts itself again.** The black window waits 5 seconds
+> and relaunches the server, because while it's down no stop from any phone or
+> watch is being recorded. To stop it for real, close the window.
+
+> **If you see a big `WARNING: NO AUTH TOKEN` block**, the server is running with
+> no password at all — anyone who can reach the address can read and change
+> everything. It happens when `FACTORY_TOKEN` is set to nothing (or only spaces).
+> Remove that setting and restart: the server makes its own token and prints it.
+
 > **Live logs:** the black window shows what's happening as it happens — e.g.
 > `saved 2 stop(s) from 192.168.1.30`, `settings updated by …`,
 > `unauthorized … (wrong token)`. Handy for confirming a device is really
@@ -104,6 +113,21 @@ and a **domain name** added to it (any cheap one, ~$10/year — e.g.
 5. **(Nice-to-have)** so the server window prints that anywhere-address for you,
    edit `start-stoptrack.bat` and set it: change the `set PUBLIC_URL=` line to
    `set PUBLIC_URL=https://stoptrack.yourfactory.com`, then restart the server.
+6. **Now that a tunnel is in front of it, turn on `TRUST_PROXY`.** In
+   `start-stoptrack.bat` uncomment the line `set TRUST_PROXY=1`, then restart.
+
+> **What `TRUST_PROXY` does, and why it's off by default.** The server limits how
+> many requests — and especially how many *wrong tokens* — one device can send
+> per minute, so nobody can sit there guessing your token. To do that it has to
+> know which device a request came from. Through the tunnel every request arrives
+> from Cloudflare, and the real device address is in a header Cloudflare adds
+> (`CF-Connecting-IP`); `TRUST_PROXY=1` tells the server to believe that header,
+> so each device gets its own limit instead of the whole world sharing one.
+>
+> Without a proxy in front, that header is just something the *caller* types —
+> so believing it would let a guesser rotate it and get unlimited tries. Hence:
+> **set it only when the server is genuinely behind the tunnel (or another
+> reverse proxy), and leave it off for a LAN-only setup.**
 
 > **Don't want to buy a domain?** Then skip Part B: everything still works on
 > the factory Wi-Fi via `http://<PC-IP>:4000`; you just can't reach it from
