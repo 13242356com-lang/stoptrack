@@ -62,7 +62,11 @@ jobs:
             adb logcat -c || true
             # Install + launch the app, then grab a screenshot of the live UI.
             ./gradlew :mobile:installDebug --no-daemon --stacktrace
-            adb shell am start -n com.stoptrack/com.stoptrack.mobile.MainActivity || true
+            # applicationId is com.stoptrack while the namespace is com.stoptrack.mobile,
+            # so the component is com.stoptrack/.mobile.MainActivity — NOT
+            # com.stoptrack/com.stoptrack.mobile.MainActivity (that name does not exist
+            # and silently screenshotted the launcher instead of the app).
+            adb shell monkey -p com.stoptrack -c android.intent.category.LAUNCHER 1 || true
             sleep 12
             adb exec-out screencap -p > ../app-screenshot.png || true
             # The actual assertion: the boot/smoke instrumented test.
