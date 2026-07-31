@@ -2,6 +2,8 @@
 .gradle/
 build/
 */build/
+# Kotlin compiler session dir, created by any local ./gradlew run.
+.kotlin/
 local.properties
 .idea/
 *.iml
