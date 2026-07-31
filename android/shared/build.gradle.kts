@@ -15,4 +15,13 @@ dependencies {
     // `api` so the Android modules get kotlinx-serialization transitively when
     // they build/parse records.
     api(libs.kotlinx.serialization.json)
+
+    // TimerEngine is the one piece that must stay in step with the web app's
+    // useTimer, so it gets real unit tests. Pure JVM — runs with `./gradlew
+    // :shared:test`, no SDK or device needed.
+    testImplementation(kotlin("test"))
+}
+
+tasks.test {
+    useJUnitPlatform()
 }

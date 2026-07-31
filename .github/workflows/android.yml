@@ -99,6 +99,21 @@ jobs:
             } >> "$GITHUB_ENV"
           fi
 
+      # TimerEngine is the port of the web useTimer; a drift here means the watch
+      # and phone disagree with the browser about a stop's duration. Runs before
+      # the APK build so a broken timer fails fast.
+      - name: Unit tests (:shared)
+        working-directory: android
+        run: ./gradlew :shared:test --stacktrace --no-daemon
+
+      - name: Upload unit test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-test-report
+          path: android/shared/build/reports/tests/test/
+          if-no-files-found: warn
+
       - name: Build release APKs
         working-directory: android
         run: ./gradlew :mobile:assembleRelease :wear:assembleRelease --stacktrace --no-daemon
