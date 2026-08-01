@@ -157,6 +157,11 @@ const legacyShiftOf = (shifts) =>
 
 // Stable key fragment for a machine name (used in production record ids).
 const machineSlug = (m) => String(m || "").replace(/[^a-zA-Z0-9]+/g, "-");
+// Is this the same operator? Names are typed by hand, shift after shift, so
+// "bob", "Bob" and " Bob " are one person. Matching them exactly emptied the
+// whole board — 0 stops, 0 downtime — with no hint that the name was the reason.
+const sameOperator = (a, b) =>
+  String(a == null ? "" : a).trim().toLowerCase() === String(b == null ? "" : b).trim().toLowerCase();
 const HOUR_MS = 60 * 60 * 1000;
 
 // ---------- OEE -------------------------------------------------------------
@@ -936,6 +941,19 @@ async function fetchJSON(url, { token, method = "GET", body, timeoutMs = 8000 } 
   } finally { clearTimeout(timer); }
 }
 
+// Storage failures are shown to the OPERATOR verbatim, so they have to be words
+// someone in gloves can act on. localStorage throws (it doesn't return falsy), so
+// the exception used to reach the banner raw: "QuotaExceededError" told them
+// nothing and looked like the stop was gone. It isn't — the finished stop is kept
+// and Save can be tapped again — so say that, and say what to do about the cause.
+function storageErrorMessage(e, what = "stop") {
+  const raw = (e && (e.name || e.message)) || "";
+  if (/quota|exceeded|full|NS_ERROR_DOM_QUOTA/i.test(String(raw))) {
+    return `This device's storage is full, so the ${what} wasn't saved. It's still here — ask your supervisor to export and clear old stops, then tap Save again.`;
+  }
+  return `The ${what} didn't save, but it isn't lost — tap Save again. If it keeps failing, tell your supervisor.`;
+}
+
 const api = {
   // --- stops -----------------------------------------------------------------
   async loadStops() {
@@ -975,7 +993,7 @@ const api = {
       await this._enqueue(key);
       return { ok: true, record };
     } catch (e) {
-      return { ok: false, error: e?.message || "The stop didn't save. Try again." };
+      return { ok: false, error: storageErrorMessage(e, "stop") };
     }
   },
 
@@ -1366,6 +1384,10 @@ function useTimer({ operator, machine }) {
   // machines mid-stop without re-attributing the running stop.
   const machineRef = useRef(machine);
   machineRef.current = machine;
+  // Same for the name, so the ended-but-undocumented autosave below is attributed
+  // even though stop() is a stable callback.
+  const operatorRef = useRef(operator);
+  operatorRef.current = operator;
 
   // Derived elapsed — never stored, so it can't disagree with the timer state.
   const elapsed = state.paused
@@ -1429,7 +1451,18 @@ function useTimer({ operator, machine }) {
     const end = Date.now();
     const duration = s.paused ? s.accumulated : s.accumulated + (end - s.segStart);
     setState(emptyTimer);
-    api.clearInProgress();
+    // The finished stop is NOT cleared here: between "End Stop" and "Save stop"
+    // it used to live only in React state, so a refresh while the reason picker
+    // was open threw away real measured downtime with nothing to recover from.
+    // Keep it in the same autosave slot, flagged `ended`, and the load path puts
+    // the operator straight back in the document-stop card. No reason is invented
+    // — documenting it is still their tap.
+    api.saveInProgress({
+      operator: operatorRef.current, machine: s.machine || machineRef.current,
+      running: false, paused: false, ended: true,
+      startTs: s.startTs, accumulated: duration, segStart: null,
+      end, duration, savedAt: end,
+    });
     // Carries the pinned machine so documentation attributes the stop to where
     // it actually happened, not to wherever the operator has switched to since.
     return { start: s.startTs, end, duration, machine: s.machine };
@@ -1711,6 +1744,14 @@ export default function App() {
   // breakdown, exports and the handout all pick it up with no new plumbing.
   // { machine, operator, start } | null
   const [offMachine, setOffMachine] = useState(null);
+  // `start` of the most recently CLOSED span, persisted alongside it. A second
+  // tab that loaded during a span holds the same span in state, so when this tab
+  // closes it, the peer's reconcile sees "no span" and would re-assert the dead
+  // one — logging the same minutes a second time. This marker is how the peer
+  // tells "never saw it" (re-assert) from "already recorded" (adopt the close).
+  // A ref, not state: it must be readable from persistPrefs without churning its
+  // dependencies.
+  const offClosedRef = useRef(0);
   // shift handover report dialog + the log of handouts already given
   const [handoverOpen, setHandoverOpen] = useState(false);
   const [handovers, setHandovers] = useState([]);
@@ -1768,6 +1809,23 @@ export default function App() {
   const operatorRef = useRef(operator); operatorRef.current = operator;
   const machineRef = useRef(machine); machineRef.current = machine;
 
+  // ---- prefs writer --------------------------------------------------------
+  // Declared up here (not down with persistConfig) because the machine-switch
+  // callbacks below have to persist through it, and a useCallback dependency is
+  // read at render time — referencing it later in the file would be a TDZ error.
+  const persistPrefs = useCallback((patch) => {
+    // operator/machine/setupLocked are persisted so a locked setup survives a
+    // page refresh. When unlocked we still write them, but the loader ignores
+    // operator/machine unless setupLocked is true.
+    // EVERY persisted pref must be listed here: savePrefs REPLACES the blob, so
+    // anything missing from this base is erased by an unrelated write. (An open
+    // `offMachine` span used to vanish the moment someone tapped the dark-mode
+    // toggle, losing the operator's away time silently.)
+    // And a patch must carry the NEW value of anything it is changing — the base
+    // reads React state, which is still the old value in the same tick.
+    api.savePrefs({ dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId, offMachine, offMachineClosed: offClosedRef.current, ...patch });
+  }, [dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId, offMachine]);
+
   // ---- machine sessions lifecycle -------------------------------------------
   // The open session on THIS device lives in a ref (its id also persists in
   // device storage so a reload can close the dangling span). Presence tracking
@@ -1809,7 +1867,12 @@ export default function App() {
     closeSession();
     openSession(next);
     setMachine(next);
-  }, [closeSession, openSession]);
+    // Persist it, or a reload silently puts a locked operator back on the OLD
+    // machine — and the next stop plus the presence span are then attributed to
+    // a machine they aren't standing at. The patch carries the new value because
+    // persistPrefs' base still reads the pre-switch state.
+    persistPrefs({ machine: next });
+  }, [closeSession, openSession, persistPrefs]);
 
   // Heartbeat: bump the open session's updatedAt so a crash leaves a usable
   // "last seen" for the dangling-cleanup pass on the next load.
@@ -1879,6 +1942,7 @@ export default function App() {
         // wasn't locked; a span older than this shift is dropped further down.
         // `restored` marks it for the one-time staleness check below; a live
         // span never carries it, so New Shift can't discard one.
+        offClosedRef.current = Number(prefs.offMachineClosed) || 0;
         if (prefs.offMachine && prefs.offMachine.start) setOffMachine({ ...prefs.offMachine, restored: true });
         // Only a *locked* setup carries the name/machine across a refresh.
         // An unlocked session intentionally starts blank each load.
@@ -1929,7 +1993,20 @@ export default function App() {
       }
 
       const ip = await api.loadInProgress();
-      if (ip && ip.startTs) setRecovered(ip);
+      if (ip && ip.startTs && ip.ended) {
+        // A stop that was ENDED but never documented (the app closed while the
+        // reason picker was open). The measurement is real and finished, so don't
+        // ask "resume or finalize?" — put it straight back in the document-stop
+        // card so the operator only has to pick a reason. No reason is invented.
+        // The shell keeps its own `pending` natively, so this is browser-only.
+        if (!(native && typeof native.startStop === "function")) {
+          if (ip.operator) setOperator(ip.operator);
+          setPendingStop({ start: ip.startTs, end: ip.end || ip.savedAt, duration: ip.duration || ip.accumulated || 0, machine: ip.machine });
+          setReason((prefs && prefs.lastReason && (cfg?.reasons || DEFAULT_REASONS).includes(prefs.lastReason))
+            ? prefs.lastReason : (cfg?.reasons?.[0] || DEFAULT_REASONS[0]));
+          setNotes("");
+        }
+      } else if (ip && ip.startTs) setRecovered(ip);
     })();
   }, []);
 
@@ -2078,17 +2155,6 @@ export default function App() {
     return next;
   }, [machines, reasons, quickStops, shifts, supervisorPinHash, rates, handoverEmails, syncCfg]);
 
-  const persistPrefs = useCallback((patch) => {
-    // operator/machine/setupLocked are persisted so a locked setup survives a
-    // page refresh. When unlocked we still write them, but the loader ignores
-    // operator/machine unless setupLocked is true.
-    // EVERY persisted pref must be listed here: savePrefs REPLACES the blob, so
-    // anything missing from this base is erased by an unrelated write. (An open
-    // `offMachine` span used to vanish the moment someone tapped the dark-mode
-    // toggle, losing the operator's away time silently.)
-    api.savePrefs({ dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId, offMachine, ...patch });
-  }, [dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId, offMachine]);
-
   const updateMachines = (next) => { setMachines(next); persistConfig({ machines: next }); };
   const updateReasons = (next) => { setReasons(next); persistConfig({ reasons: next }); };
   const updateQuickStops = (next) => { setQuickStops(next); persistConfig({ quickStops: next }); };
@@ -2097,6 +2163,91 @@ export default function App() {
   const updateRates = (next) => { setRates(next); persistConfig({ rates: next }); };
   const updateHandoverEmails = (next) => { setHandoverEmails(next); persistConfig({ handoverEmails: next }); };
   const toggleDark = () => { const n = !dark; setDark(n); persistPrefs({ dark: n }); };
+
+  // ---- another tab wrote our storage ---------------------------------------
+  // `config:prefs` and `config:lists` are each ONE blob that every write REPLACES,
+  // so a second tab on the same phone (easy to end up with: a bookmark, a link
+  // from the supervisor) silently reverted this one. Reported consequences, all
+  // from a single unrelated write like the dark-mode toggle: an open off-machine
+  // span disappeared (real downtime never logged), a New Shift cutoff came undone
+  // (the previous shift's stops re-merged and inflated the new shift and its
+  // handout), and a supervisor's settings edit was dropped.
+  //
+  // The `storage` event fires only in the OTHER tabs, so it's the one place we can
+  // notice. Reconcile rather than trust: view prefs follow the other tab, the
+  // shift cutoff only ever moves FORWARD, and anything the incoming blob dropped
+  // is written straight back — EXCEPT a span the peer has recorded.
+  //
+  // An incoming "no span" is not automatically the stale side: a tab that LOADED
+  // during a span restores it into its own state, so both tabs can hold the same
+  // span and either can tap "Back on". If the peer closed it, re-asserting here
+  // resurrects a span already written as a stop, and the next return logs the
+  // same minutes again — the app inventing downtime, which is worse than the
+  // clobber this reconciler exists to prevent. `offMachineClosed` (the `start` of
+  // the last closed span) is what tells the two cases apart.
+  // Reads go through `api`, and non-localStorage backends simply never fire this.
+  const reconcilePrefs = useCallback(async () => {
+    const p = await api.loadPrefs();
+    if (!p) return;
+    if (typeof p.dark === "boolean") setDark(p.dark);
+    if (p.lastReason) setLastReason(p.lastReason);
+    if (p.shiftId) setShiftId(p.shiftId);
+    const theirCut = p.clearedBefore || 0;
+    const ourCut = clearedBefore || 0;
+    if (theirCut > ourCut) { setClearedBefore(theirCut); setShowAll(false); }
+    const theirClosed = Number(p.offMachineClosed) || 0;
+    offClosedRef.current = Math.max(offClosedRef.current, theirClosed);
+    const theirSpan = !!(p.offMachine && p.offMachine.start);
+    // The peer closed the very span we are holding — it recorded the stop, so
+    // adopt the close. Re-asserting would bill those minutes a second time.
+    const peerClosedOurs = !!offMachine && !theirSpan && theirClosed >= offMachine.start;
+    if (peerClosedOurs) setOffMachine(null);
+    const lostSpan = !!offMachine && !theirSpan && !peerClosedOurs;
+    if (lostSpan || ourCut > theirCut) {
+      // Write our side back. The adopted values are passed explicitly because the
+      // state setters above haven't landed yet — the base object would undo them.
+      persistPrefs({
+        clearedBefore: Math.max(ourCut, theirCut),
+        dark: typeof p.dark === "boolean" ? p.dark : dark,
+        lastReason: p.lastReason || lastReason,
+        shiftId: p.shiftId || shiftId,
+        offMachine: peerClosedOurs ? null : offMachine,
+        offMachineClosed: offClosedRef.current,
+      });
+    }
+  }, [clearedBefore, offMachine, dark, lastReason, shiftId, persistPrefs]);
+
+  // Shared config is already last-write-wins by `updatedAt` for server sync —
+  // reuse exactly that rule between tabs. Adopting needs no re-save (the other tab
+  // already wrote it); losing means our newer edit was clobbered, so put it back.
+  const reconcileConfig = useCallback(async () => {
+    const cfg = await api.loadConfig();
+    if (!cfg) return;
+    const clampAt = (v) => Math.min(Number(v) || 0, Date.now());
+    const theirs = clampAt(cfg.updatedAt);
+    const ours = clampAt(configUpdatedAt);
+    if (theirs > ours) {
+      if (cfg.machines?.length) setMachines(cfg.machines);
+      if (cfg.reasons?.length) setReasons(cfg.reasons);
+      if (cfg.quickStops) setQuickStops(cfg.quickStops);
+      { const ls = normalizeShifts(cfg.shifts, cfg.shift); if (ls) setShifts(ls); }
+      setSupervisorPinHash(cfg.supervisorPinHash ?? null);
+      if (cfg.rates) setRates(cfg.rates);
+      if (cfg.handoverEmails) setHandoverEmails(cfg.handoverEmails);
+      setConfigUpdatedAt(theirs);
+    } else if (ours > theirs) persistConfig({});
+  }, [configUpdatedAt, persistConfig]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onStorage = (e) => {
+      const key = e && e.key;
+      if (key === "config:prefs" || key == null) reconcilePrefs();
+      if (key === "config:lists" || key == null) reconcileConfig();
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [reconcilePrefs, reconcileConfig]);
 
   // ---- backup / restore ----------------------------------------------------
   // Download one portable JSON of everything, so it can be re-imported into a
@@ -2182,6 +2333,9 @@ export default function App() {
       setStops((prev) => [record, ...prev]);
       setLastReason(reason); persistPrefs({ lastReason: reason });
       setPendingStop(null);
+      // Documented — the ended-stop autosave has done its job. (On a failure it
+      // deliberately stays, so a refresh mid-retry still recovers the stop.)
+      api.clearInProgress();
       // Native recorded nothing; just clear its pending now the web has the record.
       if (inShell) { try { nativeApi.discardStop(); } catch (e) { /* ignore */ } }
       sync.flush();
@@ -2194,6 +2348,7 @@ export default function App() {
   const handleDiscardPending = () => {
     if (inShell) { try { nativeApi.discardStop(); } catch (e) { /* ignore */ } setSaveError(""); return; }
     setPendingStop(null); setSaveError("");
+    api.clearInProgress(); // deliberately dropped — don't offer it again on the next load
   };
 
   const applyQuickStop = (q) => {
@@ -2218,11 +2373,18 @@ export default function App() {
   const unlockSetup = () => { setSetupLocked(false); persistPrefs({ setupLocked: false }); };
 
   // ---- manual stop report --------------------------------------------------
+  // Re-entrancy latch, same shape as offSavingRef: `saving` state already blocks
+  // the button, but two dispatches inside one task would both get through it and
+  // log the stop twice. (Not reachable with real taps — React 18 flushes the
+  // disable synchronously — so this is belt-and-braces, not a fix for a live bug.)
+  const manualSavingRef = useRef(false);
   // Logs a stop that already happened, entered by duration. End time is "now",
   // start is back-dated by the duration. `loggedAt` is when the operator saved
   // it, so it counts toward the CURRENT shift even though `start` is back-dated
   // (which otherwise could fall before the New Shift cutoff and get hidden).
   const handleManualSave = async ({ durationMs, reason: mReason, notes: mNotes, machine: mMachine }) => {
+    if (manualSavingRef.current) return false;
+    manualSavingRef.current = true;
     setSaving(true); setSaveError("");
     const end = Date.now();
     const start = end - durationMs;
@@ -2246,6 +2408,7 @@ export default function App() {
       setSaveError(res.error || "The stop didn't save. Try again.");
     }
     setSaving(false);
+    manualSavingRef.current = false;
     return res.ok;
   };
 
@@ -2289,7 +2452,11 @@ export default function App() {
     if (!rec || offSavingRef.current) return;
     offSavingRef.current = true;
     setOffMachine(null);
-    persistPrefs({ offMachine: null });
+    // Mark THIS span closed before clearing it, so a second tab holding the same
+    // restored span adopts the close instead of re-asserting a span we are about
+    // to record. Without it those minutes get logged twice.
+    offClosedRef.current = Math.max(offClosedRef.current, rec.start);
+    persistPrefs({ offMachine: null, offMachineClosed: offClosedRef.current });
     const target = nextMachine || rec.machine;
 
     const end = Math.max(rec.start, endTs || Date.now());
@@ -2313,7 +2480,11 @@ export default function App() {
         // keeps running and a retry still records it, and say so where they're
         // actually looking (the off-machine banner, not the stop-document card).
         setOffMachine(rec);
-        persistPrefs({ offMachine: rec });
+        // The span is open again and NOT recorded, so retract the closed marker —
+        // otherwise a peer tab would treat this live span as already logged and
+        // drop it, losing the away time we just went out of our way to keep.
+        offClosedRef.current = 0;
+        persistPrefs({ offMachine: rec, offMachineClosed: 0 });
         // Lead with what the operator should DO. A bare "QuotaExceededError" in
         // the banner tells someone in gloves nothing.
         setOffError(`Didn't save — you're still off machine, tap again to retry.${res.error ? ` (${res.error})` : ""}`);
@@ -2323,6 +2494,10 @@ export default function App() {
     }
 
     setMachine(target);
+    // Both values have to be in this one patch: the base object still holds the
+    // pre-switch machine AND the open span, so persisting either from state here
+    // would put the operator back on the old machine (or re-open the span).
+    persistPrefs({ offMachine: null, machine: target });
     openSession(target); // back at a machine → presence resumes
     offSavingRef.current = false;
   }, [offMachine, persistPrefs, sync, openSession]);
@@ -2331,7 +2506,7 @@ export default function App() {
   // button can invent hours of downtime, and unlike a manual report (where the
   // operator types the duration) nothing else here makes them look at it.
   const OFF_CONFIRM_MS = 90 * 60 * 1000;
-  const [offConfirm, setOffConfirm] = useState(null); // { target } | null
+  const [offConfirm, setOffConfirm] = useState(null); // { target, at } | null
 
   // Close the span WITHOUT recording — for the "I forgot to tap back" case,
   // where the honest answer is no record rather than an invented one.
@@ -2339,17 +2514,25 @@ export default function App() {
     const rec = offMachine;
     if (!rec) return;
     setOffMachine(null);
-    persistPrefs({ offMachine: null });
     setOffError("");
     const target = next || rec.machine;
     setMachine(target);
+    // Deliberately dropped, so a peer must not re-assert it either.
+    offClosedRef.current = Math.max(offClosedRef.current, rec.start);
+    // One write, after both changes, carrying both new values — the base object
+    // still holds the old machine and the open span.
+    persistPrefs({ offMachine: null, machine: target, offMachineClosed: offClosedRef.current });
     openSession(target);
   }, [offMachine, persistPrefs, openSession]);
 
   // Returning from off machine. Long spans route through the confirmation.
   const backOnMachine = useCallback((next) => {
     if (offMachine && Date.now() - offMachine.start >= OFF_CONFIRM_MS) {
-      setOffConfirm({ target: next || offMachine.machine });
+      // `at` freezes the return time at the tap, so the duration the dialog shows
+      // is exactly the duration that gets logged. Without it the dialog's number
+      // was computed once while the save recomputed Date.now() — the operator
+      // consented to one figure and a bigger one landed on the machine.
+      setOffConfirm({ target: next || offMachine.machine, at: Date.now() });
       return;
     }
     endOffMachine(next);
@@ -2387,7 +2570,9 @@ export default function App() {
     offRestoreCheckedRef.current = true;
     if (offMachine.start < shiftStart) {
       setOffMachine(null);
-      persistPrefs({ offMachine: null });
+      // Dropped on purpose — mark it so a peer tab doesn't hand it back.
+      offClosedRef.current = Math.max(offClosedRef.current, offMachine.start);
+      persistPrefs({ offMachine: null, offMachineClosed: offClosedRef.current });
     } else {
       const { restored, ...live } = offMachine;
       setOffMachine(live);
@@ -2432,6 +2617,9 @@ export default function App() {
     const mach = machines.includes(d.machine) ? d.machine : machines[0];
     setOperator(d.operator || "");
     setMachine(mach);
+    // Persist the recovered identity: without this the next reload drops back to
+    // the old machine and mis-attributes the following stop.
+    persistPrefs({ operator: d.operator || "", machine: mach });
     timer.restore(d);
     setRecovered(null);
     // Resuming work is presence too (no-op if a session is already open).
@@ -2446,13 +2634,22 @@ export default function App() {
     const banked = Math.max(0, d.accumulated || 0);
     const liveSeg = (d.paused || !d.segStart) ? 0 : Math.max(0, (d.savedAt || d.segStart) - d.segStart);
     const dur = banked + liveSeg;
+    const mach = machines.includes(d.machine) ? d.machine : machines[0];
     setOperator(d.operator || "");
-    setMachine(machines.includes(d.machine) ? d.machine : machines[0]);
+    setMachine(mach);
+    persistPrefs({ operator: d.operator || "", machine: mach });
     setPendingStop({ start: d.startTs, end: d.savedAt, duration: dur, machine: d.machine });
     setReason(lastReason && reasons.includes(lastReason) ? lastReason : reasons[0]);
     setNotes("");
     setRecovered(null);
-    api.clearInProgress();
+    // Keep it recoverable: it's ended-but-undocumented now, exactly like End Stop.
+    // Clearing here meant a refresh before "Save stop" lost it a second time.
+    api.saveInProgress({
+      operator: d.operator || "", machine: d.machine,
+      running: false, paused: false, ended: true,
+      startTs: d.startTs, accumulated: dur, segStart: null,
+      end: d.savedAt, duration: dur, savedAt: Date.now(),
+    });
   };
   const recoverDiscard = () => { setRecovered(null); api.clearInProgress(); };
 
@@ -2501,9 +2698,11 @@ export default function App() {
   // deliberately ignores `showAll`, which is only a view toggle for the Recent
   // list below — letting it widen the stats meant a curious tap could send a
   // supervisor a handout claiming 4 stops / 2h for a 1 stop / 5m shift.
+  // Name matching is case/space-insensitive (see sameOperator): retyping "bob"
+  // for records saved as "Bob" used to empty the board with no explanation.
   const shiftStops = useMemo(() => stops.filter((s) => {
     const stamp = s.loggedAt ?? s.end ?? s.start;
-    return (!operator.trim() || s.operator === operator.trim()) && !s.discarded && !s.deleted &&
+    return (!operator.trim() || sameOperator(s.operator, operator)) && !s.discarded && !s.deleted &&
       stamp > shiftStart;
   }), [stops, operator, shiftStart]);
 
@@ -2512,14 +2711,14 @@ export default function App() {
   // Shift" — so the "Show all" affordance has to key off this, or older stops
   // would disappear with no explanation and no way back.
   const hiddenStopCount = useMemo(() => {
-    const own = stops.filter((s) => (!operator.trim() || s.operator === operator.trim()) && !s.discarded && !s.deleted);
+    const own = stops.filter((s) => (!operator.trim() || sameOperator(s.operator, operator)) && !s.discarded && !s.deleted);
     return Math.max(0, own.length - shiftStops.length);
   }, [stops, operator, shiftStops]);
 
   // What the Recent-stops list shows: the same set, or everything when the
   // operator taps "Show all".
   const visibleStops = useMemo(() => (showAll
-    ? stops.filter((s) => (!operator.trim() || s.operator === operator.trim()) && !s.discarded && !s.deleted)
+    ? stops.filter((s) => (!operator.trim() || sameOperator(s.operator, operator)) && !s.discarded && !s.deleted)
     : shiftStops), [stops, operator, showAll, shiftStops]);
 
   // ---- shift-wide operator picture (roaming-aware OEE) ----------------------
@@ -2545,7 +2744,9 @@ export default function App() {
     const share = {};
     let shareTotal = 0;
     for (const s of sessions) {
-      if (s.operator !== op) continue;
+      // Same case-insensitive rule as the stop filter, so a retyped name doesn't
+      // silently drop the presence spans that apportion manned time.
+      if (!sameOperator(s.operator, op)) continue;
       const end = Math.min(s.end ?? now, winEnd);
       const start = Math.max(s.start, winStart);
       if (end > start) { share[s.machine] = (share[s.machine] || 0) + (end - start); shareTotal += end - start; }
@@ -2730,14 +2931,15 @@ export default function App() {
       {offConfirm && offMachine && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30" onClick={() => setOffConfirm(null)}>
           <div className={`${dark ? "bg-slate-900" : "bg-white"} rounded-xl shadow-xl p-5 max-w-sm w-full space-y-3`} onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center gap-2 font-bold"><AlertCircle size={18} className="text-amber-500" /> Log {fmtDur(Date.now() - offMachine.start)} of downtime?</div>
+            {/* The frozen tap time, not Date.now(): what's shown must be what's logged. */}
+            <div className="flex items-center gap-2 font-bold"><AlertCircle size={18} className="text-amber-500" /> Log {fmtDur(Math.max(0, (offConfirm.at || Date.now()) - offMachine.start))} of downtime?</div>
             <p className={`text-sm ${t.sub}`}>
               You've been off machine since {fmtTime(offMachine.start)}. Coming back records that whole
               stretch as a <b>“{OFF_MACHINE_REASON}”</b> stop on <b>{offMachine.machine}</b>. If you
               actually returned earlier and forgot to tap, discard it and report the real stop manually instead.
             </p>
             <div className="flex gap-2">
-              <button onClick={() => { const c = offConfirm; setOffConfirm(null); endOffMachine(c.target); }}
+              <button onClick={() => { const c = offConfirm; setOffConfirm(null); endOffMachine(c.target, c.at); }}
                 className="flex-1 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 rounded-lg">Yes, log it</button>
               <button onClick={() => { const c = offConfirm; setOffConfirm(null); discardOffMachine(c.target); }}
                 className={`px-4 ${t.sub} font-semibold`}>Discard</button>
@@ -2784,6 +2986,13 @@ function OperatorView(props) {
 
   const { state, elapsed, start, pause, resume } = timer;
   const { running, paused } = state;
+
+  // "Discard" sits a thumb's width from "Save stop" and throws away a real,
+  // already-measured stop with no undo — the only destructive action in the app
+  // that didn't confirm. One extra tap, big target, and it names the duration
+  // that's about to be lost.
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  useEffect(() => { if (!pendingStop) setConfirmDiscard(false); }, [pendingStop]);
 
   // Live clock for the off-machine banner. The stop timer's own interval only
   // ticks while a stop is being timed, so this needs its own.
@@ -3064,8 +3273,19 @@ function OperatorView(props) {
           </label>
           <div className="flex gap-2">
             <button onClick={onSave} disabled={saving} className="flex-1 flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white font-bold py-3.5 rounded-lg transition">{saving ? <RefreshCw size={18} className="animate-spin" /> : <CheckCircle size={18} />} Save stop</button>
-            <button onClick={onDiscardPending} disabled={saving} className={`px-4 ${t.sub} hover:text-red-500 font-semibold`}>Discard</button>
+            <button onClick={() => setConfirmDiscard(true)} disabled={saving} className={`px-4 ${t.sub} hover:text-red-500 font-semibold`}>Discard</button>
           </div>
+          {confirmDiscard && (
+            <div className={`border-2 border-red-400 rounded-lg p-3 space-y-2`}>
+              <div className="text-sm font-bold text-red-500 flex items-center gap-2"><AlertCircle size={16} /> Throw away {fmtDur(pendingStop.duration)} of downtime?</div>
+              <p className={`text-xs ${t.sub}`}>This stop was measured on {pendingStop.machine || machine}. Discarding it records nothing and can't be undone.</p>
+              <div className="flex gap-2">
+                <button onClick={() => { setConfirmDiscard(false); onDiscardPending(); }}
+                  className="flex-1 bg-red-500 hover:bg-red-600 text-white font-bold py-3 rounded-lg">Discard stop</button>
+                <button onClick={() => setConfirmDiscard(false)} className={`px-4 ${t.sub} font-semibold`}>Keep it</button>
+              </div>
+            </div>
+          )}
           {saveError && <div className="flex items-center gap-2 text-sm text-red-500 bg-red-500/10 rounded-lg px-3 py-2"><AlertCircle size={15} /> {saveError}</div>}
         </div>
       )}
@@ -3155,7 +3375,18 @@ function ManualStopModal({ t, dark, machine, machines, reasons, quickStops, last
   const [notes, setNotes] = useState("");
   const [localErr, setLocalErr] = useState("");
 
-  const durationMs = (Math.max(0, parseInt(mins || "0", 10)) * 60 + Math.max(0, parseInt(secs || "0", 10))) * 1000;
+  // The seconds box declares max="59" but nothing enforced it, so typing 900
+  // silently recorded a 15-minute stop nobody meant. Clamp as it's typed (the
+  // field shows the truth) and again here, so what's saved is what's displayed.
+  // Minutes are deliberately NOT capped: a long typed duration is the operator's
+  // call, exactly like the rest of the manual report.
+  const clampSecs = (v) => {
+    const n = parseInt(v, 10);
+    return Number.isFinite(n) ? Math.max(0, Math.min(59, n)) : 0;
+  };
+  const onSecsChange = (v) => setSecs(v === "" ? "" : String(clampSecs(v)));
+
+  const durationMs = (Math.max(0, parseInt(mins || "0", 10) || 0) * 60 + clampSecs(secs || "0")) * 1000;
 
   const submit = async () => {
     if (durationMs <= 0) { setLocalErr("Enter a duration greater than zero."); return; }
@@ -3185,7 +3416,7 @@ function ManualStopModal({ t, dark, machine, machines, reasons, quickStops, last
               <span className={`text-sm ${t.sub}`}>min</span>
             </div>
             <div className="flex-1 flex items-center gap-1">
-              <input type="number" inputMode="numeric" min="0" max="59" value={secs} onChange={(e) => setSecs(e.target.value)} placeholder="0"
+              <input type="number" inputMode="numeric" min="0" max="59" value={secs} onChange={(e) => onSecsChange(e.target.value)} placeholder="0"
                 className={`w-full text-center text-2xl font-mono font-bold border rounded-lg py-2 focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}`} />
               <span className={`text-sm ${t.sub}`}>sec</span>
             </div>
@@ -3642,15 +3873,26 @@ function StatCard({ t, label, value, icon, accent }) {
 
 function ListManager({ t, title, icon, items, onChange, placeholder }) {
   const [input, setInput] = useState("");
-  const add = () => { const v = input.trim().slice(0, 60); if (!v || items.includes(v)) return; onChange([...items, v]); setInput(""); };
-  const remove = (item) => onChange(items.filter((i) => i !== item));
+  // Add used to no-op silently on a blank or already-present entry (including one
+  // that only differed by padding), so the supervisor tapped Add and nothing
+  // happened — indistinguishable from a broken button. Say which it was.
+  const [msg, setMsg] = useState("");
+  const add = () => {
+    const v = input.trim().slice(0, 60);
+    if (!v) { setMsg("Type a name first."); return; }
+    const clash = items.find((i) => i.trim().toLowerCase() === v.toLowerCase());
+    if (clash) { setMsg(`“${clash}” is already in the list.`); return; }
+    onChange([...items, v]); setInput(""); setMsg("");
+  };
+  const remove = (item) => { setMsg(""); onChange(items.filter((i) => i !== item)); };
   return (
     <div className={`${t.card} rounded-xl p-4`}>
       <h3 className="font-bold mb-3 flex items-center gap-2">{icon} {title}</h3>
-      <div className="flex gap-2 mb-3">
-        <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} placeholder={placeholder} className={`flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}`} />
+      <div className="flex gap-2 mb-1">
+        <input value={input} onChange={(e) => { setInput(e.target.value); setMsg(""); }} onKeyDown={(e) => e.key === "Enter" && add()} placeholder={placeholder} className={`flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}`} />
         <button onClick={add} className="flex items-center gap-1 bg-emerald-500 hover:bg-emerald-600 text-white font-semibold px-4 rounded-lg text-sm"><Plus size={16} /> Add</button>
       </div>
+      <div className="mb-3 min-h-[16px]">{msg && <span className="text-xs text-amber-600 flex items-center gap-1"><AlertCircle size={12} /> {msg}</span>}</div>
       <div className="flex flex-wrap gap-2">{items.map((item) => (
         <span key={item} className={`flex items-center gap-1 ${t.chip} rounded-full pl-3 pr-1 py-1 text-sm`}>{item}<button onClick={() => remove(item)} disabled={items.length <= 1} className="text-slate-400 hover:text-red-500 disabled:opacity-30 p-0.5" aria-label={`Remove ${item}`}><X size={14} /></button></span>
       ))}</div>
@@ -3878,7 +4120,9 @@ function ShiftOutputCard({ t, myProduction, onSaveProduction, machine, otherEntr
           <input type="number" inputMode="numeric" min="0" value={scrap} onChange={(e) => setScrap(e.target.value)} placeholder="0"
             className={`border rounded-lg px-3 py-2.5 text-lg font-mono focus:outline-none focus:ring-2 focus:ring-amber-400 ${t.input}`} />
         </label>
-        <button onClick={save} disabled={units === "" || !dirty}
+        {/* Scrap-only is a real shift (a run that produced nothing good), so an
+            empty UNITS box must not block Save — it counts as 0. */}
+        <button onClick={save} disabled={(units === "" && scrap === "") || !dirty}
           className="flex items-center gap-1 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-white font-bold px-5 py-3 rounded-lg">
           <CheckCircle size={16} /> Save
         </button>
@@ -3904,11 +4148,20 @@ function ShiftOutputCard({ t, myProduction, onSaveProduction, machine, otherEntr
 
 // Supervisor settings: rated output (units/hour) per machine, for OEE Performance.
 function RatesManager({ t, machines, rates, onChange }) {
-  const setRate = (m, v) => {
+  // Typing here used to write `config:lists` AND PUT /config on every keystroke —
+  // "1200" was four writes and four uploads, the last three of them wrong. Keep the
+  // keystrokes local and commit once, on blur / Enter.
+  const [draft, setDraft] = useState({});
+  useEffect(() => { setDraft({}); }, [rates]);
+  const valueOf = (m) => (draft[m] !== undefined ? draft[m] : (rates?.[m] ?? ""));
+  const commit = (m) => {
+    const v = draft[m];
+    if (v === undefined) return;
     const next = { ...(rates || {}) };
     const n = Math.max(0, Number(v) || 0);
     if (n > 0) next[m] = n; else delete next[m];
-    onChange(next);
+    setDraft((d) => { const { [m]: _drop, ...rest } = d; return rest; });
+    if (n !== (rates?.[m] || 0)) onChange(next);
   };
   return (
     <div className={`${t.card} rounded-xl p-4`}>
@@ -3918,7 +4171,9 @@ function RatesManager({ t, machines, rates, onChange }) {
         {machines.map((m) => (
           <label key={m} className="flex items-center gap-2 text-sm">
             <span className="flex-1 font-medium">{m}</span>
-            <input type="number" inputMode="numeric" min="0" value={rates?.[m] ?? ""} onChange={(e) => setRate(m, e.target.value)} placeholder="—"
+            <input type="number" inputMode="numeric" min="0" value={valueOf(m)}
+              onChange={(e) => setDraft((d) => ({ ...d, [m]: e.target.value }))}
+              onBlur={() => commit(m)} onKeyDown={(e) => { if (e.key === "Enter") commit(m); }} placeholder="—"
               className={`w-28 border rounded-lg px-3 py-2 text-sm font-mono text-right focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}`} />
             <span className={`text-xs ${t.sub} w-16`}>units/h</span>
           </label>

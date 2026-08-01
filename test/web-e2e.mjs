@@ -601,7 +601,14 @@ async function main() {
   await pOff.waitForSelector("text=Document this stop", { timeout: 5000 });
   assert(await pOff.locator('button:has-text("Off machine")').count() === 0,
     "Off machine must not be offered while a stop is awaiting a reason");
-  await pOff.click("text=Discard");
+
+  // Discard sits a thumb's width from "Save stop" and throws away an already
+  // measured stop with no undo, so ONE tap must not be enough.
+  await pOff.click('button:has-text("Discard")');
+  await pOff.waitForTimeout(150);
+  assert(await pOff.locator("text=Document this stop").count() === 1,
+    "one tap on Discard must not throw a measured stop away — it has to confirm first");
+  await pOff.click('button:has-text("Discard stop")');
 
   // BLOCKER regression: prefs are saved as ONE replaced blob, so an unrelated
   // prefs write (the dark-mode toggle, always on screen) used to erase the open
@@ -750,6 +757,62 @@ async function main() {
   assert(await pLong.locator('button:has-text("Back on")').count() === 0,
     "discarding must also close the span");
   await ctxLong.close();
+
+  // …and if they DO consent, the number logged must be the number they were shown.
+  // The dialog rendered once while the save recomputed Date.now(), so every second
+  // spent reading it was added to the machine's downtime after the fact.
+  const ctxFreeze = await browser.newContext();
+  const pFreeze = await ctxFreeze.newPage();
+  await pFreeze.route(/unpkg\.com|cdn\.tailwindcss\.com/, async (route) => {
+    const u = route.request().url();
+    if (u.includes("react-dom")) return route.fulfill({ contentType: "application/javascript", body: reactDomUmd });
+    if (u.includes("react")) return route.fulfill({ contentType: "application/javascript", body: reactUmd });
+    return route.fulfill({ contentType: "application/javascript", body: "/* tailwind stub */" });
+  });
+  await pFreeze.addInitScript(() => {
+    const now = Date.now();
+    const hhmm = (ms) => {
+      const d = new Date(ms);
+      return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    };
+    localStorage.setItem("config:lists", JSON.stringify({
+      machines: ["Line 1"], reasons: ["Cleaning"], quickStops: [],
+      shifts: [{ id: "t1", name: "Test", start: hhmm(now - 6 * 3600e3), end: hhmm(now + 2 * 3600e3), goals: {} }],
+      rates: {}, handoverEmails: [], updatedAt: now,
+    }));
+    localStorage.setItem("config:prefs", JSON.stringify({
+      operator: "Bob", setupLocked: true, machine: "Line 1",
+      offMachine: { machine: "Line 1", operator: "Bob", start: now - 2 * 3600e3 },
+    }));
+  });
+  await pFreeze.goto("file://" + path.join(root, "index.html"));
+  await pFreeze.waitForSelector('button:has-text("Back on Line 1")', { timeout: 20000 });
+  const freezeStart = await pFreeze.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem("config:prefs")).offMachine.start; } catch { return 0; }
+  });
+  const tapAt = Date.now();
+  await pFreeze.click('button:has-text("Back on Line 1")');
+  await pFreeze.waitForSelector("text=of downtime?", { timeout: 5000 });
+  const shownDur = ((await pFreeze.locator("text=of downtime?").first().innerText()).match(/Log (.+) of downtime/) || [])[1];
+  assert(shownDur, "the confirmation must state the duration it's about to log");
+  // Long enough that a recomputed Date.now() would visibly disagree.
+  await pFreeze.waitForTimeout(4000);
+  await pFreeze.click('button:has-text("Yes, log it")');
+  await pFreeze.waitForSelector("text=of downtime?", { state: "detached", timeout: 5000 });
+  const frozen = await pFreeze.evaluate(() => {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k.startsWith("stop:")) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }
+    }
+    return null;
+  });
+  assert(frozen, "consenting must record the stop");
+  assert(frozen.duration <= (tapAt - freezeStart) + 1500,
+    `the logged duration must be frozen at the tap, not recomputed on confirm (shown ${shownDur}, logged ${frozen.duration}ms vs ${tapAt - freezeStart}ms at the tap)`);
+  const loggedDur = await pFreeze.evaluate((d) => fmtDur(d), frozen.duration);
+  assert(loggedDur === shownDur,
+    `what's logged must read the same as what was shown: shown "${shownDur}", logged "${loggedDur}"`);
+  await ctxFreeze.close();
 
   // Shell path: a stop started from the notification/bubble knows nothing about
   // off-machine. It must not run on top of an open span, or every minute of it
@@ -907,6 +970,422 @@ async function main() {
     `the failure must be visible and actionable in the off-machine banner, saw: ${JSON.stringify(failText)}`);
   await ctxFail.close();
 
+  // ---- an ENDED stop that hasn't been documented yet ------------------------
+  // BLOCKER: between "End Stop" and "Save stop" the measured downtime lived only
+  // in React state. Timer autosave stopped at that moment (it only writes while
+  // running/paused), so a refresh — or Chrome reclaiming a backgrounded tab —
+  // threw a real, measured stop away with no recovery prompt at all.
+  // Plain-browser path (no mock native: in the shell the pending stop is native's).
+  const ctxPend = await browser.newContext();
+  const pPend = await ctxPend.newPage();
+  await pPend.route(/unpkg\.com|cdn\.tailwindcss\.com/, async (route) => {
+    const u = route.request().url();
+    if (u.includes("react-dom")) return route.fulfill({ contentType: "application/javascript", body: reactDomUmd });
+    if (u.includes("react")) return route.fulfill({ contentType: "application/javascript", body: reactUmd });
+    return route.fulfill({ contentType: "application/javascript", body: "/* tailwind stub */" });
+  });
+  await pPend.addInitScript(() => {
+    const now = Date.now();
+    const hhmm = (ms) => {
+      const d = new Date(ms);
+      return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    };
+    // Seed once: addInitScript re-runs on the reload this test depends on.
+    if (!localStorage.getItem("config:lists")) {
+      localStorage.setItem("config:lists", JSON.stringify({
+        machines: ["Line 1"], reasons: ["Cleaning", "Material jam"], quickStops: [],
+        shifts: [{ id: "t1", name: "Test", start: hhmm(now - 3600e3), end: hhmm(now + 7 * 3600e3), goals: {} }],
+        rates: {}, handoverEmails: [], updatedAt: now,
+      }));
+      localStorage.setItem("config:prefs", JSON.stringify({ operator: "Bob", setupLocked: true, machine: "Line 1" }));
+    }
+  });
+  await pPend.goto("file://" + path.join(root, "index.html"));
+  await pPend.waitForSelector("text=Start Stop", { timeout: 20000 });
+
+  await pPend.click("text=Start Stop");
+  await pPend.waitForSelector("text=End Stop", { timeout: 5000 });
+  await pPend.waitForTimeout(1200);
+  await pPend.click("text=End Stop");
+  await pPend.waitForSelector("text=Document this stop", { timeout: 5000 });
+  const shownBefore = (await pPend.locator(".border-emerald-400 .font-mono").first().innerText()).trim();
+
+  // The finished stop must be on disk, flagged as ended — and with NO reason,
+  // because End must never invent one.
+  const parked = await pPend.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem("inprogress:current") || "null"); } catch { return null; }
+  });
+  assert(parked && parked.ended === true,
+    `an ended-but-undocumented stop must be parked in storage, got ${JSON.stringify(parked)}`);
+  assert(parked.duration >= 1000, `the parked stop must carry the measured duration, got ${parked.duration}`);
+  assert(!parked.reason, "the parked stop must NOT carry an invented reason");
+  assert((await pPend.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("stop:")).length)) === 0,
+    "nothing may be recorded until the operator documents it");
+
+  // The reload is the whole point.
+  await pPend.reload();
+  await pPend.waitForSelector("text=Document this stop", { timeout: 20000 });
+  const shownAfter = (await pPend.locator(".border-emerald-400 .font-mono").first().innerText()).trim();
+  assert(shownAfter === shownBefore,
+    `the recovered stop must show the same measured duration (${shownBefore} -> ${shownAfter})`);
+
+  await pPend.click("text=Save stop");
+  await pPend.waitForSelector("text=Document this stop", { state: "detached", timeout: 5000 });
+  const pendRecs = await pPend.evaluate(() => {
+    const out = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k.startsWith("stop:")) { try { out.push(JSON.parse(localStorage.getItem(k))); } catch { /* skip */ } }
+    }
+    return out;
+  });
+  assert(pendRecs.length === 1, `the recovered stop must record exactly once, got ${pendRecs.length}`);
+  assert(pendRecs[0].duration >= 1000, `the recovered duration must survive, got ${pendRecs[0].duration}`);
+  assert(pendRecs[0].operator === "Bob", `attribution must survive the reload, got ${pendRecs[0].operator}`);
+  assert(pendRecs[0].machine === "Line 1", `the pinned machine must survive, got ${pendRecs[0].machine}`);
+  assert((await pPend.evaluate(() => localStorage.getItem("inprogress:current"))) === null,
+    "the parked stop must be cleared once it's documented, or it comes back on the next load");
+  await ctxPend.close();
+
+  // A storage failure must reach the operator in words they can act on — the raw
+  // "QuotaExceededError" used to land in the card, reading like the stop was gone.
+  const ctxQuota = await browser.newContext();
+  const pQuota = await ctxQuota.newPage();
+  await pQuota.route(/unpkg\.com|cdn\.tailwindcss\.com/, async (route) => {
+    const u = route.request().url();
+    if (u.includes("react-dom")) return route.fulfill({ contentType: "application/javascript", body: reactDomUmd });
+    if (u.includes("react")) return route.fulfill({ contentType: "application/javascript", body: reactUmd });
+    return route.fulfill({ contentType: "application/javascript", body: "/* tailwind stub */" });
+  });
+  await pQuota.addInitScript(() => {
+    const now = Date.now();
+    const hhmm = (ms) => {
+      const d = new Date(ms);
+      return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    };
+    localStorage.setItem("config:lists", JSON.stringify({
+      machines: ["Line 1"], reasons: ["Cleaning"], quickStops: [],
+      shifts: [{ id: "t1", name: "Test", start: hhmm(now - 3600e3), end: hhmm(now + 7 * 3600e3), goals: {} }],
+      rates: {}, handoverEmails: [], updatedAt: now,
+    }));
+    localStorage.setItem("config:prefs", JSON.stringify({ operator: "Bob", setupLocked: true, machine: "Line 1" }));
+    const realSet = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (k, v) {
+      if (String(k).startsWith("stop:")) { const e = new Error("QuotaExceededError"); e.name = "QuotaExceededError"; throw e; }
+      return realSet.call(this, k, v);
+    };
+  });
+  await pQuota.goto("file://" + path.join(root, "index.html"));
+  await pQuota.waitForSelector("text=Start Stop", { timeout: 20000 });
+  await pQuota.click("text=Start Stop");
+  await pQuota.waitForTimeout(300);
+  await pQuota.click("text=End Stop");
+  await pQuota.waitForSelector("text=Document this stop", { timeout: 5000 });
+  await pQuota.click("text=Save stop");
+  await pQuota.waitForTimeout(400);
+  const quotaText = (await pQuota.locator(".border-emerald-400").first().innerText());
+  assert(!/QuotaExceededError/.test(quotaText),
+    `the operator must not be shown a raw storage exception, saw: ${JSON.stringify(quotaText)}`);
+  assert(/storage is full/i.test(quotaText) && /Save again/i.test(quotaText),
+    `the failure must say what happened and that a retry works, saw: ${JSON.stringify(quotaText)}`);
+  // The stop is still there to retry — nothing was thrown away.
+  assert(await pQuota.locator("text=Document this stop").count() === 1,
+    "a failed save must keep the stop on screen for a retry");
+  await ctxQuota.close();
+
+  // ---- a machine switch must survive a reload -------------------------------
+  // MAJOR: switchMachine/chooseMachine never persisted the choice, so a locked
+  // operator came back on the OLD machine after a refresh — and the next stop
+  // plus the presence span (manned time) were both attributed to the wrong one.
+  const ctxMach = await browser.newContext();
+  const pMach = await ctxMach.newPage();
+  await pMach.route(/unpkg\.com|cdn\.tailwindcss\.com/, async (route) => {
+    const u = route.request().url();
+    if (u.includes("react-dom")) return route.fulfill({ contentType: "application/javascript", body: reactDomUmd });
+    if (u.includes("react")) return route.fulfill({ contentType: "application/javascript", body: reactUmd });
+    return route.fulfill({ contentType: "application/javascript", body: "/* tailwind stub */" });
+  });
+  await pMach.addInitScript(() => {
+    const now = Date.now();
+    const hhmm = (ms) => {
+      const d = new Date(ms);
+      return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    };
+    if (!localStorage.getItem("config:lists")) {
+      localStorage.setItem("config:lists", JSON.stringify({
+        machines: ["Line 1", "Line 2"], reasons: ["Cleaning"], quickStops: [],
+        shifts: [{ id: "t1", name: "Test", start: hhmm(now - 3600e3), end: hhmm(now + 7 * 3600e3), goals: {} }],
+        rates: {}, handoverEmails: [], updatedAt: now,
+      }));
+      localStorage.setItem("config:prefs", JSON.stringify({ operator: "Bob", setupLocked: true, machine: "Line 1" }));
+    }
+  });
+  await pMach.goto("file://" + path.join(root, "index.html"));
+  await pMach.waitForSelector("text=Start Stop", { timeout: 20000 });
+
+  await pMach.click('button:has-text("Line 2")');
+  await pMach.waitForSelector('button.bg-emerald-500:has-text("Line 2")', { timeout: 5000 });
+  const machPrefs = await pMach.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem("config:prefs") || "{}"); } catch { return {}; }
+  });
+  assert(machPrefs.machine === "Line 2",
+    `a machine switch must be persisted, prefs said ${JSON.stringify(machPrefs.machine)}`);
+
+  await pMach.reload();
+  await pMach.waitForSelector("text=Start Stop", { timeout: 20000 });
+  assert(await pMach.locator('button.bg-emerald-500:has-text("Line 2")').count() === 1,
+    "a locked operator must come back on the machine they switched to, not the old one");
+
+  // The consequence that actually corrupts data: attribution of the next stop …
+  await pMach.click("text=Start Stop");
+  await pMach.waitForTimeout(300);
+  await pMach.click("text=End Stop");
+  await pMach.waitForSelector("text=Document this stop", { timeout: 5000 });
+  await pMach.click("text=Save stop");
+  await pMach.waitForSelector("text=Document this stop", { state: "detached", timeout: 5000 });
+  const machRecs = await pMach.evaluate(() => {
+    const out = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k.startsWith("stop:")) { try { out.push(JSON.parse(localStorage.getItem(k))); } catch { /* skip */ } }
+    }
+    return out;
+  });
+  assert(machRecs.length === 1 && machRecs[0].machine === "Line 2",
+    `the stop after a reload must belong to the switched-to machine, got ${JSON.stringify(machRecs.map((r) => r.machine))}`);
+  // … and the presence span behind manned time.
+  const openOn = await pMach.evaluate(() => {
+    const out = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k.startsWith("sess:")) continue;
+      try { const s = JSON.parse(localStorage.getItem(k)); if (s.end == null) out.push(s.machine); } catch { /* skip */ }
+    }
+    return out;
+  });
+  assert(openOn.length === 1 && openOn[0] === "Line 2",
+    `manned time after the reload must be on the switched-to machine, got ${JSON.stringify(openOn)}`);
+  await ctxMach.close();
+
+  // ---- a retyped name, and the seconds box's own limit ----------------------
+  // The board matched the operator name exactly, so "bob" saw 0 stops / 0 downtime
+  // for records saved as "Bob" — no hint that the name was the reason. And the
+  // seconds input declares max="59" but enforced nothing: 900 became a 15-minute
+  // stop nobody typed.
+  const ctxName = await browser.newContext();
+  const pName = await ctxName.newPage();
+  await pName.route(/unpkg\.com|cdn\.tailwindcss\.com/, async (route) => {
+    const u = route.request().url();
+    if (u.includes("react-dom")) return route.fulfill({ contentType: "application/javascript", body: reactDomUmd });
+    if (u.includes("react")) return route.fulfill({ contentType: "application/javascript", body: reactUmd });
+    return route.fulfill({ contentType: "application/javascript", body: "/* tailwind stub */" });
+  });
+  await pName.addInitScript(() => {
+    const now = Date.now();
+    const hhmm = (ms) => {
+      const d = new Date(ms);
+      return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    };
+    localStorage.setItem("config:lists", JSON.stringify({
+      machines: ["Line 1"], reasons: ["Cleaning"], quickStops: [],
+      shifts: [{ id: "t1", name: "Test", start: hhmm(now - 3600e3), end: hhmm(now + 7 * 3600e3), goals: {} }],
+      rates: {}, handoverEmails: [], updatedAt: now,
+    }));
+    // Saved as "Bob"; the operator has retyped it as " bob ".
+    localStorage.setItem("stop:n1", JSON.stringify({
+      id: "n1", machine: "Line 1", operator: "Bob", start: now - 300e3, end: now - 240e3,
+      duration: 60e3, reason: "Cleaning", notes: "", discarded: false, loggedAt: now - 240e3, updatedAt: now - 240e3,
+    }));
+    localStorage.setItem("sess:n1", JSON.stringify({
+      id: "n1", kind: "session", operator: "Bob", machine: "Line 1",
+      start: now - 1800e3, end: now - 60e3, loggedAt: now - 1800e3, updatedAt: now - 60e3,
+    }));
+    localStorage.setItem("config:prefs", JSON.stringify({ operator: " bob ", setupLocked: true, machine: "Line 1" }));
+  });
+  await pName.goto("file://" + path.join(root, "index.html"));
+  await pName.waitForSelector("text=Start Stop", { timeout: 20000 });
+  const nameStat = async () => (await pName
+    .locator("div.rounded-xl.p-3.text-center", { hasText: "Stops" })
+    .first().locator("div.font-bold").innerText()).trim();
+  assert(await nameStat() === "1",
+    `a retyped name must still find the operator's own stops, board showed ${await nameStat()}`);
+  const nameDown = (await pName
+    .locator("div.rounded-xl.p-3.text-center", { hasText: "Downtime" })
+    .first().locator("div.font-bold").innerText()).trim();
+  assert(/1m/.test(nameDown), `downtime must follow too, saw ${JSON.stringify(nameDown)}`);
+
+  // Seconds: type 900 where the field says max 59.
+  await pName.click("text=Report a stop manually");
+  await pName.waitForSelector("text=For a stop that already happened", { timeout: 5000 });
+  const secBox = pName.locator('input[max="59"]');
+  await secBox.fill("900");
+  assert(await secBox.inputValue() === "59",
+    `the seconds box must enforce the 59 it declares, showed ${await secBox.inputValue()}`);
+  await pName.click('button:has-text("Save stop")');
+  await pName.waitForSelector("text=For a stop that already happened", { state: "detached", timeout: 5000 });
+  const manualRec = await pName.evaluate(() => {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k.startsWith("stop:") && k !== "stop:n1") { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }
+    }
+    return null;
+  });
+  assert(manualRec && manualRec.duration === 59000,
+    `900 in the seconds box must not become a 15-minute stop, recorded ${manualRec && manualRec.duration}ms`);
+  await ctxName.close();
+
+  // ---- a second tab must not clobber this one -------------------------------
+  // MAJOR: prefs and shared config are each ONE blob that every write REPLACES.
+  // A second tab's unrelated write (the dark-mode toggle) reverted this tab: the
+  // open off-machine span vanished (real downtime never logged) and the New Shift
+  // cutoff came undone (the previous shift's stops re-merged into the new one and
+  // inflated it and its handout). Two pages, one browser context = one origin.
+  const ctxTabs = await browser.newContext();
+  const seedTabs = () => {
+    const now = Date.now();
+    const hhmm = (ms) => {
+      const d = new Date(ms);
+      return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    };
+    if (!localStorage.getItem("config:lists")) {
+      localStorage.setItem("config:lists", JSON.stringify({
+        machines: ["Line 1", "Line 2"], reasons: ["Cleaning"], quickStops: [],
+        shifts: [{ id: "t1", name: "Test", start: hhmm(now - 3600e3), end: hhmm(now + 7 * 3600e3), goals: {} }],
+        rates: {}, handoverEmails: [], updatedAt: now,
+      }));
+      localStorage.setItem("config:prefs", JSON.stringify({ operator: "Bob", setupLocked: true, machine: "Line 1" }));
+    }
+  };
+  const openTab = async () => {
+    const p = await ctxTabs.newPage();
+    await p.route(/unpkg\.com|cdn\.tailwindcss\.com/, async (route) => {
+      const u = route.request().url();
+      if (u.includes("react-dom")) return route.fulfill({ contentType: "application/javascript", body: reactDomUmd });
+      if (u.includes("react")) return route.fulfill({ contentType: "application/javascript", body: reactUmd });
+      return route.fulfill({ contentType: "application/javascript", body: "/* tailwind stub */" });
+    });
+    await p.addInitScript(seedTabs);
+    await p.goto("file://" + path.join(root, "index.html"));
+    await p.waitForSelector("text=Start Stop", { timeout: 20000 });
+    return p;
+  };
+  const tabA = await openTab();
+  const tabB = await openTab(); // loaded BEFORE tab A's changes — the stale copy
+
+  await tabA.click('button:has-text("Off machine")');
+  await tabA.waitForSelector('button:has-text("Back on Line 1")', { timeout: 5000 });
+
+  // One unrelated write from the other tab — the whole bug.
+  await tabB.click('button[aria-label="Toggle theme"]');
+  await tabB.waitForTimeout(600);
+
+  const tabPrefs = await tabA.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem("config:prefs") || "{}"); } catch { return {}; }
+  });
+  assert(tabPrefs.offMachine && tabPrefs.offMachine.start,
+    `another tab's unrelated write must not erase an open off-machine span, prefs were ${JSON.stringify(tabPrefs)}`);
+  assert(await tabA.locator('button:has-text("Back on Line 1")').count() === 1,
+    "the tab holding the span must still be off machine");
+
+  // The loss only showed on the next load, so that's where it has to be proven.
+  await tabA.reload();
+  await tabA.waitForSelector("text=Start Stop", { timeout: 20000 });
+  assert(await tabA.locator('button:has-text("Back on Line 1")').count() === 1,
+    "an open span must survive another tab's write plus a reload — those are real, unlogged downtime minutes");
+
+  // ...and now the OTHER direction, which is the dangerous one. A tab that
+  // LOADED during the span restores it into its own state, so both tabs hold it
+  // and either can tap "Back on". When tab A closes it, tab B's reconcile sees
+  // "no span" — if it re-asserts, the span comes back from the dead and the next
+  // return logs the same minutes a SECOND time. Fabricating downtime is worse
+  // than the clobber this reconciler prevents, so it gets its own guard.
+  await tabB.reload();
+  await tabB.waitForSelector("text=Start Stop", { timeout: 20000 });
+  assert(await tabB.locator('button:has-text("Back on Line 1")').count() === 1,
+    "precondition: a tab loaded during a span must restore it (that's what makes resurrection possible)");
+
+  await tabA.waitForTimeout(1200);
+  await tabA.click('button:has-text("Back on Line 1")');
+  await tabA.waitForSelector('button:has-text("Off machine")', { timeout: 5000 });
+  await tabB.waitForTimeout(1200); // let tab B's storage listener run
+
+  const afterClose = await tabA.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem("config:prefs") || "{}"); } catch { return {}; }
+  });
+  assert(!(afterClose.offMachine && afterClose.offMachine.start),
+    `a span the other tab already RECORDED must not be written back, got ${JSON.stringify(afterClose.offMachine)}`);
+  assert(await tabB.locator('button:has-text("Back on Line 1")').count() === 0,
+    "the peer tab must adopt the close, not keep offering to end a span that is already logged");
+
+  const offCount = await tabA.evaluate(() => Object.keys(localStorage)
+    .filter((k) => k.startsWith("stop:"))
+    .map((k) => { try { return JSON.parse(localStorage.getItem(k)); } catch { return {}; } })
+    .filter((s) => s.offMachine).length);
+  assert(offCount === 1, `the away time must be logged exactly once, found ${offCount} off-machine stops`);
+
+  // Now the cutoff. New Shift is what hides the previous shift's stops; a stale
+  // tab writing its old copy used to undo it, re-merging them into the new shift
+  // and inflating both the board and the handout. (The span is already closed
+  // above: a span RESTORED from before the cutoff is dropped on purpose — see
+  // above — so leaving it open here would test that rule instead of this one.)
+  await tabA.click("text=New Shift");
+  await tabA.click("text=Start new shift");
+  await tabA.waitForTimeout(300);
+  const cutBefore = await tabA.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem("config:prefs") || "{}").clearedBefore || 0; } catch { return 0; }
+  });
+  assert(cutBefore > 0, "New Shift should have written a cutoff");
+
+  await tabB.click('button[aria-label="Toggle theme"]');
+  await tabB.waitForTimeout(600);
+  const cutAfterWrite = await tabA.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem("config:prefs") || "{}").clearedBefore || 0; } catch { return 0; }
+  });
+  assert(cutAfterWrite >= cutBefore,
+    `another tab's write must not undo the New Shift cutoff (${cutBefore} -> ${cutAfterWrite})`);
+  await tabA.reload();
+  await tabA.waitForSelector("text=Start Stop", { timeout: 20000 });
+  const cutAfterReload = await tabA.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem("config:prefs") || "{}").clearedBefore || 0; } catch { return 0; }
+  });
+  assert(cutAfterReload >= cutBefore,
+    `the cutoff must survive a reload too, or the previous shift's stops re-merge (${cutBefore} -> ${cutAfterReload})`);
+  const statAfterCut = (await tabA
+    .locator("div.rounded-xl.p-3.text-center", { hasText: "Stops" })
+    .first().locator("div.font-bold").innerText()).trim();
+  assert(statAfterCut === "0",
+    `the new shift must start clean — the cleared stop came back, board showed ${statAfterCut}`);
+
+  // Shared config is last-write-wins by updatedAt — a supervisor's edit in one tab
+  // must reach the other, or the stale tab's next config write silently drops it.
+  // Assert on what tab A actually SHOWS: storage alone would pass without any
+  // reconciliation at all, since the other tab just wrote it.
+  await tabB.evaluate(() => {
+    const cfg = JSON.parse(localStorage.getItem("config:lists"));
+    cfg.reasons = ["Cleaning", "Bearing failure"];
+    cfg.updatedAt = Date.now();
+    localStorage.setItem("config:lists", JSON.stringify(cfg));
+  });
+  await tabA.waitForTimeout(600);
+  await tabA.click("text=Report a stop manually");
+  await tabA.waitForSelector("text=For a stop that already happened", { timeout: 5000 });
+  const reasonOpts = await tabA.$$eval("option", (els) => els.map((e) => (e.textContent || "").trim()));
+  assert(reasonOpts.includes("Bearing failure"),
+    `a config edit from another tab must reach this one's reason list, saw ${JSON.stringify(reasonOpts)}`);
+  await tabA.click('button:has-text("Cancel")');
+  // The away time itself was recorded, once, on the machine that was left.
+  const tabStops = await tabA.evaluate(() => {
+    const out = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k.startsWith("stop:")) { try { out.push(JSON.parse(localStorage.getItem(k))); } catch { /* skip */ } }
+    }
+    return out;
+  });
+  assert(tabStops.length === 1 && tabStops[0].reason === "No operator" && tabStops[0].machine === "Line 1",
+    `the away time must be logged exactly once on the machine left, got ${JSON.stringify(tabStops.map((s) => [s.machine, s.reason]))}`);
+  await ctxTabs.close();
+
   // ---- end-to-end against a REAL server ------------------------------------
   // The two test layers above can BOTH pass while the feature is dead: the server
   // test posts a payload written by hand, and the web test only checks the outbox.
@@ -976,6 +1455,10 @@ async function main() {
   console.log(`web-e2e: PASS — handout rendered ${shot.w}x${shot.h} PNG, shared via native, filed with note + ${h.flags.length} operator flag(s)`);
   console.log(`web-e2e: PASS — Off machine logs downtime on the machine left (${off1.duration}ms as "No operator"), Start Stop blocked while away`);
   console.log(`web-e2e: PASS — roaming handout splits downtime per machine (${ms.map((m) => `${m.machine} ${Math.round(m.downtimeMs / 60e3)}m`).join(", ")}), worst first`);
+  console.log(`web-e2e: PASS — an ended-but-undocumented stop survives a reload (${shownBefore}) and records once; a quota failure keeps it and says so in plain words`);
+  console.log("web-e2e: PASS — a machine switch persists: stop + manned time after a reload both land on the switched-to machine");
+  console.log("web-e2e: PASS — a second tab's write can't erase an open off-machine span, undo the New Shift cutoff, or drop a config edit");
+  console.log(`web-e2e: PASS — a long span logs exactly the duration it asked about (${shownDur}); a retyped name still finds its stops; 900 sec clamps to 59`);
 }
 
 main().catch((e) => { console.error("web-e2e: FAIL —", e.message); process.exit(1); });

@@ -84,7 +84,12 @@ seam clean.
   clients / the watch config.
 - `config:prefs` — dark mode, last reason, cleared-before cutoff, operator,
   machine, setupLocked, shiftId (the operator's chosen shift)
-- `inprogress:current` — live-timer autosave for recovery
+- `inprogress:current` — live-timer autosave for recovery. Also holds a stop that
+  was **ended but not yet documented** (`ended: true`, carrying start/end/duration/
+  machine/operator but **no reason**), so measured downtime survives a refresh while
+  the reason picker is open. The load path drops the operator straight into the
+  document-stop card. End still never invents a reason. Not used in the Android
+  shell — native owns `pending` there.
 
 ---
 

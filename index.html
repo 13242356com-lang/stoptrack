@@ -222,6 +222,7 @@ function normalizeShifts(shiftsArr, legacyShift) {
 }
 const legacyShiftOf = (shifts) => shifts && shifts[0] ? { start: shifts[0].start, end: shifts[0].end } : { start: "06:00", end: "14:00" };
 const machineSlug = (m) => String(m || "").replace(/[^a-zA-Z0-9]+/g, "-");
+const sameOperator = (a, b) => String(a == null ? "" : a).trim().toLowerCase() === String(b == null ? "" : b).trim().toLowerCase();
 const HOUR_MS = 60 * 60 * 1000;
 function computeOEE({ plannedMs, downtimeMs, unitsProduced, scrapCount, ratePerHour }) {
     const planned = Math.max(0, plannedMs || 0);
@@ -1012,6 +1013,13 @@ async function fetchJSON(url, { token, method = "GET", body, timeoutMs = 8000 } 
         clearTimeout(timer);
     }
 }
+function storageErrorMessage(e, what = "stop") {
+    const raw = (e && (e.name || e.message)) || "";
+    if (/quota|exceeded|full|NS_ERROR_DOM_QUOTA/i.test(String(raw))) {
+        return `This device's storage is full, so the ${what} wasn't saved. It's still here — ask your supervisor to export and clear old stops, then tap Save again.`;
+    }
+    return `The ${what} didn't save, but it isn't lost — tap Save again. If it keeps failing, tell your supervisor.`;
+}
 const api = {
     async loadStops() {
         try {
@@ -1064,7 +1072,7 @@ const api = {
             return { ok: true, record };
         }
         catch (e) {
-            return { ok: false, error: (e === null || e === void 0 ? void 0 : e.message) || "The stop didn't save. Try again." };
+            return { ok: false, error: storageErrorMessage(e, "stop") };
         }
     },
     async updateStop(record) {
@@ -1545,6 +1553,8 @@ function useTimer({ operator, machine }) {
     stateRef.current = state;
     const machineRef = useRef(machine);
     machineRef.current = machine;
+    const operatorRef = useRef(operator);
+    operatorRef.current = operator;
     const elapsed = state.paused
         ? state.accumulated
         : state.running
@@ -1597,7 +1607,12 @@ function useTimer({ operator, machine }) {
         const end = Date.now();
         const duration = s.paused ? s.accumulated : s.accumulated + (end - s.segStart);
         setState(emptyTimer);
-        api.clearInProgress();
+        api.saveInProgress({
+            operator: operatorRef.current, machine: s.machine || machineRef.current,
+            running: false, paused: false, ended: true,
+            startTs: s.startTs, accumulated: duration, segStart: null,
+            end, duration, savedAt: end,
+        });
         return { start: s.startTs, end, duration, machine: s.machine };
     }, []);
     const reset = useCallback(() => { setState(emptyTimer); api.clearInProgress(); }, []);
@@ -1843,6 +1858,7 @@ function App() {
     const [production, setProduction] = useState([]);
     const [sessions, setSessions] = useState([]);
     const [offMachine, setOffMachine] = useState(null);
+    const offClosedRef = useRef(0);
     const [handoverOpen, setHandoverOpen] = useState(false);
     const [handovers, setHandovers] = useState([]);
     const [needsRestore, setNeedsRestore] = useState(false);
@@ -1875,6 +1891,9 @@ function App() {
     operatorRef.current = operator;
     const machineRef = useRef(machine);
     machineRef.current = machine;
+    const persistPrefs = useCallback((patch) => {
+        api.savePrefs(Object.assign({ dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId, offMachine, offMachineClosed: offClosedRef.current }, patch));
+    }, [dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId, offMachine]);
     const openSessRef = useRef(null);
     const closeSession = useCallback(async (endTs) => {
         const s = openSessRef.current;
@@ -1907,7 +1926,8 @@ function App() {
         closeSession();
         openSession(next);
         setMachine(next);
-    }, [closeSession, openSession]);
+        persistPrefs({ machine: next });
+    }, [closeSession, openSession, persistPrefs]);
     useEffect(() => {
         const iv = setInterval(() => {
             const s = openSessRef.current;
@@ -1920,7 +1940,7 @@ function App() {
     }, []);
     useEffect(() => {
         (async () => {
-            var _a, _b, _c;
+            var _a, _b, _c, _d;
             const cfg = await api.loadConfig();
             if (cfg) {
                 if ((_a = cfg.machines) === null || _a === void 0 ? void 0 : _a.length) {
@@ -1981,6 +2001,7 @@ function App() {
                     setClearedBefore(prefs.clearedBefore);
                 if (prefs.shiftId)
                     setShiftId(prefs.shiftId);
+                offClosedRef.current = Number(prefs.offMachineClosed) || 0;
                 if (prefs.offMachine && prefs.offMachine.start)
                     setOffMachine(Object.assign(Object.assign({}, prefs.offMachine), { restored: true }));
                 if (prefs.setupLocked) {
@@ -2020,7 +2041,17 @@ function App() {
                 openSession(prefs.machine || ((_c = cfg === null || cfg === void 0 ? void 0 : cfg.machines) === null || _c === void 0 ? void 0 : _c[0]) || DEFAULT_MACHINES[0], prefs.operator);
             }
             const ip = await api.loadInProgress();
-            if (ip && ip.startTs)
+            if (ip && ip.startTs && ip.ended) {
+                if (!(native && typeof native.startStop === "function")) {
+                    if (ip.operator)
+                        setOperator(ip.operator);
+                    setPendingStop({ start: ip.startTs, end: ip.end || ip.savedAt, duration: ip.duration || ip.accumulated || 0, machine: ip.machine });
+                    setReason((prefs && prefs.lastReason && ((cfg === null || cfg === void 0 ? void 0 : cfg.reasons) || DEFAULT_REASONS).includes(prefs.lastReason))
+                        ? prefs.lastReason : (((_d = cfg === null || cfg === void 0 ? void 0 : cfg.reasons) === null || _d === void 0 ? void 0 : _d[0]) || DEFAULT_REASONS[0]));
+                    setNotes("");
+                }
+            }
+            else if (ip && ip.startTs)
                 setRecovered(ip);
         })();
     }, []);
@@ -2153,9 +2184,6 @@ function App() {
             api.remotePutConfig(next, syncCfg);
         return next;
     }, [machines, reasons, quickStops, shifts, supervisorPinHash, rates, handoverEmails, syncCfg]);
-    const persistPrefs = useCallback((patch) => {
-        api.savePrefs(Object.assign({ dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId, offMachine }, patch));
-    }, [dark, lastReason, clearedBefore, operator, machine, setupLocked, shiftId, offMachine]);
     const updateMachines = (next) => { setMachines(next); persistConfig({ machines: next }); };
     const updateReasons = (next) => { setReasons(next); persistConfig({ reasons: next }); };
     const updateQuickStops = (next) => { setQuickStops(next); persistConfig({ quickStops: next }); };
@@ -2164,6 +2192,83 @@ function App() {
     const updateRates = (next) => { setRates(next); persistConfig({ rates: next }); };
     const updateHandoverEmails = (next) => { setHandoverEmails(next); persistConfig({ handoverEmails: next }); };
     const toggleDark = () => { const n = !dark; setDark(n); persistPrefs({ dark: n }); };
+    const reconcilePrefs = useCallback(async () => {
+        const p = await api.loadPrefs();
+        if (!p)
+            return;
+        if (typeof p.dark === "boolean")
+            setDark(p.dark);
+        if (p.lastReason)
+            setLastReason(p.lastReason);
+        if (p.shiftId)
+            setShiftId(p.shiftId);
+        const theirCut = p.clearedBefore || 0;
+        const ourCut = clearedBefore || 0;
+        if (theirCut > ourCut) {
+            setClearedBefore(theirCut);
+            setShowAll(false);
+        }
+        const theirClosed = Number(p.offMachineClosed) || 0;
+        offClosedRef.current = Math.max(offClosedRef.current, theirClosed);
+        const theirSpan = !!(p.offMachine && p.offMachine.start);
+        const peerClosedOurs = !!offMachine && !theirSpan && theirClosed >= offMachine.start;
+        if (peerClosedOurs)
+            setOffMachine(null);
+        const lostSpan = !!offMachine && !theirSpan && !peerClosedOurs;
+        if (lostSpan || ourCut > theirCut) {
+            persistPrefs({
+                clearedBefore: Math.max(ourCut, theirCut),
+                dark: typeof p.dark === "boolean" ? p.dark : dark,
+                lastReason: p.lastReason || lastReason,
+                shiftId: p.shiftId || shiftId,
+                offMachine: peerClosedOurs ? null : offMachine,
+                offMachineClosed: offClosedRef.current,
+            });
+        }
+    }, [clearedBefore, offMachine, dark, lastReason, shiftId, persistPrefs]);
+    const reconcileConfig = useCallback(async () => {
+        var _a, _b, _c;
+        const cfg = await api.loadConfig();
+        if (!cfg)
+            return;
+        const clampAt = (v) => Math.min(Number(v) || 0, Date.now());
+        const theirs = clampAt(cfg.updatedAt);
+        const ours = clampAt(configUpdatedAt);
+        if (theirs > ours) {
+            if ((_a = cfg.machines) === null || _a === void 0 ? void 0 : _a.length)
+                setMachines(cfg.machines);
+            if ((_b = cfg.reasons) === null || _b === void 0 ? void 0 : _b.length)
+                setReasons(cfg.reasons);
+            if (cfg.quickStops)
+                setQuickStops(cfg.quickStops);
+            {
+                const ls = normalizeShifts(cfg.shifts, cfg.shift);
+                if (ls)
+                    setShifts(ls);
+            }
+            setSupervisorPinHash((_c = cfg.supervisorPinHash) !== null && _c !== void 0 ? _c : null);
+            if (cfg.rates)
+                setRates(cfg.rates);
+            if (cfg.handoverEmails)
+                setHandoverEmails(cfg.handoverEmails);
+            setConfigUpdatedAt(theirs);
+        }
+        else if (ours > theirs)
+            persistConfig({});
+    }, [configUpdatedAt, persistConfig]);
+    useEffect(() => {
+        if (typeof window === "undefined")
+            return;
+        const onStorage = (e) => {
+            const key = e && e.key;
+            if (key === "config:prefs" || key == null)
+                reconcilePrefs();
+            if (key === "config:lists" || key == null)
+                reconcileConfig();
+        };
+        window.addEventListener("storage", onStorage);
+        return () => window.removeEventListener("storage", onStorage);
+    }, [reconcilePrefs, reconcileConfig]);
     const downloadBackup = async () => {
         try {
             const data = await api.exportAll();
@@ -2243,6 +2348,7 @@ function App() {
             setLastReason(reason);
             persistPrefs({ lastReason: reason });
             setPendingStop(null);
+            api.clearInProgress();
             if (inShell) {
                 try {
                     nativeApi.discardStop();
@@ -2267,6 +2373,7 @@ function App() {
         }
         setPendingStop(null);
         setSaveError("");
+        api.clearInProgress();
     };
     const applyQuickStop = (q) => {
         if (reasons.includes(q.reason))
@@ -2288,7 +2395,11 @@ function App() {
         }
     };
     const unlockSetup = () => { setSetupLocked(false); persistPrefs({ setupLocked: false }); };
+    const manualSavingRef = useRef(false);
     const handleManualSave = async ({ durationMs, reason: mReason, notes: mNotes, machine: mMachine }) => {
+        if (manualSavingRef.current)
+            return false;
+        manualSavingRef.current = true;
         setSaving(true);
         setSaveError("");
         const end = Date.now();
@@ -2315,6 +2426,7 @@ function App() {
             setSaveError(res.error || "The stop didn't save. Try again.");
         }
         setSaving(false);
+        manualSavingRef.current = false;
         return res.ok;
     };
     const timerBusy = inShell
@@ -2337,7 +2449,8 @@ function App() {
             return;
         offSavingRef.current = true;
         setOffMachine(null);
-        persistPrefs({ offMachine: null });
+        offClosedRef.current = Math.max(offClosedRef.current, rec.start);
+        persistPrefs({ offMachine: null, offMachineClosed: offClosedRef.current });
         const target = nextMachine || rec.machine;
         const end = Math.max(rec.start, endTs || Date.now());
         const duration = end - rec.start;
@@ -2360,13 +2473,15 @@ function App() {
             }
             else {
                 setOffMachine(rec);
-                persistPrefs({ offMachine: rec });
+                offClosedRef.current = 0;
+                persistPrefs({ offMachine: rec, offMachineClosed: 0 });
                 setOffError(`Didn't save — you're still off machine, tap again to retry.${res.error ? ` (${res.error})` : ""}`);
                 offSavingRef.current = false;
                 return;
             }
         }
         setMachine(target);
+        persistPrefs({ offMachine: null, machine: target });
         openSession(target);
         offSavingRef.current = false;
     }, [offMachine, persistPrefs, sync, openSession]);
@@ -2377,15 +2492,16 @@ function App() {
         if (!rec)
             return;
         setOffMachine(null);
-        persistPrefs({ offMachine: null });
         setOffError("");
         const target = next || rec.machine;
         setMachine(target);
+        offClosedRef.current = Math.max(offClosedRef.current, rec.start);
+        persistPrefs({ offMachine: null, machine: target, offMachineClosed: offClosedRef.current });
         openSession(target);
     }, [offMachine, persistPrefs, openSession]);
     const backOnMachine = useCallback((next) => {
         if (offMachine && Date.now() - offMachine.start >= OFF_CONFIRM_MS) {
-            setOffConfirm({ target: next || offMachine.machine });
+            setOffConfirm({ target: next || offMachine.machine, at: Date.now() });
             return;
         }
         endOffMachine(next);
@@ -2410,7 +2526,8 @@ function App() {
         offRestoreCheckedRef.current = true;
         if (offMachine.start < shiftStart) {
             setOffMachine(null);
-            persistPrefs({ offMachine: null });
+            offClosedRef.current = Math.max(offClosedRef.current, offMachine.start);
+            persistPrefs({ offMachine: null, offMachineClosed: offClosedRef.current });
         }
         else {
             const { restored } = offMachine, live = __rest(offMachine, ["restored"]);
@@ -2448,6 +2565,7 @@ function App() {
         const mach = machines.includes(d.machine) ? d.machine : machines[0];
         setOperator(d.operator || "");
         setMachine(mach);
+        persistPrefs({ operator: d.operator || "", machine: mach });
         timer.restore(d);
         setRecovered(null);
         if (!openSessRef.current)
@@ -2458,13 +2576,20 @@ function App() {
         const banked = Math.max(0, d.accumulated || 0);
         const liveSeg = (d.paused || !d.segStart) ? 0 : Math.max(0, (d.savedAt || d.segStart) - d.segStart);
         const dur = banked + liveSeg;
+        const mach = machines.includes(d.machine) ? d.machine : machines[0];
         setOperator(d.operator || "");
-        setMachine(machines.includes(d.machine) ? d.machine : machines[0]);
+        setMachine(mach);
+        persistPrefs({ operator: d.operator || "", machine: mach });
         setPendingStop({ start: d.startTs, end: d.savedAt, duration: dur, machine: d.machine });
         setReason(lastReason && reasons.includes(lastReason) ? lastReason : reasons[0]);
         setNotes("");
         setRecovered(null);
-        api.clearInProgress();
+        api.saveInProgress({
+            operator: d.operator || "", machine: d.machine,
+            running: false, paused: false, ended: true,
+            startTs: d.startTs, accumulated: dur, segStart: null,
+            end: d.savedAt, duration: dur, savedAt: Date.now(),
+        });
     };
     const recoverDiscard = () => { setRecovered(null); api.clearInProgress(); };
     const discardStop = async (stop, explanation) => {
@@ -2500,15 +2625,15 @@ function App() {
     const shiftStops = useMemo(() => stops.filter((s) => {
         var _a, _b;
         const stamp = (_b = (_a = s.loggedAt) !== null && _a !== void 0 ? _a : s.end) !== null && _b !== void 0 ? _b : s.start;
-        return (!operator.trim() || s.operator === operator.trim()) && !s.discarded && !s.deleted &&
+        return (!operator.trim() || sameOperator(s.operator, operator)) && !s.discarded && !s.deleted &&
             stamp > shiftStart;
     }), [stops, operator, shiftStart]);
     const hiddenStopCount = useMemo(() => {
-        const own = stops.filter((s) => (!operator.trim() || s.operator === operator.trim()) && !s.discarded && !s.deleted);
+        const own = stops.filter((s) => (!operator.trim() || sameOperator(s.operator, operator)) && !s.discarded && !s.deleted);
         return Math.max(0, own.length - shiftStops.length);
     }, [stops, operator, shiftStops]);
     const visibleStops = useMemo(() => (showAll
-        ? stops.filter((s) => (!operator.trim() || s.operator === operator.trim()) && !s.discarded && !s.deleted)
+        ? stops.filter((s) => (!operator.trim() || sameOperator(s.operator, operator)) && !s.discarded && !s.deleted)
         : shiftStops), [stops, operator, showAll, shiftStops]);
     const myShift = useMemo(() => {
         var _a;
@@ -2522,7 +2647,7 @@ function App() {
         const share = {};
         let shareTotal = 0;
         for (const s of sessions) {
-            if (s.operator !== op)
+            if (!sameOperator(s.operator, op))
                 continue;
             const end = Math.min((_a = s.end) !== null && _a !== void 0 ? _a : now, winEnd);
             const start = Math.max(s.start, winStart);
@@ -2664,7 +2789,7 @@ function App() {
                 React.createElement("div", { className: "flex items-center gap-2 font-bold" },
                     React.createElement(AlertCircle, { size: 18, className: "text-amber-500" }),
                     " Log ",
-                    fmtDur(Date.now() - offMachine.start),
+                    fmtDur(Math.max(0, (offConfirm.at || Date.now()) - offMachine.start)),
                     " of downtime?"),
                 React.createElement("p", { className: `text-sm ${t.sub}` },
                     "You've been off machine since ",
@@ -2678,7 +2803,7 @@ function App() {
                     React.createElement("b", null, offMachine.machine),
                     ". If you actually returned earlier and forgot to tap, discard it and report the real stop manually instead."),
                 React.createElement("div", { className: "flex gap-2" },
-                    React.createElement("button", { onClick: () => { const c = offConfirm; setOffConfirm(null); endOffMachine(c.target); }, className: "flex-1 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 rounded-lg" }, "Yes, log it"),
+                    React.createElement("button", { onClick: () => { const c = offConfirm; setOffConfirm(null); endOffMachine(c.target, c.at); }, className: "flex-1 bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 rounded-lg" }, "Yes, log it"),
                     React.createElement("button", { onClick: () => { const c = offConfirm; setOffConfirm(null); discardOffMachine(c.target); }, className: `px-4 ${t.sub} font-semibold` }, "Discard"))))),
         manualOpen && (React.createElement(ManualStopModal, { t: t, dark: dark, machine: machine, machines: machines, reasons: reasons, quickStops: quickStops, lastReason: lastReason, saving: saving, saveError: saveError, onSave: handleManualSave, onClose: () => setManualOpen(false) })),
         handoverOpen && (React.createElement(ShiftHandoverModal, { t: t, dark: dark, reportBase: buildShiftReport({ operator, machine, myStops: shiftStops, myShift, clearedBefore: shiftStart, activeShift, goalStatus }), handoverEmails: handoverEmails, syncCfg: syncCfg, lastHandover: handovers.find((h) => !h.machine || h.machine === machine) || null, onSaved: (rec) => { setHandovers((prev) => [rec, ...prev.filter((h) => h.id !== rec.id)]); sync.flush(); }, onClose: () => setHandoverOpen(false) }))));
@@ -2687,6 +2812,9 @@ function OperatorView(props) {
     const { t, operator, setOperator, machine, setMachine, offMachine, onOffMachine, onBackOnMachine, offError, timer, onStop, pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError, myStops, visibleStops, machines, reasons, quickStops, applyQuickStop, lastReason, shift, shifts, shiftId, onSelectShift, shiftStart, hiddenStopCount, onNewShift, showAll, onToggleShowAll, setupLocked, onLockSetup, onUnlockSetup, onOpenManual, syncStatus, syncOn, rates, myProduction, onSaveProduction, myShift, goalStatus, onOpenHandover, } = props;
     const { state, elapsed, start, pause, resume } = timer;
     const { running, paused } = state;
+    const [confirmDiscard, setConfirmDiscard] = useState(false);
+    useEffect(() => { if (!pendingStop)
+        setConfirmDiscard(false); }, [pendingStop]);
     const [offTick, setOffTick] = useState(0);
     useEffect(() => {
         if (!offMachine)
@@ -2879,7 +3007,20 @@ function OperatorView(props) {
                 React.createElement("button", { onClick: onSave, disabled: saving, className: "flex-1 flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white font-bold py-3.5 rounded-lg transition" },
                     saving ? React.createElement(RefreshCw, { size: 18, className: "animate-spin" }) : React.createElement(CheckCircle, { size: 18 }),
                     " Save stop"),
-                React.createElement("button", { onClick: onDiscardPending, disabled: saving, className: `px-4 ${t.sub} hover:text-red-500 font-semibold` }, "Discard")),
+                React.createElement("button", { onClick: () => setConfirmDiscard(true), disabled: saving, className: `px-4 ${t.sub} hover:text-red-500 font-semibold` }, "Discard")),
+            confirmDiscard && (React.createElement("div", { className: `border-2 border-red-400 rounded-lg p-3 space-y-2` },
+                React.createElement("div", { className: "text-sm font-bold text-red-500 flex items-center gap-2" },
+                    React.createElement(AlertCircle, { size: 16 }),
+                    " Throw away ",
+                    fmtDur(pendingStop.duration),
+                    " of downtime?"),
+                React.createElement("p", { className: `text-xs ${t.sub}` },
+                    "This stop was measured on ",
+                    pendingStop.machine || machine,
+                    ". Discarding it records nothing and can't be undone."),
+                React.createElement("div", { className: "flex gap-2" },
+                    React.createElement("button", { onClick: () => { setConfirmDiscard(false); onDiscardPending(); }, className: "flex-1 bg-red-500 hover:bg-red-600 text-white font-bold py-3 rounded-lg" }, "Discard stop"),
+                    React.createElement("button", { onClick: () => setConfirmDiscard(false), className: `px-4 ${t.sub} font-semibold` }, "Keep it")))),
             saveError && React.createElement("div", { className: "flex items-center gap-2 text-sm text-red-500 bg-red-500/10 rounded-lg px-3 py-2" },
                 React.createElement(AlertCircle, { size: 15 }),
                 " ",
@@ -2943,7 +3084,12 @@ function ManualStopModal({ t, dark, machine, machines, reasons, quickStops, last
     const [reason, setReason] = useState(lastReason && reasons.includes(lastReason) ? lastReason : reasons[0]);
     const [notes, setNotes] = useState("");
     const [localErr, setLocalErr] = useState("");
-    const durationMs = (Math.max(0, parseInt(mins || "0", 10)) * 60 + Math.max(0, parseInt(secs || "0", 10))) * 1000;
+    const clampSecs = (v) => {
+        const n = parseInt(v, 10);
+        return Number.isFinite(n) ? Math.max(0, Math.min(59, n)) : 0;
+    };
+    const onSecsChange = (v) => setSecs(v === "" ? "" : String(clampSecs(v)));
+    const durationMs = (Math.max(0, parseInt(mins || "0", 10) || 0) * 60 + clampSecs(secs || "0")) * 1000;
     const submit = async () => {
         if (durationMs <= 0) {
             setLocalErr("Enter a duration greater than zero.");
@@ -2968,7 +3114,7 @@ function ManualStopModal({ t, dark, machine, machines, reasons, quickStops, last
                         React.createElement("input", { type: "number", inputMode: "numeric", min: "0", value: mins, onChange: (e) => setMins(e.target.value), placeholder: "0", className: `w-full text-center text-2xl font-mono font-bold border rounded-lg py-2 focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
                         React.createElement("span", { className: `text-sm ${t.sub}` }, "min")),
                     React.createElement("div", { className: "flex-1 flex items-center gap-1" },
-                        React.createElement("input", { type: "number", inputMode: "numeric", min: "0", max: "59", value: secs, onChange: (e) => setSecs(e.target.value), placeholder: "0", className: `w-full text-center text-2xl font-mono font-bold border rounded-lg py-2 focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
+                        React.createElement("input", { type: "number", inputMode: "numeric", min: "0", max: "59", value: secs, onChange: (e) => onSecsChange(e.target.value), placeholder: "0", className: `w-full text-center text-2xl font-mono font-bold border rounded-lg py-2 focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
                         React.createElement("span", { className: `text-sm ${t.sub}` }, "sec"))),
                 React.createElement("div", { className: "flex flex-wrap gap-2 mt-2" }, [5, 10, 15, 30].map((m) => (React.createElement("button", { key: m, onClick: () => { setMins(String(m)); setSecs(""); }, className: `text-xs ${t.chip} rounded-full px-3 py-1.5 font-semibold active:scale-95` },
                     m,
@@ -3433,19 +3579,37 @@ function StatCard({ t, label, value, icon, accent }) {
 }
 function ListManager({ t, title, icon, items, onChange, placeholder }) {
     const [input, setInput] = useState("");
-    const add = () => { const v = input.trim().slice(0, 60); if (!v || items.includes(v))
-        return; onChange([...items, v]); setInput(""); };
-    const remove = (item) => onChange(items.filter((i) => i !== item));
+    const [msg, setMsg] = useState("");
+    const add = () => {
+        const v = input.trim().slice(0, 60);
+        if (!v) {
+            setMsg("Type a name first.");
+            return;
+        }
+        const clash = items.find((i) => i.trim().toLowerCase() === v.toLowerCase());
+        if (clash) {
+            setMsg(`“${clash}” is already in the list.`);
+            return;
+        }
+        onChange([...items, v]);
+        setInput("");
+        setMsg("");
+    };
+    const remove = (item) => { setMsg(""); onChange(items.filter((i) => i !== item)); };
     return (React.createElement("div", { className: `${t.card} rounded-xl p-4` },
         React.createElement("h3", { className: "font-bold mb-3 flex items-center gap-2" },
             icon,
             " ",
             title),
-        React.createElement("div", { className: "flex gap-2 mb-3" },
-            React.createElement("input", { value: input, onChange: (e) => setInput(e.target.value), onKeyDown: (e) => e.key === "Enter" && add(), placeholder: placeholder, className: `flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
+        React.createElement("div", { className: "flex gap-2 mb-1" },
+            React.createElement("input", { value: input, onChange: (e) => { setInput(e.target.value); setMsg(""); }, onKeyDown: (e) => e.key === "Enter" && add(), placeholder: placeholder, className: `flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
             React.createElement("button", { onClick: add, className: "flex items-center gap-1 bg-emerald-500 hover:bg-emerald-600 text-white font-semibold px-4 rounded-lg text-sm" },
                 React.createElement(Plus, { size: 16 }),
                 " Add")),
+        React.createElement("div", { className: "mb-3 min-h-[16px]" }, msg && React.createElement("span", { className: "text-xs text-amber-600 flex items-center gap-1" },
+            React.createElement(AlertCircle, { size: 12 }),
+            " ",
+            msg)),
         React.createElement("div", { className: "flex flex-wrap gap-2" }, items.map((item) => (React.createElement("span", { key: item, className: `flex items-center gap-1 ${t.chip} rounded-full pl-3 pr-1 py-1 text-sm` },
             item,
             React.createElement("button", { onClick: () => remove(item), disabled: items.length <= 1, className: "text-slate-400 hover:text-red-500 disabled:opacity-30 p-0.5", "aria-label": `Remove ${item}` },
@@ -3671,7 +3835,7 @@ function ShiftOutputCard({ t, myProduction, onSaveProduction, machine, otherEntr
             React.createElement("label", { className: "flex flex-col gap-1 flex-1 min-w-[110px]" },
                 React.createElement("span", { className: `text-xs font-semibold ${t.sub}` }, "SCRAP / REJECT"),
                 React.createElement("input", { type: "number", inputMode: "numeric", min: "0", value: scrap, onChange: (e) => setScrap(e.target.value), placeholder: "0", className: `border rounded-lg px-3 py-2.5 text-lg font-mono focus:outline-none focus:ring-2 focus:ring-amber-400 ${t.input}` })),
-            React.createElement("button", { onClick: save, disabled: units === "" || !dirty, className: "flex items-center gap-1 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-white font-bold px-5 py-3 rounded-lg" },
+            React.createElement("button", { onClick: save, disabled: (units === "" && scrap === "") || !dirty, className: "flex items-center gap-1 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-white font-bold px-5 py-3 rounded-lg" },
                 React.createElement(CheckCircle, { size: 16 }),
                 " Save")),
         error && React.createElement("p", { className: "text-xs text-red-500 mt-2 flex items-center gap-1" },
@@ -3696,27 +3860,33 @@ function ShiftOutputCard({ t, myProduction, onSaveProduction, machine, otherEntr
                     "s"))))))));
 }
 function RatesManager({ t, machines, rates, onChange }) {
-    const setRate = (m, v) => {
+    const [draft, setDraft] = useState({});
+    useEffect(() => { setDraft({}); }, [rates]);
+    const valueOf = (m) => { var _a; return (draft[m] !== undefined ? draft[m] : ((_a = rates === null || rates === void 0 ? void 0 : rates[m]) !== null && _a !== void 0 ? _a : "")); };
+    const commit = (m) => {
+        const v = draft[m];
+        if (v === undefined)
+            return;
         const next = Object.assign({}, (rates || {}));
         const n = Math.max(0, Number(v) || 0);
         if (n > 0)
             next[m] = n;
         else
             delete next[m];
-        onChange(next);
+        setDraft((d) => { const _a = d, _b = m, _drop = _a[_b], rest = __rest(_a, [typeof _b === "symbol" ? _b : _b + ""]); return rest; });
+        if (n !== ((rates === null || rates === void 0 ? void 0 : rates[m]) || 0))
+            onChange(next);
     };
     return (React.createElement("div", { className: `${t.card} rounded-xl p-4` },
         React.createElement("h3", { className: "font-bold mb-1 flex items-center gap-2" },
             React.createElement(TrendingUp, { size: 16 }),
             " Machine output rates"),
         React.createElement("p", { className: `text-xs ${t.sub} mb-3` }, "Rated output in units/hour per machine \u2014 the theoretical maximum used for the OEE Performance factor. Leave blank to skip Performance for that machine."),
-        React.createElement("div", { className: "space-y-2" }, machines.map((m) => {
-            var _a;
-            return (React.createElement("label", { key: m, className: "flex items-center gap-2 text-sm" },
-                React.createElement("span", { className: "flex-1 font-medium" }, m),
-                React.createElement("input", { type: "number", inputMode: "numeric", min: "0", value: (_a = rates === null || rates === void 0 ? void 0 : rates[m]) !== null && _a !== void 0 ? _a : "", onChange: (e) => setRate(m, e.target.value), placeholder: "\u2014", className: `w-28 border rounded-lg px-3 py-2 text-sm font-mono text-right focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
-                React.createElement("span", { className: `text-xs ${t.sub} w-16` }, "units/h")));
-        }))));
+        React.createElement("div", { className: "space-y-2" }, machines.map((m) => (React.createElement("label", { key: m, className: "flex items-center gap-2 text-sm" },
+            React.createElement("span", { className: "flex-1 font-medium" }, m),
+            React.createElement("input", { type: "number", inputMode: "numeric", min: "0", value: valueOf(m), onChange: (e) => setDraft((d) => (Object.assign(Object.assign({}, d), { [m]: e.target.value }))), onBlur: () => commit(m), onKeyDown: (e) => { if (e.key === "Enter")
+                    commit(m); }, placeholder: "\u2014", className: `w-28 border rounded-lg px-3 py-2 text-sm font-mono text-right focus:outline-none focus:ring-2 focus:ring-emerald-400 ${t.input}` }),
+            React.createElement("span", { className: `text-xs ${t.sub} w-16` }, "units/h")))))));
 }
 function ShiftsManager({ t, shifts, machines, onChange }) {
     const update = (id, patch) => onChange(shifts.map((s) => (s.id === id ? Object.assign(Object.assign({}, s), patch) : s)));
