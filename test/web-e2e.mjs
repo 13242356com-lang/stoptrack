@@ -90,6 +90,37 @@ function installMockNative() {
 
 function assert(cond, msg) { if (!cond) throw new Error("ASSERT FAILED: " + msg); }
 
+// A fresh origin with the CDN stubs already routed and an optional seed — the
+// same six lines the blocks below repeat inline. Used by the newer blocks so
+// their assertions aren't buried in boilerplate; the older ones are left spelled
+// out. No mock shell here: every block that uses it is the plain-browser path.
+async function newApp(browser, { seed } = {}) {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  await page.route(/unpkg\.com|cdn\.tailwindcss\.com/, async (route) => {
+    const u = route.request().url();
+    if (u.includes("react-dom")) return route.fulfill({ contentType: "application/javascript", body: reactDomUmd });
+    if (u.includes("react")) return route.fulfill({ contentType: "application/javascript", body: reactUmd });
+    return route.fulfill({ contentType: "application/javascript", body: "/* tailwind stub */" });
+  });
+  if (seed) await page.addInitScript(seed);
+  await page.goto("file://" + path.join(root, "index.html"));
+  return { ctx, page };
+}
+
+// Poll a page predicate until it holds, instead of sleeping a fixed amount. It
+// deliberately RETURNS rather than throwing on timeout, so the caller still owns
+// the assertion message — a bare waitForFunction fails with a Playwright timeout
+// that says nothing about the behaviour under test.
+async function until(page, fn, ms = 5000) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const v = await page.evaluate(fn);
+    if (v || Date.now() > deadline) return v;
+    await page.waitForTimeout(50);
+  }
+}
+
 async function main() {
   const browser = await chromium.launch({ executablePath: findChromium(), args: ["--no-sandbox"] });
   const page = await browser.newPage();
@@ -1386,6 +1417,383 @@ async function main() {
     `the away time must be logged exactly once on the machine left, got ${JSON.stringify(tabStops.map((s) => [s.machine, s.reason]))}`);
   await ctxTabs.close();
 
+  // A plain-browser install with two machines and a locked operator — the shape
+  // most of the blocks below start from. Seeded ONCE per origin: addInitScript
+  // re-runs on every navigation, and these tests all reload to prove persistence.
+  const seedPlainBrowser = () => {
+    const now = Date.now();
+    const hhmm = (ms) => {
+      const d = new Date(ms);
+      return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    };
+    if (!localStorage.getItem("config:lists")) {
+      localStorage.setItem("config:lists", JSON.stringify({
+        machines: ["Line 1", "Line 2"], reasons: ["Cleaning", "Material jam"], quickStops: [],
+        shifts: [{ id: "t1", name: "Test", start: hhmm(now - 3600e3), end: hhmm(now + 7 * 3600e3), goals: {} }],
+        rates: {}, handoverEmails: [], updatedAt: now,
+      }));
+      localStorage.setItem("config:prefs", JSON.stringify({ operator: "Bob", setupLocked: true, machine: "Line 1" }));
+    }
+  };
+
+  // ---- Discard must actually throw the measured stop away -------------------
+  // An ended-but-undocumented stop is now parked in `inprogress:current` so a
+  // refresh recovers it (above). Discard therefore HAS to clear that slot: the
+  // operator explicitly threw the measurement away, and if it survives, the very
+  // next load hands it straight back in the document card — a stop they refused,
+  // one tap from being saved as real downtime.
+  const { ctx: ctxDisc, page: pDisc } = await newApp(browser, { seed: seedPlainBrowser });
+  await pDisc.waitForSelector("text=Start Stop", { timeout: 20000 });
+  await pDisc.click("text=Start Stop");
+  await pDisc.waitForSelector("text=End Stop", { timeout: 5000 });
+  await pDisc.waitForTimeout(1200);
+  await pDisc.click("text=End Stop");
+  await pDisc.waitForSelector("text=Document this stop", { timeout: 5000 });
+
+  // Precondition: it really is parked, or everything below guards nothing.
+  const parkedBeforeDiscard = await until(pDisc, () => {
+    try { const ip = JSON.parse(localStorage.getItem("inprogress:current") || "null"); return !!(ip && ip.ended); }
+    catch { return false; }
+  });
+  assert(parkedBeforeDiscard, "precondition: the ended stop must be parked before Discard is tapped");
+
+  // Two taps — Discard sits a thumb's width from Save (asserted above).
+  await pDisc.click('button:has-text("Discard")');
+  await pDisc.click('button:has-text("Discard stop")');
+  await pDisc.waitForSelector("text=Document this stop", { state: "detached", timeout: 5000 });
+
+  await until(pDisc, () => localStorage.getItem("inprogress:current") === null);
+  const parkedAfterDiscard = await pDisc.evaluate(() => localStorage.getItem("inprogress:current"));
+  assert(parkedAfterDiscard === null,
+    `Discard must clear the parked stop, storage still holds ${parkedAfterDiscard}`);
+
+  // The resurrection only shows on the next load, so that's where it's proven.
+  await pDisc.reload();
+  await pDisc.waitForSelector("text=Start Stop", { timeout: 20000 });
+  await pDisc.waitForTimeout(600); // the load path reads storage a microtask after boot
+  assert(await pDisc.locator("text=Document this stop").count() === 0,
+    "a discarded stop must not come back in the document card on the next load");
+  assert(await pDisc.locator("text=Unfinished stop found").count() === 0,
+    "a discarded stop must not come back as a recovery prompt either");
+  const discRecs = await pDisc.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("stop:")).length);
+  assert(discRecs === 0, `discarding must record nothing, found ${discRecs} stop(s)`);
+  await ctxDisc.close();
+
+  // ---- a RECOVERED stop, finalized, must survive an interruption too --------
+  // Same blocker, the other branch: "Finalize & document now" turns a recovered
+  // running stop into an ended-but-undocumented one. It used to CLEAR the
+  // autosave slot at that moment, so a refresh before "Save stop" lost the
+  // measurement a second time — after the app had already offered to keep it.
+  const { ctx: ctxFin, page: pFin } = await newApp(browser, {
+    seed: () => {
+      const now = Date.now();
+      const hhmm = (ms) => {
+        const d = new Date(ms);
+        return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      };
+      if (!localStorage.getItem("config:lists")) {
+        localStorage.setItem("config:lists", JSON.stringify({
+          machines: ["Line 1"], reasons: ["Cleaning", "Material jam"], quickStops: [],
+          shifts: [{ id: "t1", name: "Test", start: hhmm(now - 3600e3), end: hhmm(now + 7 * 3600e3), goals: {} }],
+          rates: {}, handoverEmails: [], updatedAt: now,
+        }));
+        localStorage.setItem("config:prefs", JSON.stringify({ operator: "Bob", setupLocked: true, machine: "Line 1" }));
+        // A stop still RUNNING when the app died: started 5 min ago, last autosave
+        // 1 min ago → finalizing banks exactly 4 minutes, and nothing more.
+        localStorage.setItem("inprogress:current", JSON.stringify({
+          operator: "Bob", machine: "Line 1", running: true, paused: false,
+          startTs: now - 300e3, accumulated: 0, segStart: now - 300e3, savedAt: now - 60e3,
+        }));
+      }
+    },
+  });
+  await pFin.waitForSelector("text=Unfinished stop found", { timeout: 20000 });
+  await pFin.click('button:has-text("Finalize")');
+  await pFin.waitForSelector("text=Document this stop", { timeout: 5000 });
+  const finShown = (await pFin.locator(".border-emerald-400 .font-mono").first().innerText()).trim();
+
+  const parkedFin = await until(pFin, () => {
+    try { const ip = JSON.parse(localStorage.getItem("inprogress:current") || "null"); return ip && ip.ended ? ip : null; }
+    catch { return null; }
+  });
+  assert(parkedFin && parkedFin.ended === true,
+    `a finalized recovery must be re-parked as an ended stop, storage held ${JSON.stringify(parkedFin)}`);
+  assert(!parkedFin.reason, "finalizing must not invent a reason either");
+  assert(parkedFin.duration === 240000,
+    `the finalized duration must be the banked 4m, got ${parkedFin.duration}`);
+
+  await pFin.reload();
+  await pFin.waitForSelector("text=Start Stop", { timeout: 20000 });
+  await pFin.waitForTimeout(600);
+  assert(await pFin.locator("text=Document this stop").count() === 1,
+    "a finalized-but-undocumented stop must be back in the document card after a refresh, not lost");
+  assert(await pFin.locator("text=Unfinished stop found").count() === 0,
+    "it is finished — it must not ask 'resume or finalize?' all over again");
+  const finAfter = (await pFin.locator(".border-emerald-400 .font-mono").first().innerText()).trim();
+  assert(finAfter === finShown, `the recovered measurement must be unchanged (${finShown} -> ${finAfter})`);
+
+  await pFin.click("text=Save stop");
+  await pFin.waitForSelector("text=Document this stop", { state: "detached", timeout: 5000 });
+  const finRecs = await pFin.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("stop:"))
+    .map((k) => { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }).filter(Boolean));
+  assert(finRecs.length === 1, `the finalized stop must record exactly once, got ${finRecs.length}`);
+  assert(finRecs[0].duration === 240000, `the measured 4m must survive the refresh, recorded ${finRecs[0].duration}ms`);
+  assert(finRecs[0].operator === "Bob" && finRecs[0].machine === "Line 1",
+    `attribution must survive, got ${finRecs[0].operator} / ${finRecs[0].machine}`);
+  const finLeftover = await pFin.evaluate(() => localStorage.getItem("inprogress:current"));
+  assert(finLeftover === null, "the parked stop must be cleared once documented, or it returns on the next load");
+  await ctxFin.close();
+
+  // ---- coming back onto a DIFFERENT machine must stick ----------------------
+  // Tapping another machine is a valid way to end an off-machine span, and both
+  // exit paths (record it, or discard it) have to persist the new machine in the
+  // SAME prefs write that clears the span: persisting before setMachine captured
+  // the stale value, and prefs are one replaced blob, so a second write would
+  // re-open the span. Only the plain switchMachine path was covered.
+  const { ctx: ctxBack, page: pBack } = await newApp(browser, { seed: seedPlainBrowser });
+  await pBack.waitForSelector("text=Start Stop", { timeout: 20000 });
+  await pBack.click('button:has-text("Off machine")');
+  await pBack.waitForSelector('button:has-text("Back on Line 1")', { timeout: 5000 });
+  await pBack.waitForTimeout(1200); // clear the sub-second mistap guard
+  await pBack.click('button:has-text("Line 2")');
+  await pBack.waitForSelector('button:has-text("Off machine")', { timeout: 5000 });
+
+  await until(pBack, () => {
+    try { return JSON.parse(localStorage.getItem("config:prefs") || "{}").machine === "Line 2"; } catch { return false; }
+  });
+  const backPrefs = await pBack.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem("config:prefs") || "{}"); } catch { return {}; }
+  });
+  assert(backPrefs.machine === "Line 2",
+    `coming back on another machine must persist it, prefs said ${JSON.stringify(backPrefs.machine)}`);
+  assert(!(backPrefs.offMachine && backPrefs.offMachine.start),
+    `…and the same write must still clear the span, prefs said ${JSON.stringify(backPrefs.offMachine)}`);
+
+  const backStops = await pBack.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("stop:"))
+    .map((k) => { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }).filter(Boolean));
+  assert(backStops.length === 1 && backStops[0].machine === "Line 1" && backStops[0].reason === "No operator",
+    `the away time still belongs to the machine LEFT, got ${JSON.stringify(backStops.map((s) => [s.machine, s.reason]))}`);
+
+  await pBack.reload();
+  await pBack.waitForSelector("text=Start Stop", { timeout: 20000 });
+  assert(await pBack.locator('button.bg-emerald-500:has-text("Line 2")').count() === 1,
+    "after a reload the operator must still be on the machine they came BACK to, not the one they left");
+  const backStops2 = await pBack.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("stop:")).length);
+  assert(backStops2 === 1, `the reload must not log the away time again, found ${backStops2} stops`);
+  await ctxBack.close();
+
+  // The DISCARD exit is a return to a machine too. A >=90-minute span asks first;
+  // choosing "Discard" records nothing, but the operator is still standing at the
+  // machine they tapped, and the next load has to agree.
+  const { ctx: ctxBackD, page: pBackD } = await newApp(browser, {
+    seed: () => {
+      const now = Date.now();
+      const hhmm = (ms) => {
+        const d = new Date(ms);
+        return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      };
+      if (!localStorage.getItem("config:lists")) {
+        localStorage.setItem("config:lists", JSON.stringify({
+          machines: ["Line 1", "Line 2"], reasons: ["Cleaning"], quickStops: [],
+          shifts: [{ id: "t1", name: "Test", start: hhmm(now - 6 * 3600e3), end: hhmm(now + 2 * 3600e3), goals: {} }],
+          rates: {}, handoverEmails: [], updatedAt: now,
+        }));
+        localStorage.setItem("config:prefs", JSON.stringify({
+          operator: "Bob", setupLocked: true, machine: "Line 1",
+          // 2h ago: inside the shift, so it's kept, but long enough to ask first.
+          offMachine: { machine: "Line 1", operator: "Bob", start: now - 2 * 3600e3 },
+        }));
+      }
+    },
+  });
+  await pBackD.waitForSelector('button:has-text("Back on Line 1")', { timeout: 20000 });
+  await pBackD.click('button:has-text("Line 2")');
+  await pBackD.waitForSelector("text=of downtime?", { timeout: 5000 });
+  await pBackD.click('button:has-text("Discard")');
+  await pBackD.waitForSelector("text=of downtime?", { state: "detached", timeout: 5000 });
+
+  await until(pBackD, () => {
+    try { return JSON.parse(localStorage.getItem("config:prefs") || "{}").machine === "Line 2"; } catch { return false; }
+  });
+  const bdPrefs = await pBackD.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem("config:prefs") || "{}"); } catch { return {}; }
+  });
+  assert(bdPrefs.machine === "Line 2",
+    `discarding a long span is still a return: the machine tapped must persist, prefs said ${JSON.stringify(bdPrefs.machine)}`);
+  const bdStops = await pBackD.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("stop:")).length);
+  assert(bdStops === 0, `discarding must still record nothing, got ${bdStops} stop(s)`);
+
+  await pBackD.reload();
+  await pBackD.waitForSelector("text=Start Stop", { timeout: 20000 });
+  assert(await pBackD.locator('button.bg-emerald-500:has-text("Line 2")').count() === 1,
+    "the machine chosen while discarding a long span must survive a reload");
+  await ctxBackD.close();
+
+  // ---- a typed machine rate: committed once, and not lost -------------------
+  // Typing here used to write config:lists AND PUT /config on EVERY keystroke, so
+  // "1200" was four writes — three of them wrong (1, 12, 120), each uploaded, and
+  // each briefly the machine's real rate in the OEE maths. It now commits on
+  // blur / Enter (and on tab-hide, below).
+  const { ctx: ctxRate, page: pRate } = await newApp(browser, { seed: seedPlainBrowser });
+  await pRate.waitForSelector("text=Start Stop", { timeout: 20000 });
+  await pRate.click('button:has-text("Supervisor")');
+  await pRate.click('button:has-text("Settings")');
+  await pRate.waitForSelector("text=Machine output rates", { timeout: 5000 });
+
+  const ratesOf = () => pRate.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem("config:lists")).rates || {}; } catch { return {}; }
+  });
+  const ratesCard = pRate.locator('h3:has-text("Machine output rates")').locator("xpath=..");
+  const rate1 = ratesCard.locator('label:has-text("Line 1") input');
+  await rate1.click();
+  await rate1.pressSequentially("1200", { delay: 30 });
+  const midType = await ratesOf();
+  assert(midType["Line 1"] === undefined,
+    `a rate must not be written per keystroke, storage already held ${JSON.stringify(midType)}`);
+
+  await rate1.press("Tab"); // blur → commit
+  await until(pRate, () => {
+    try { return (JSON.parse(localStorage.getItem("config:lists")).rates || {})["Line 1"] === 1200; } catch { return false; }
+  });
+  assert((await ratesOf())["Line 1"] === 1200,
+    `blur must commit the typed rate, storage held ${JSON.stringify(await ratesOf())}`);
+
+  // Enter is the other commit, and it does NOT blur — its own path.
+  const rate2 = ratesCard.locator('label:has-text("Line 2") input');
+  await rate2.click();
+  await rate2.pressSequentially("800", { delay: 30 });
+  await rate2.press("Enter");
+  await until(pRate, () => {
+    try { return (JSON.parse(localStorage.getItem("config:lists")).rates || {})["Line 2"] === 800; } catch { return false; }
+  });
+  assert((await ratesOf())["Line 2"] === 800,
+    `Enter must commit the typed rate too, storage held ${JSON.stringify(await ratesOf())}`);
+
+  // A number typed but never blurred still LOOKS saved in the box, and a
+  // backgrounded tab can be reclaimed at any moment. Commit-on-blur alone loses
+  // it silently, so the last-chance signal has to flush pending drafts — the
+  // same visibilitychange/pagehide autosave the stop timer already uses.
+  await rate2.click();
+  await rate2.fill("");
+  await rate2.pressSequentially("555", { delay: 30 });
+  await pRate.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await until(pRate, () => {
+    try { return (JSON.parse(localStorage.getItem("config:lists")).rates || {})["Line 2"] === 555; } catch { return false; }
+  });
+  assert((await ratesOf())["Line 2"] === 555,
+    `a rate typed but never blurred must be flushed when the tab hides, storage held ${JSON.stringify(await ratesOf())}`);
+
+  await pRate.reload();
+  await pRate.waitForSelector("text=Start Stop", { timeout: 20000 });
+  const ratesReloaded = await ratesOf();
+  assert(ratesReloaded["Line 1"] === 1200 && ratesReloaded["Line 2"] === 555,
+    `committed rates must survive a reload, got ${JSON.stringify(ratesReloaded)}`);
+  await pRate.click('button:has-text("Supervisor")');
+  await pRate.click('button:has-text("Settings")');
+  await pRate.waitForSelector("text=Machine output rates", { timeout: 5000 });
+  const shownRate = await pRate.locator('h3:has-text("Machine output rates")').locator("xpath=..")
+    .locator('label:has-text("Line 1") input').inputValue();
+  assert(shownRate === "1200", `the settings box must show the saved rate after a reload, showed ${shownRate}`);
+
+  // ---- Add must say why nothing happened ------------------------------------
+  // A duplicate (even one differing only by case or padding) used to no-op in
+  // silence, which from the supervisor's side is indistinguishable from a dead
+  // button — they tap it again, then start inventing variant names.
+  const machineCard = pRate.locator('h3:has-text("Machines")').locator("xpath=..");
+  await machineCard.locator("input").fill("  line 1 ");
+  await machineCard.locator('button:has-text("Add")').click();
+  await pRate.waitForTimeout(200);
+  const dupText = await machineCard.innerText();
+  assert(/already in the list/i.test(dupText),
+    `a duplicate Add must say so instead of doing nothing, the card read: ${JSON.stringify(dupText)}`);
+  const machinesAfterDup = await pRate.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem("config:lists")).machines; } catch { return []; }
+  });
+  assert(machinesAfterDup.length === 2,
+    `a duplicate must not be added, the list is now ${JSON.stringify(machinesAfterDup)}`);
+
+  // ---- a shift that produced nothing good is still a shift ------------------
+  // Save required UNITS, so a scrap-only run couldn't be recorded at all — the
+  // quality figure for the worst kind of shift was the one that went missing.
+  await pRate.click('button:has-text("Operator")');
+  await pRate.waitForSelector("text=Shift output", { timeout: 5000 });
+  const outCard = pRate.locator('h3:has-text("Shift output")').locator("xpath=..");
+  await outCard.locator('label:has-text("SCRAP") input').fill("3");
+  const outSave = outCard.locator('button:has-text("Save")');
+  assert(!(await outSave.isDisabled()),
+    "a scrap-only shift must be saveable — a blank UNITS box counts as 0, not as 'incomplete'");
+  await outSave.click();
+  const prodRec = await until(pRate, () => {
+    const k = Object.keys(localStorage).find((x) => x.startsWith("prod:"));
+    try { return k ? JSON.parse(localStorage.getItem(k)) : null; } catch { return null; }
+  });
+  assert(prodRec && prodRec.scrapCount === 3 && prodRec.unitsProduced === 0,
+    `a scrap-only entry must save with units 0, got ${JSON.stringify(prodRec)}`);
+  await ctxRate.close();
+
+  // ---- a failed manual report must still be retryable -----------------------
+  // handleManualSave sets a re-entrancy latch OUTSIDE any try/finally. Every path
+  // through it releases the latch today (api.saveStop catches storage failures and
+  // returns {ok:false} rather than throwing), but nothing proved it — and a stuck
+  // latch is invisible: the retry the error message asks for would silently do
+  // nothing, and the operator would retype the same stop until they gave up.
+  const { ctx: ctxRetry, page: pRetry } = await newApp(browser, {
+    seed: () => {
+      const now = Date.now();
+      const hhmm = (ms) => {
+        const d = new Date(ms);
+        return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      };
+      localStorage.setItem("config:lists", JSON.stringify({
+        machines: ["Line 1"], reasons: ["Cleaning"], quickStops: [],
+        shifts: [{ id: "t1", name: "Test", start: hhmm(now - 3600e3), end: hhmm(now + 7 * 3600e3), goals: {} }],
+        rates: {}, handoverEmails: [], updatedAt: now,
+      }));
+      localStorage.setItem("config:prefs", JSON.stringify({ operator: "Bob", setupLocked: true, machine: "Line 1" }));
+      // Storage rejects stops until the test says otherwise — a full phone.
+      window.__failStops = true;
+      const realSet = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (k, v) {
+        if (window.__failStops && String(k).startsWith("stop:")) {
+          const e = new Error("QuotaExceededError"); e.name = "QuotaExceededError"; throw e;
+        }
+        return realSet.call(this, k, v);
+      };
+    },
+  });
+  await pRetry.waitForSelector("text=Start Stop", { timeout: 20000 });
+  await pRetry.click("text=Report a stop manually");
+  await pRetry.waitForSelector("text=For a stop that already happened", { timeout: 5000 });
+  await pRetry.click('button:has-text("5 min")');
+  await pRetry.click('button:has-text("Save stop")');
+  await pRetry.waitForTimeout(500);
+  assert(await pRetry.locator("text=For a stop that already happened").count() === 1,
+    "a failed manual save must keep the report open so it can be retried");
+  const retryErr = await pRetry.locator("text=For a stop that already happened").locator("xpath=..").innerText();
+  assert(/storage is full/i.test(retryErr),
+    `the operator must be told why the manual report failed, saw: ${JSON.stringify(retryErr)}`);
+
+  // Storage recovers (old stops exported and cleared) — the retry must go through.
+  await pRetry.evaluate(() => { window.__failStops = false; });
+  await pRetry.click('button:has-text("Save stop")');
+  // Polled, not waited-for: a wedged latch produces NO error and NO change at
+  // all, and that has to read as a failed assertion, not a selector timeout.
+  const retryRecs = (await until(pRetry, () => {
+    const recs = Object.keys(localStorage).filter((k) => k.startsWith("stop:"))
+      .map((k) => { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }).filter(Boolean);
+    return recs.length ? recs : null;
+  })) || [];
+  assert(retryRecs.length === 1,
+    `the retried manual report must record exactly once, got ${retryRecs.length} — a re-entrancy latch that never released would look exactly like this`);
+  assert(await pRetry.locator("text=For a stop that already happened").count() === 0,
+    "a successful retry must close the report");
+  assert(retryRecs[0].duration === 300000 && retryRecs[0].manual === true,
+    `the retry must record what was typed (5 min, manual), got ${JSON.stringify([retryRecs[0].duration, retryRecs[0].manual])}`);
+  await ctxRetry.close();
+
   // ---- end-to-end against a REAL server ------------------------------------
   // The two test layers above can BOTH pass while the feature is dead: the server
   // test posts a payload written by hand, and the web test only checks the outbox.
@@ -1449,6 +1857,148 @@ async function main() {
     rmSync(srvDir, { recursive: true, force: true });
   }
 
+  // ---- one measurement must produce exactly ONE record ----------------------
+  // The ended-but-undocumented stop lives in the SHARED `inprogress:current`
+  // slot, so every open tab is handed the same one. Each used to mint its own
+  // random id, so both tabs' saves landed on different keys: one 4s stop became
+  // two records and 8s of downtime on the operator board AND the supervisor log.
+  // Ids for timed stops are now derived from the measurement, and saveStop
+  // merges onto that key without ever shortening it.
+  const ctxDup = await browser.newContext();
+  const dupTab = async () => {
+    const p = await ctxDup.newPage();
+    await p.route(/unpkg\.com|cdn\.tailwindcss\.com/, async (route) => {
+      const u = route.request().url();
+      if (u.includes("react-dom")) return route.fulfill({ contentType: "application/javascript", body: reactDomUmd });
+      if (u.includes("react")) return route.fulfill({ contentType: "application/javascript", body: reactUmd });
+      return route.fulfill({ contentType: "application/javascript", body: "/* tailwind stub */" });
+    });
+    await p.addInitScript(seedPlainBrowser);
+    await p.goto("file://" + path.join(root, "index.html"));
+    await p.waitForSelector("text=Start Stop", { timeout: 20000 });
+    return p;
+  };
+  const dupA = await dupTab();
+  await dupA.click("text=Start Stop");
+  await dupA.waitForTimeout(1200);
+  await dupA.click("text=End Stop");
+  await dupA.waitForSelector("text=Document this stop", { timeout: 5000 });
+
+  // A second tab opened now (bookmark, home-screen shortcut) is handed the same
+  // parked stop and shows the same document card.
+  const dupB = await dupTab();
+  assert(await dupB.locator("text=Document this stop").count() === 1,
+    "precondition: a tab opened after End Stop is handed the same parked stop");
+
+  await dupB.click('button:has-text("Save stop")');
+  await until(dupB, () => Object.keys(localStorage).filter((k) => k.startsWith("stop:")).length > 0);
+  // The peer's card must come off screen rather than keep a live Save button on
+  // a measurement that no longer exists.
+  const peerCardGone = await until(dupA, () => !document.body.innerText.includes("Document this stop"));
+  assert(peerCardGone, "a tab must drop its document card once another tab has documented the same parked stop");
+
+  const dupRecords = await dupA.evaluate(() => Object.keys(localStorage)
+    .filter((k) => k.startsWith("stop:"))
+    .map((k) => { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } })
+    .filter((s) => s && !s.offMachine && !s.deleted)
+    .map((s) => ({ id: s.id, start: s.start, end: s.end, duration: s.duration })));
+  assert(dupRecords.length === 1,
+    `one measured stop must yield exactly one record, got ${dupRecords.length}: ${JSON.stringify(dupRecords)}`);
+  // The card-clearing above is what stops the second save in THIS sequence, but
+  // it is event-timing dependent (a frozen tab can miss the event). The id is the
+  // backstop that makes a duplicate write collapse instead of duplicate, so guard
+  // it directly rather than relying on the race resolving the same way every run.
+  const dupSlug = (m) => String(m || "").replace(/[^a-zA-Z0-9]+/g, "-");
+  const dupMachine = await dupA.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem("config:prefs") || "{}").machine; } catch { return ""; }
+  });
+  assert(dupRecords[0].id === `${dupRecords[0].start}-${dupSlug(dupMachine)}`,
+    `a timed stop's id must be derived from the measurement so two tabs collapse onto one key, got "${dupRecords[0].id}"`);
+
+  const dupCounted = dupRecords.reduce((n, s) => n + s.duration, 0);
+  const dupWindow = Math.max(...dupRecords.map((s) => s.end)) - Math.min(...dupRecords.map((s) => s.start));
+  assert(dupCounted <= dupWindow + 50,
+    `counted downtime (${dupCounted}ms) must not exceed the measured window (${dupWindow}ms) — that is invented downtime`);
+
+  // ...and the other half of the deal: a deterministic id must never let a late
+  // or stale write SHORTEN a measurement. Seed a longer record on the very key
+  // this stop will derive, then document the (shorter) parked stop.
+  const dupC = await dupTab();
+  await dupC.click("text=Start Stop");
+  await dupC.waitForTimeout(1100);
+  await dupC.click("text=End Stop");
+  await dupC.waitForSelector("text=Document this stop", { timeout: 5000 });
+  const parkedC = await dupC.evaluate(() => JSON.parse(localStorage.getItem("inprogress:current") || "{}"));
+  await dupC.evaluate((p) => {
+    const slug = String(p.machine || "").replace(/[^a-zA-Z0-9]+/g, "-");
+    const id = `${p.startTs}-${slug}`;
+    localStorage.setItem(`stop:${id}`, JSON.stringify({
+      id, machine: p.machine, operator: p.operator, start: p.startTs,
+      end: p.startTs + 600000, duration: 600000, reason: "Cleaning", notes: "",
+      discarded: false, loggedAt: Date.now(), updatedAt: Date.now(),
+    }));
+  }, parkedC);
+  await dupC.click('button:has-text("Save stop")');
+  await dupC.waitForTimeout(800);
+  const merged = await dupC.evaluate((p) => {
+    const slug = String(p.machine || "").replace(/[^a-zA-Z0-9]+/g, "-");
+    try { return JSON.parse(localStorage.getItem(`stop:${p.startTs}-${slug}`)); } catch { return null; }
+  }, parkedC);
+  assert(merged && merged.duration === 600000,
+    `a later write must not shorten a recorded measurement (10min -> ${merged && merged.duration}ms)`);
+  await ctxDup.close();
+
+  // ---- a live span outranks a peer's stale-span drop ------------------------
+  // The restore-drop rule (a span older than the shift is dropped, not recorded)
+  // runs per tab. It used to stamp the "already closed" marker, which told the
+  // tab holding that span LIVE that it had been recorded — so the operator's
+  // break silently vanished. And the marker is matched by identity, not `>=`,
+  // so a clock that jumps backwards can't make every later span adoptable.
+  const ctxSkew = await browser.newContext();
+  const skewSeed = () => {
+    const now = Date.now();
+    const hhmm = (ms) => {
+      const d = new Date(ms);
+      return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    };
+    localStorage.setItem("config:lists", JSON.stringify({
+      machines: ["Line 1", "Line 2"], reasons: ["Cleaning"], quickStops: [],
+      shifts: [{ id: "t1", name: "Test", start: hhmm(now - 3600e3), end: hhmm(now + 7 * 3600e3), goals: {} }],
+      rates: {}, handoverEmails: [], updatedAt: now,
+    }));
+    // A marker stamped 5 minutes in the FUTURE — what one backwards clock
+    // correction leaves behind.
+    localStorage.setItem("config:prefs", JSON.stringify({
+      operator: "Bob", setupLocked: true, machine: "Line 1", offMachineClosed: now + 300000,
+    }));
+  };
+  const skewTab = async () => {
+    const p = await ctxSkew.newPage();
+    await p.route(/unpkg\.com|cdn\.tailwindcss\.com/, async (route) => {
+      const u = route.request().url();
+      if (u.includes("react-dom")) return route.fulfill({ contentType: "application/javascript", body: reactDomUmd });
+      if (u.includes("react")) return route.fulfill({ contentType: "application/javascript", body: reactUmd });
+      return route.fulfill({ contentType: "application/javascript", body: "/* tailwind stub */" });
+    });
+    await p.addInitScript(skewSeed);
+    await p.goto("file://" + path.join(root, "index.html"));
+    await p.waitForSelector("text=Start Stop", { timeout: 20000 });
+    return p;
+  };
+  const skewA = await skewTab();
+  const skewB = await skewTab();
+  await skewA.click('button:has-text("Off machine")');
+  await skewA.waitForSelector('button:has-text("Back on Line 1")', { timeout: 5000 });
+  await skewB.click('button[aria-label="Toggle theme"]');   // one unrelated peer write
+  await skewB.waitForTimeout(700);
+  assert(await skewA.locator('button:has-text("Back on Line 1")').count() === 1,
+    "a stale future-dated marker must not let a peer's write eat a LIVE span — those are unlogged minutes");
+  const skewSpan = await skewA.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem("config:prefs") || "{}").offMachine; } catch { return null; }
+  });
+  assert(skewSpan && skewSpan.start, `the live span must still be in storage, got ${JSON.stringify(skewSpan)}`);
+  await ctxSkew.close();
+
   await browser.close();
   console.log("web-e2e: PASS — stop recorded immediately (operator=Alice, reason=" + chosenReason + ", duration=" + rec.duration + "ms)");
   console.log("web-e2e: PASS — shift window is clock-derived (7h/9h/8h incl. overnight); Show all reveals stops without inflating the stats");
@@ -1459,6 +2009,13 @@ async function main() {
   console.log("web-e2e: PASS — a machine switch persists: stop + manned time after a reload both land on the switched-to machine");
   console.log("web-e2e: PASS — a second tab's write can't erase an open off-machine span, undo the New Shift cutoff, or drop a config edit");
   console.log(`web-e2e: PASS — a long span logs exactly the duration it asked about (${shownDur}); a retyped name still finds its stops; 900 sec clamps to 59`);
+  console.log("web-e2e: PASS — a discarded stop stays discarded across a reload (no card, no prompt, nothing parked)");
+  console.log(`web-e2e: PASS — a RECOVERED stop finalized then interrupted survives (${finShown}) and records once`);
+  console.log("web-e2e: PASS — coming back on another machine persists it through both exits (record and discard), stop still on the machine left");
+  console.log(`web-e2e: PASS — rates commit on blur/Enter/tab-hide, never per keystroke (Line 1 ${ratesReloaded["Line 1"]}, Line 2 ${ratesReloaded["Line 2"]}); duplicate Add says why; scrap-only output saves`);
+  console.log("web-e2e: PASS — a manual report that hit full storage can be retried once storage recovers (the latch releases)");
+  console.log(`web-e2e: PASS — two tabs documenting ONE parked stop record it once (${dupCounted}ms over a ${dupWindow}ms window), the peer's card clears, and a late write can't shorten it`);
+  console.log("web-e2e: PASS — a live off-machine span outranks a peer's stale-span drop and a future-dated marker (no silently unlogged break)");
 }
 
 main().catch((e) => { console.error("web-e2e: FAIL —", e.message); process.exit(1); });

@@ -986,6 +986,31 @@ const api = {
   async saveStop(record) {
     const key = `stop:${record.id}`;
     try {
+      // NEVER SHORTEN A MEASUREMENT. Ids for timed and off-machine stops are
+      // derived from the measurement itself (see the id sites), so two tabs
+      // documenting the ONE parked stop — or a frozen tab replaying an
+      // off-machine close — land on this same key instead of inventing a second
+      // record. Whoever writes last must not be able to trim the stop: a stale
+      // tab finalizing a 1.2s snapshot of a 3.8s stop would otherwise silently
+      // shorten real downtime. Take the widest window either side measured, and
+      // never un-discard something a supervisor already discarded.
+      let toWrite = record;
+      try {
+        const prevRaw = await STORE.get(key, SHARED).catch(() => STORE.get(key));
+        const prev = prevRaw && prevRaw.value ? JSON.parse(prevRaw.value) : null;
+        if (prev && !prev.deleted) {
+          toWrite = {
+            ...record,
+            start: Math.min(Number(prev.start) || record.start, record.start),
+            end: Math.max(Number(prev.end) || 0, Number(record.end) || 0),
+            duration: Math.max(Number(prev.duration) || 0, Number(record.duration) || 0),
+            discarded: prev.discarded || record.discarded || false,
+            discardReason: prev.discardReason ?? record.discardReason,
+            discardedAt: prev.discardedAt ?? record.discardedAt,
+          };
+        }
+      } catch (e) { /* unreadable previous value → just write ours */ }
+      record = toWrite;
       try { await STORE.set(key, JSON.stringify(record), SHARED); }
       catch { await STORE.set(key, JSON.stringify(record)); } // some builds reject the scope flag
       const check = await STORE.get(key, SHARED).catch(() => STORE.get(key));
@@ -2196,11 +2221,17 @@ export default function App() {
     const ourCut = clearedBefore || 0;
     if (theirCut > ourCut) { setClearedBefore(theirCut); setShowAll(false); }
     const theirClosed = Number(p.offMachineClosed) || 0;
-    offClosedRef.current = Math.max(offClosedRef.current, theirClosed);
+    // Adopt the peer's marker VERBATIM — never Math.max. A max latch cannot
+    // represent a retraction, so a failed save that re-opens its span (marker
+    // back to 0) was silently re-closed by the peer's next write, and the
+    // operator lost the away time the banner promised to keep.
+    offClosedRef.current = theirClosed;
     const theirSpan = !!(p.offMachine && p.offMachine.start);
-    // The peer closed the very span we are holding — it recorded the stop, so
-    // adopt the close. Re-asserting would bill those minutes a second time.
-    const peerClosedOurs = !!offMachine && !theirSpan && theirClosed >= offMachine.start;
+    // The peer closed THE VERY SPAN we are holding — it recorded that stop, so
+    // adopt the close. Compared by IDENTITY, not `>=`: with ordering, one clock
+    // correction backwards (NTP, manual set) leaves every later span starting
+    // below the marker, and the reconciler eats live spans forever.
+    const peerClosedOurs = !!offMachine && !theirSpan && theirClosed === offMachine.start;
     if (peerClosedOurs) setOffMachine(null);
     const lostSpan = !!offMachine && !theirSpan && !peerClosedOurs;
     if (lostSpan || ourCut > theirCut) {
@@ -2244,10 +2275,18 @@ export default function App() {
       const key = e && e.key;
       if (key === "config:prefs" || key == null) reconcilePrefs();
       if (key === "config:lists" || key == null) reconcileConfig();
+      // The parked stop is a SHARED slot. Once a peer documents or discards it,
+      // this tab's document card is offering to save a stop that no longer
+      // exists — take it off screen rather than leave a live Save button on a
+      // stale measurement. (The merge in saveStop is the backstop if they race.)
+      if ((key === "inprogress:current" || key == null) && !inShell && e && e.newValue == null) {
+        setPendingStop(null);
+        setRecovered(null);
+      }
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
-  }, [reconcilePrefs, reconcileConfig]);
+  }, [reconcilePrefs, reconcileConfig, inShell]);
 
   // ---- backup / restore ----------------------------------------------------
   // Download one portable JSON of everything, so it can be re-imported into a
@@ -2317,7 +2356,12 @@ export default function App() {
     const sig = `${finished.start}-${finished.end}-${finished.duration}`;
     if (lastSavedSigRef.current === sig) return;
     setSaving(true); setSaveError("");
-    const id = `${finished.start}-${Math.floor(Math.random() * 1e6)}`;
+    // Derived from the MEASUREMENT, not random: the ended-but-undocumented stop
+    // lives in the shared `inprogress:current` slot, so every open tab is handed
+    // the same one and each used to mint its own id — one 4s stop became two
+    // records and 8s of downtime on the board and in the supervisor log. Same
+    // key + saveStop's never-shorten merge = one record, widest measurement.
+    const id = `${finished.start}-${machineSlug(finished.machine || machine)}`;
     const record = {
       id,
       machine: finished.machine || machine, // pinned at Start; falls back for old recoveries
@@ -2455,7 +2499,7 @@ export default function App() {
     // Mark THIS span closed before clearing it, so a second tab holding the same
     // restored span adopts the close instead of re-asserting a span we are about
     // to record. Without it those minutes get logged twice.
-    offClosedRef.current = Math.max(offClosedRef.current, rec.start);
+    offClosedRef.current = rec.start;
     persistPrefs({ offMachine: null, offMachineClosed: offClosedRef.current });
     const target = nextMachine || rec.machine;
 
@@ -2464,7 +2508,11 @@ export default function App() {
     // A mistap is not a stop.
     if (duration >= 1000) {
       const record = {
-        id: `${rec.start}-${Math.floor(Math.random() * 1e6)}`,
+        // Derived from the span, so a tab that was frozen through the close and
+        // thaws still holding it writes the SAME key instead of a second
+        // overlapping "No operator" stop. Belt-and-braces behind the marker:
+        // that only works if the peer sees the close before the next span opens.
+        id: `${rec.start}-${machineSlug(rec.machine)}`,
         machine: rec.machine,
         operator: rec.operator,
         start: rec.start, end, duration,
@@ -2517,8 +2565,9 @@ export default function App() {
     setOffError("");
     const target = next || rec.machine;
     setMachine(target);
-    // Deliberately dropped, so a peer must not re-assert it either.
-    offClosedRef.current = Math.max(offClosedRef.current, rec.start);
+    // Deliberately dropped, so a peer must not re-assert it either. Set to THIS
+    // span's start, not a running max — the reconciler matches by identity.
+    offClosedRef.current = rec.start;
     // One write, after both changes, carrying both new values — the base object
     // still holds the old machine and the open span.
     persistPrefs({ offMachine: null, machine: target, offMachineClosed: offClosedRef.current });
@@ -2571,8 +2620,13 @@ export default function App() {
     if (offMachine.start < shiftStart) {
       setOffMachine(null);
       // Dropped on purpose — mark it so a peer tab doesn't hand it back.
-      offClosedRef.current = Math.max(offClosedRef.current, offMachine.start);
-      persistPrefs({ offMachine: null, offMachineClosed: offClosedRef.current });
+      // NO marker here. This span was DROPPED, not recorded — and the drop is a
+      // per-tab decision (each tab that restores a stale span drops it itself),
+      // so the marker buys nothing. Stamping it told a peer holding the SAME span
+      // LIVE that it was already logged: the operator tapped Off machine at
+      // 05:59, the 06:00 shift began, a second tab was opened, and the live span
+      // vanished unrecorded. A live span must always win over a stale drop.
+      persistPrefs({ offMachine: null });
     } else {
       const { restored, ...live } = offMachine;
       setOffMachine(live);
@@ -4154,15 +4208,45 @@ function RatesManager({ t, machines, rates, onChange }) {
   const [draft, setDraft] = useState({});
   useEffect(() => { setDraft({}); }, [rates]);
   const valueOf = (m) => (draft[m] !== undefined ? draft[m] : (rates?.[m] ?? ""));
-  const commit = (m) => {
-    const v = draft[m];
-    if (v === undefined) return;
-    const next = { ...(rates || {}) };
-    const n = Math.max(0, Number(v) || 0);
-    if (n > 0) next[m] = n; else delete next[m];
-    setDraft((d) => { const { [m]: _drop, ...rest } = d; return rest; });
-    if (n !== (rates?.[m] || 0)) onChange(next);
+  // Latest values for the tab-hide flush below, which runs from a listener that
+  // is installed once and would otherwise close over the first render's state.
+  const draftRef = useRef(draft); draftRef.current = draft;
+  const ratesRef = useRef(rates); ratesRef.current = rates;
+  const onChangeRef = useRef(onChange); onChangeRef.current = onChange;
+  // Commit the named fields in ONE write: committing them one at a time would
+  // build each update from the same `rates` snapshot, and the last write would
+  // drop the others.
+  const commitFields = (names) => {
+    const d = draftRef.current;
+    const pending = names.filter((m) => d[m] !== undefined);
+    if (!pending.length) return;
+    const cur = ratesRef.current || {};
+    const next = { ...cur };
+    let changed = false;
+    for (const m of pending) {
+      const n = Math.max(0, Number(d[m]) || 0);
+      if (n > 0) next[m] = n; else delete next[m];
+      if (n !== (cur[m] || 0)) changed = true;
+    }
+    setDraft((prev) => { const rest = { ...prev }; for (const m of pending) delete rest[m]; return rest; });
+    if (changed) onChangeRef.current(next);
   };
+  const commit = (m) => commitFields([m]);
+  // Commit-on-blur alone loses a number that was typed and never blurred: the box
+  // still shows it, so it LOOKS saved, but a backgrounded tab can be reclaimed at
+  // any moment and the edit is gone with no hint. Flush pending drafts on the
+  // last-chance signal instead — the same visibilitychange/pagehide pair the stop
+  // timer's autosave uses.
+  useEffect(() => {
+    const flush = () => commitFields(Object.keys(draftRef.current));
+    const onHide = () => { if (document.visibilityState === "hidden") flush(); };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", flush);
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div className={`${t.card} rounded-xl p-4`}>
       <h3 className="font-bold mb-1 flex items-center gap-2"><TrendingUp size={16} /> Machine output rates</h3>

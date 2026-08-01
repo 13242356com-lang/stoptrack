@@ -1057,12 +1057,23 @@ const api = {
         }
     },
     async saveStop(record) {
+        var _a, _b;
         const key = `stop:${record.id}`;
         try {
+            let toWrite = record;
+            try {
+                const prevRaw = await STORE.get(key, SHARED).catch(() => STORE.get(key));
+                const prev = prevRaw && prevRaw.value ? JSON.parse(prevRaw.value) : null;
+                if (prev && !prev.deleted) {
+                    toWrite = Object.assign(Object.assign({}, record), { start: Math.min(Number(prev.start) || record.start, record.start), end: Math.max(Number(prev.end) || 0, Number(record.end) || 0), duration: Math.max(Number(prev.duration) || 0, Number(record.duration) || 0), discarded: prev.discarded || record.discarded || false, discardReason: (_a = prev.discardReason) !== null && _a !== void 0 ? _a : record.discardReason, discardedAt: (_b = prev.discardedAt) !== null && _b !== void 0 ? _b : record.discardedAt });
+                }
+            }
+            catch (e) { }
+            record = toWrite;
             try {
                 await STORE.set(key, JSON.stringify(record), SHARED);
             }
-            catch (_a) {
+            catch (_c) {
                 await STORE.set(key, JSON.stringify(record));
             }
             const check = await STORE.get(key, SHARED).catch(() => STORE.get(key));
@@ -2209,9 +2220,9 @@ function App() {
             setShowAll(false);
         }
         const theirClosed = Number(p.offMachineClosed) || 0;
-        offClosedRef.current = Math.max(offClosedRef.current, theirClosed);
+        offClosedRef.current = theirClosed;
         const theirSpan = !!(p.offMachine && p.offMachine.start);
-        const peerClosedOurs = !!offMachine && !theirSpan && theirClosed >= offMachine.start;
+        const peerClosedOurs = !!offMachine && !theirSpan && theirClosed === offMachine.start;
         if (peerClosedOurs)
             setOffMachine(null);
         const lostSpan = !!offMachine && !theirSpan && !peerClosedOurs;
@@ -2265,10 +2276,14 @@ function App() {
                 reconcilePrefs();
             if (key === "config:lists" || key == null)
                 reconcileConfig();
+            if ((key === "inprogress:current" || key == null) && !inShell && e && e.newValue == null) {
+                setPendingStop(null);
+                setRecovered(null);
+            }
         };
         window.addEventListener("storage", onStorage);
         return () => window.removeEventListener("storage", onStorage);
-    }, [reconcilePrefs, reconcileConfig]);
+    }, [reconcilePrefs, reconcileConfig, inShell]);
     const downloadBackup = async () => {
         try {
             const data = await api.exportAll();
@@ -2331,7 +2346,7 @@ function App() {
             return;
         setSaving(true);
         setSaveError("");
-        const id = `${finished.start}-${Math.floor(Math.random() * 1e6)}`;
+        const id = `${finished.start}-${machineSlug(finished.machine || machine)}`;
         const record = {
             id,
             machine: finished.machine || machine,
@@ -2449,14 +2464,14 @@ function App() {
             return;
         offSavingRef.current = true;
         setOffMachine(null);
-        offClosedRef.current = Math.max(offClosedRef.current, rec.start);
+        offClosedRef.current = rec.start;
         persistPrefs({ offMachine: null, offMachineClosed: offClosedRef.current });
         const target = nextMachine || rec.machine;
         const end = Math.max(rec.start, endTs || Date.now());
         const duration = end - rec.start;
         if (duration >= 1000) {
             const record = {
-                id: `${rec.start}-${Math.floor(Math.random() * 1e6)}`,
+                id: `${rec.start}-${machineSlug(rec.machine)}`,
                 machine: rec.machine,
                 operator: rec.operator,
                 start: rec.start, end, duration,
@@ -2495,7 +2510,7 @@ function App() {
         setOffError("");
         const target = next || rec.machine;
         setMachine(target);
-        offClosedRef.current = Math.max(offClosedRef.current, rec.start);
+        offClosedRef.current = rec.start;
         persistPrefs({ offMachine: null, machine: target, offMachineClosed: offClosedRef.current });
         openSession(target);
     }, [offMachine, persistPrefs, openSession]);
@@ -2526,8 +2541,7 @@ function App() {
         offRestoreCheckedRef.current = true;
         if (offMachine.start < shiftStart) {
             setOffMachine(null);
-            offClosedRef.current = Math.max(offClosedRef.current, offMachine.start);
-            persistPrefs({ offMachine: null, offMachineClosed: offClosedRef.current });
+            persistPrefs({ offMachine: null });
         }
         else {
             const { restored } = offMachine, live = __rest(offMachine, ["restored"]);
@@ -3863,20 +3877,46 @@ function RatesManager({ t, machines, rates, onChange }) {
     const [draft, setDraft] = useState({});
     useEffect(() => { setDraft({}); }, [rates]);
     const valueOf = (m) => { var _a; return (draft[m] !== undefined ? draft[m] : ((_a = rates === null || rates === void 0 ? void 0 : rates[m]) !== null && _a !== void 0 ? _a : "")); };
-    const commit = (m) => {
-        const v = draft[m];
-        if (v === undefined)
+    const draftRef = useRef(draft);
+    draftRef.current = draft;
+    const ratesRef = useRef(rates);
+    ratesRef.current = rates;
+    const onChangeRef = useRef(onChange);
+    onChangeRef.current = onChange;
+    const commitFields = (names) => {
+        const d = draftRef.current;
+        const pending = names.filter((m) => d[m] !== undefined);
+        if (!pending.length)
             return;
-        const next = Object.assign({}, (rates || {}));
-        const n = Math.max(0, Number(v) || 0);
-        if (n > 0)
-            next[m] = n;
-        else
-            delete next[m];
-        setDraft((d) => { const _a = d, _b = m, _drop = _a[_b], rest = __rest(_a, [typeof _b === "symbol" ? _b : _b + ""]); return rest; });
-        if (n !== ((rates === null || rates === void 0 ? void 0 : rates[m]) || 0))
-            onChange(next);
+        const cur = ratesRef.current || {};
+        const next = Object.assign({}, cur);
+        let changed = false;
+        for (const m of pending) {
+            const n = Math.max(0, Number(d[m]) || 0);
+            if (n > 0)
+                next[m] = n;
+            else
+                delete next[m];
+            if (n !== (cur[m] || 0))
+                changed = true;
+        }
+        setDraft((prev) => { const rest = Object.assign({}, prev); for (const m of pending)
+            delete rest[m]; return rest; });
+        if (changed)
+            onChangeRef.current(next);
     };
+    const commit = (m) => commitFields([m]);
+    useEffect(() => {
+        const flush = () => commitFields(Object.keys(draftRef.current));
+        const onHide = () => { if (document.visibilityState === "hidden")
+            flush(); };
+        document.addEventListener("visibilitychange", onHide);
+        window.addEventListener("pagehide", flush);
+        return () => {
+            document.removeEventListener("visibilitychange", onHide);
+            window.removeEventListener("pagehide", flush);
+        };
+    }, []);
     return (React.createElement("div", { className: `${t.card} rounded-xl p-4` },
         React.createElement("h3", { className: "font-bold mb-1 flex items-center gap-2" },
             React.createElement(TrendingUp, { size: 16 }),
