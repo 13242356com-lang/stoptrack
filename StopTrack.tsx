@@ -998,7 +998,12 @@ const api = {
       try {
         const prevRaw = await STORE.get(key, SHARED).catch(() => STORE.get(key));
         const prev = prevRaw && prevRaw.value ? JSON.parse(prevRaw.value) : null;
-        if (prev && !prev.deleted) {
+        // A tombstone has no measurement to widen. Merging one produced a
+        // malformed record ({deleted:true, start:null} carrying the resurrected
+        // end/duration) that then synced to every peer — restoring a backup that
+        // contained a delete was enough to create it. Either side being a
+        // tombstone means write the incoming record verbatim.
+        if (prev && !prev.deleted && !record.deleted) {
           toWrite = {
             ...record,
             start: Math.min(Number(prev.start) || record.start, record.start),
@@ -2824,21 +2829,28 @@ export default function App() {
 
     let overall;
     if (hasSessions) {
-      let planned = 0, down = 0, units = 0, scrap = 0, theoretical = 0;
+      let planned = 0, down = 0, units = 0, scrap = 0, theoretical = 0, ratedUnits = 0;
       for (const r of rows) {
         const plannedM = r.mannedMs; // manned time is the plan for a roamer
         const downM = Math.min(r.downtimeMs, plannedM || r.downtimeMs);
         planned += plannedM; down += downM; units += r.units; scrap += r.scrap;
         const rate = rates?.[r.machine];
-        if (rate && plannedM > 0) theoretical += rate * (Math.max(0, plannedM - downM) / HOUR_MS);
+        // Same rule as the supervisor's machineOEE: units and capacity must come
+        // from the same machines, or an unrated machine's output inflates P.
+        // This figure goes out on the shift handout, so it must not overstate.
+        if (rate && plannedM > 0) {
+          theoretical += rate * (Math.max(0, plannedM - downM) / HOUR_MS);
+          ratedUnits += r.units;
+        }
         r.oee = computeOEE({ plannedMs: plannedM, downtimeMs: r.downtimeMs, unitsProduced: r.units, scrapCount: r.scrap, ratePerHour: rate });
       }
       overall = computeOEE({ plannedMs: planned, downtimeMs: down, unitsProduced: units, scrapCount: scrap, ratePerHour: 0 });
       if (theoretical > 0) {
-        overall.p = Math.min(1, Math.max(0, units / theoretical));
+        overall.p = Math.min(1, Math.max(0, ratedUnits / theoretical));
         const fs = [overall.a, overall.p, overall.q].filter((f) => f != null);
         overall.oee = fs.length ? fs.reduce((x, y) => x * y, 1) : null;
-        overall.partial = overall.a == null || overall.p == null || overall.q == null;
+        overall.partial = overall.a == null || overall.p == null || overall.q == null
+          || ratedUnits !== units;
       }
     } else {
       // No presence data (old records / name not set) — fall back to the
@@ -3584,15 +3596,6 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
   }, [stops, filterMachine]);
   const maxTrend = Math.max(1, ...trend.map((d) => d.ms));
 
-  const uptime = useMemo(() => {
-    const shiftMs = shiftLengthMs(shift);
-    if (!shiftMs) return null;
-    const dayset = new Set(active.map((s) => new Date(s.start).toDateString()));
-    const days = Math.max(1, dayset.size);
-    const planned = shiftMs * days;
-    const up = Math.max(0, planned - stats.totalDowntime);
-    return Math.min(100, Math.max(0, (up / planned) * 100));
-  }, [active, shift, stats.totalDowntime]);
 
   const liveCount = useMemo(() => {
     const cutoff = Date.now() - 60 * 60 * 1000;
@@ -3606,14 +3609,22 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
   const machineOEE = useMemo(() => {
     const shiftMs = shiftLengthMs(shift);
     const nowTs = Date.now();
+    // The machine filter has to reach EVERY input, not just downtime. It used to
+    // scope `active` only, so a filtered-out machine kept its planned time and
+    // production in the aggregate while its downtime was gone — its availability
+    // became 100% and it dragged the overall UP. Filtering to the worst machine
+    // reported a better OEE than the unfiltered view, and still listed the
+    // machines you filtered away at 100%.
+    const inScope = (m) => filterMachine === "All" || m === filterMachine;
     const prodInRange = production.filter((p) => {
       const ts = p.loggedAt ?? p.shiftStart ?? 0;
-      return ts >= rangeBounds[0] && ts <= rangeBounds[1];
+      return inScope(p.machine) && ts >= rangeBounds[0] && ts <= rangeBounds[1];
     });
     // Manned time per machine (any operator) from sessions overlapping the range
     // — shown as coverage context next to the planned-time OEE.
     const mannedByMachine = {};
     (sessions || []).forEach((s) => {
+      if (!inScope(s.machine)) return;
       const end = Math.min(s.end ?? nowTs, rangeBounds[1] === Infinity ? nowTs : rangeBounds[1]);
       const start = Math.max(s.start, rangeBounds[0]);
       if (end > start) mannedByMachine[s.machine] = (mannedByMachine[s.machine] || 0) + (end - start);
@@ -3621,8 +3632,9 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
     const downByMachine = {};
     active.forEach((s) => { downByMachine[s.machine] = (downByMachine[s.machine] || 0) + s.duration; });
     const rows = [];
-    let sum = { planned: 0, down: 0, units: 0, scrap: 0, theoretical: 0 };
+    let sum = { planned: 0, down: 0, units: 0, scrap: 0, theoretical: 0, ratedUnits: 0 };
     for (const m of machines) {
+      if (!inScope(m)) continue;
       const prod = prodInRange.filter((p) => p.machine === m);
       const units = prod.reduce((a, p) => a + (p.unitsProduced || 0), 0);
       const scrap = prod.reduce((a, p) => a + (p.scrapCount || 0), 0);
@@ -3637,7 +3649,13 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
       const oee = computeOEE({ plannedMs, downtimeMs: down, unitsProduced: units, scrapCount: scrap, ratePerHour: rates?.[m] });
       rows.push({ machine: m, units, scrap, mannedMs: manned, plannedMs, ...oee });
       sum.planned += plannedMs; sum.down += down; sum.units += units; sum.scrap += scrap;
-      if (rates?.[m]) sum.theoretical += (rates[m] || 0) * (Math.max(0, plannedMs - down) / HOUR_MS);
+      // Performance is units ÷ capacity, so BOTH sides must come from the same
+      // machines. Counting an unrated machine's units against only the rated
+      // machines' capacity reported 100% for a line running at half speed.
+      if (rates?.[m]) {
+        sum.theoretical += (rates[m] || 0) * (Math.max(0, plannedMs - down) / HOUR_MS);
+        sum.ratedUnits += units;
+      }
     }
     // Overall: aggregate factors over everything that reported.
     const overall = computeOEE({
@@ -3646,14 +3664,32 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
       ratePerHour: 0, // performance recomputed below from the summed theoretical
     });
     if (sum.theoretical > 0) {
-      overall.p = Math.min(1, Math.max(0, sum.units / sum.theoretical));
+      overall.p = Math.min(1, Math.max(0, sum.ratedUnits / sum.theoretical));
       const fs = [overall.a, overall.p, overall.q].filter((f) => f != null);
       overall.oee = fs.length ? fs.reduce((x, y) => x * y, 1) : null;
-      overall.partial = overall.a == null || overall.p == null || overall.q == null;
+      // Still PARTIAL when some machine that reported has no rate — its output is
+      // outside the performance figure, so the number is not the whole line.
+      // (This used to clear the badge unconditionally, hiding exactly that.)
+      overall.partial = overall.a == null || overall.p == null || overall.q == null
+        || sum.ratedUnits !== sum.units;
     }
     rows.sort((a, b) => (a.oee ?? 2) - (b.oee ?? 2)); // worst first
     return { rows, overall };
-  }, [active, production, sessions, machines, rates, shift, rangeBounds]);
+  }, [active, production, sessions, machines, rates, shift, rangeBounds, filterMachine]);
+
+  // ONE availability number in the app. This used to divide every machine's
+  // downtime by a SINGLE machine's shift (planned = shiftMs × days, no machine
+  // count), so with 3 machines each down 2h the card read 25% while the OEE
+  // panel on the same screen read 75% for the same records — and with 5 machines
+  // it read 0.0% for a line running 92.5% of the time. machineOEE already sums
+  // planned time per machine correctly and honours the machine filter, so read
+  // the availability from there instead of computing a second, worse one.
+  // (Not the documented "uptime assumes the configured shift length" caveat —
+  // that still applies, and is what makes this an estimate rather than truth.)
+  const uptime = useMemo(() => {
+    const a = machineOEE.overall?.a;
+    return a == null ? null : Math.min(100, Math.max(0, a * 100));
+  }, [machineOEE]);
 
   // Downtime grouped by operator — who was fighting the most downtime in range.
   const byOperator = useMemo(() => {

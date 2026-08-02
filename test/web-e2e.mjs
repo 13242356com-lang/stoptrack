@@ -12,7 +12,7 @@
 // Run: node test/web-e2e.mjs   (needs `npm install` first for playwright + react)
 
 import { chromium } from "playwright";
-import { readFileSync, existsSync, readdirSync, mkdtempSync, rmSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, mkdtempSync, rmSync } from "fs";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "url";
@@ -1999,6 +1999,139 @@ async function main() {
   assert(skewSpan && skewSpan.start, `the live span must still be in storage, got ${JSON.stringify(skewSpan)}`);
   await ctxSkew.close();
 
+  // ---- the supervisor's numbers ---------------------------------------------
+  // There was NO supervisor coverage at all, which is why three wrong numbers
+  // shipped with every gate green: the Uptime card divided every machine's
+  // downtime by ONE machine's shift (3 machines x 2h read 25% while the OEE
+  // panel read 75% for the same records), the OEE panel ignored the machine
+  // filter (filtering to the worst machine RAISED overall OEE), and overall
+  // Performance divided all-machine units by rated-machine capacity (100% for a
+  // line running at half speed). Numbers below are hand-computed.
+  //
+  // Seed: an 8h shift (06:00-14:00), 3 machines, all reporting today.
+  //   Line 1  2h down, rate 100/h, 400 units   Line 2  2h down, no rate, 5000 units
+  //   Line 3  2h down, no rate, no units
+  // Availability = (3x8h - 6h) / 3x8h = 18/24 = 75.0%
+  // Performance  = rated units / rated capacity = 400 / (100 x 6h) = 66.7%
+  //   (Line 2's 5000 units must NOT count: no rate, so no capacity either)
+  const SUP_SHIFT_H = 8;
+  const supSeed = () => {
+    // Seed ONCE. addInitScript runs on every navigation, and the restore flow
+    // reloads the page — an unguarded seed would rewrite the very record the
+    // restore just tombstoned, and the test would "fail" on its own fixture.
+    if (localStorage.getItem("config:lists")) return;
+    const now = Date.now();
+    const startOfDay = new Date(now); startOfDay.setHours(6, 0, 0, 0);
+    const shiftStart = startOfDay.getTime();
+    const hhmm = (ms) => {
+      const d = new Date(ms);
+      return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    };
+    localStorage.setItem("config:lists", JSON.stringify({
+      machines: ["Line 1", "Line 2", "Line 3"], reasons: ["Cleaning"], quickStops: [],
+      shifts: [{ id: "s1", name: "Day", start: hhmm(shiftStart), end: hhmm(shiftStart + 8 * 3600e3), goals: {} }],
+      rates: { "Line 1": 100 }, handoverEmails: [], updatedAt: now,
+    }));
+    localStorage.setItem("config:prefs", JSON.stringify({ operator: "Bob", setupLocked: true, machine: "Line 1" }));
+    const twoH = 2 * 3600e3;
+    ["Line 1", "Line 2", "Line 3"].forEach((m, i) => {
+      const start = shiftStart + (i + 1) * 600e3;
+      localStorage.setItem(`stop:sup-${i}`, JSON.stringify({
+        id: `sup-${i}`, machine: m, operator: "Bob", start, end: start + twoH, duration: twoH,
+        reason: "Cleaning", notes: "", discarded: false, loggedAt: start + twoH, updatedAt: start + twoH,
+      }));
+    });
+    [["Line 1", 400], ["Line 2", 5000]].forEach(([m, units], i) => {
+      localStorage.setItem(`prod:p${i}`, JSON.stringify({
+        id: `p${i}`, machine: m, operator: "Bob", shiftStart, unitsProduced: units, scrapCount: 0,
+        loggedAt: shiftStart + 3600e3, updatedAt: shiftStart + 3600e3,
+      }));
+    });
+  };
+  const { ctx: supCtx, page: sup } = await newApp(browser, { seed: supSeed });
+  await sup.waitForSelector("text=Start Stop", { timeout: 20000 });
+  await sup.click('button:has-text("Supervisor")');
+  await sup.click('button:has-text("Analytics")');   // the OEE panel lives here, not on Log
+  await sup.waitForSelector("text=Downtime by reason", { timeout: 10000 });
+
+  const cardValue = async (label) => sup.evaluate((l) => {
+    const card = [...document.querySelectorAll("div")].find((d) => {
+      const t = (d.textContent || "").trim();
+      return t.startsWith(l) && d.querySelectorAll("div").length <= 3 && t.length < 40;
+    });
+    return card ? card.textContent.replace(l, "").trim() : null;
+  }, label);
+
+  const upAll = await cardValue("Uptime");
+  assert(upAll === "75.0%",
+    `Uptime must divide by ALL reporting machines' planned time — expected 75.0%, card read ${upAll}`);
+
+  const oeeText = await sup.evaluate(() => {
+    const el = [...document.querySelectorAll("div")].find((d) => /^A \d/.test((d.textContent || "").trim()));
+    return el ? el.textContent.trim() : null;
+  });
+  assert(oeeText && oeeText.includes("A 75.0%"),
+    `the OEE panel's availability must agree with the Uptime card, panel read "${oeeText}"`);
+  assert(oeeText && oeeText.includes("P 66.7%"),
+    `Performance must divide RATED units by rated capacity (400 / 600), panel read "${oeeText}"`);
+  const partialBadge = await sup.locator("text=OEE (partial)").count();
+  assert(partialBadge === 1,
+    "with an unrated machine reporting output, the OEE must still be badged (partial) — its units are outside P");
+
+  // Now the filter. Line 1 alone: 2h down of 8h planned = 75.0% availability, and
+  // the panel must stop listing the machines that were filtered away.
+  // Slice the OEE panel out of the page text between its own headings. Matching
+  // on a row element is brittle — a row's text runs well past any length guard,
+  // which is how an earlier version of this assertion passed against the BROKEN
+  // build (it silently matched nothing either way).
+  const oeePanelText = async () => sup.evaluate(() => {
+    const all = document.body.innerText;
+    const from = all.indexOf("Availability × Performance × Quality");
+    const to = all.indexOf("Downtime trend", from);
+    return from < 0 ? "" : all.slice(from, to < 0 ? undefined : to);
+  });
+  const panelAll = await oeePanelText();
+  assert(/Line 2/.test(panelAll),
+    `precondition: unfiltered, the OEE panel must list Line 2 — panel was "${panelAll.slice(0, 200)}"`);
+  await sup.selectOption("select", "Line 1");
+  await sup.waitForTimeout(400);
+  const panelFiltered = await oeePanelText();
+  assert(!/Line 2|Line 3/.test(panelFiltered),
+    `filtering to Line 1 must drop Line 2/Line 3 from the OEE panel — still shown: "${panelFiltered.slice(0, 300)}"`);
+  const upFiltered = await cardValue("Uptime");
+  assert(upFiltered === "75.0%",
+    `filtering to one machine must not change ITS availability — expected 75.0%, card read ${upFiltered}`);
+
+  // Restoring a backup that carries a DELETE TOMBSTONE must write it verbatim.
+  // saveStop's never-shorten merge widens a measurement, but a tombstone has no
+  // measurement: merging one produced {deleted:true, start:null} still carrying
+  // the resurrected end/duration, and that malformed record then synced to every
+  // peer. importAll routes each restored record through saveStop, so this is the
+  // path that produced it.
+  const backup = {
+    app: "stoptrack", schema: 1,
+    stops: [{ id: "sup-0", deleted: true, updatedAt: Date.now() + 60000, deletedAt: Date.now() + 60000 }],
+  };
+  const tombDir = mkdtempSync(path.join(tmpdir(), "stoptrack-tomb-"));
+  const tombFile = path.join(tombDir, "tomb-backup.json");
+  writeFileSync(tombFile, JSON.stringify(backup), "utf8");
+  await sup.click('button:has-text("Settings")');
+  await sup.waitForSelector('button:has-text("Restore from backup")', { timeout: 5000 });
+  await sup.setInputFiles('input[type="file"]', tombFile);
+  await until(sup, () => {
+    try { return (JSON.parse(localStorage.getItem("stop:sup-0") || "{}")).deleted === true; } catch { return false; }
+  }, 8000);
+  const tomb = await sup.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem("stop:sup-0") || "null"); } catch { return null; }
+  });
+  assert(tomb && tomb.deleted === true, `the restored tombstone must stick, got ${JSON.stringify(tomb)}`);
+  assert(tomb.start == null || Number.isFinite(tomb.start),
+    `a tombstone must not carry a NaN/null start forged by the merge, got start=${JSON.stringify(tomb.start)}`);
+  assert(tomb.duration == null && tomb.end == null,
+    `a tombstone must not resurrect the deleted measurement, got ${JSON.stringify(tomb)}`);
+  await supCtx.close();
+  rmSync(tombDir, { recursive: true, force: true });
+
   await browser.close();
   console.log("web-e2e: PASS — stop recorded immediately (operator=Alice, reason=" + chosenReason + ", duration=" + rec.duration + "ms)");
   console.log("web-e2e: PASS — shift window is clock-derived (7h/9h/8h incl. overnight); Show all reveals stops without inflating the stats");
@@ -2016,6 +2149,7 @@ async function main() {
   console.log("web-e2e: PASS — a manual report that hit full storage can be retried once storage recovers (the latch releases)");
   console.log(`web-e2e: PASS — two tabs documenting ONE parked stop record it once (${dupCounted}ms over a ${dupWindow}ms window), the peer's card clears, and a late write can't shorten it`);
   console.log("web-e2e: PASS — a live off-machine span outranks a peer's stale-span drop and a future-dated marker (no silently unlogged break)");
+  console.log("web-e2e: PASS — supervisor numbers agree: Uptime 75.0% == OEE availability, P counts only rated machines (66.7%), badged partial, and the machine filter reaches the OEE panel");
 }
 
 main().catch((e) => { console.error("web-e2e: FAIL —", e.message); process.exit(1); });
