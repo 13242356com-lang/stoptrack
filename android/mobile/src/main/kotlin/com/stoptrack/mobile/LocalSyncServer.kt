@@ -114,11 +114,22 @@ class LocalSyncServer(
 
     // --- body / response helpers ---------------------------------------------
 
+    /**
+     * NanoHTTPD hands a POST body back inline as `postData`, but a **PUT** body is
+     * spooled to a temp FILE and `files["content"]` holds its PATH. Reading only
+     * `postData` meant every `PUT /config` parsed as null: the supervisor renamed
+     * a machine in the web app, the bridge answered `{ok:true}` and even logged
+     * "config updated from web app", and nothing was stored. Silent, and it looked
+     * like a success on both sides.
+     */
     private fun readJson(session: IHTTPSession): JsonObject? {
         val files = HashMap<String, String>()
         return try {
             session.parseBody(files)
-            val raw = files["postData"] ?: return null
+            val raw = files["postData"]
+                ?: files["content"]?.let { p -> runCatching { java.io.File(p).readText() }.getOrNull() }
+                ?: return null
+            if (raw.isBlank()) return null
             StopTrackJson.parseToJsonElement(raw).jsonObject
         } catch (e: Exception) {
             null

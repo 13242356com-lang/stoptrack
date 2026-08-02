@@ -150,11 +150,18 @@ class QuickStopController(
         else -> start()
     }
 
-    /** Restore a running stop after a service restart. */
+    /** Restore a running stop after a service restart.
+     *
+     *  Goes through [Timer.restore], which drops the time the process was dead.
+     *  Resuming the saved state verbatim counted it: a phone that died at 10:00
+     *  mid-stop and was reopened at 12:30 showed — and would have recorded —
+     *  2.5 hours of downtime the machine never had. */
     fun restore(saved: TimerState?) {
-        if (saved != null && saved.active) {
-            state = saved
-            if (machine.isBlank()) machine = saved.machine
+        val revived = Timer.restore(saved, now())
+        if (revived != null && revived.active) {
+            state = revived
+            if (machine.isBlank()) machine = revived.machine
+            persist() // re-stamp immediately, so a second kill measures from here
             onChanged()
         }
     }
@@ -167,9 +174,17 @@ class QuickStopController(
         }
     }
 
+    /** Re-stamp the persisted state while a stop runs, so a kill costs at most one
+     *  autosave interval of counted time rather than everything since Start. */
+    @Synchronized
+    fun autosave() { if (state.active) persist() }
+
     private fun persist() {
+        // Stamp every write with `now`. That stamp is the last moment this process
+        // is known to have been alive, and it is what lets restore() tell a live
+        // stop from one that spent the night in a dead phone.
         val inProg = if (state.active)
-            StopTrackJson.encodeToString(TimerState.serializer(), state) else ""
+            StopTrackJson.encodeToString(TimerState.serializer(), Timer.stamp(state, now())) else ""
         val pend = pending?.let { StopTrackJson.encodeToString(FinishedStop.serializer(), it) } ?: ""
         scope.launch { prefs.update(inProgress = inProg, pendingStop = pend, lastMachine = machine) }
     }

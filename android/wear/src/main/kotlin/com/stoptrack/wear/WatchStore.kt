@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.stoptrack.shared.FinishedStop
 import com.stoptrack.shared.StopRecord
 import com.stoptrack.shared.StopTrackJson
 import com.stoptrack.shared.TimerState
@@ -33,6 +34,7 @@ class WatchStore(private val context: Context) {
         val CONFIG = stringPreferencesKey("config_json")
         val OUTBOX = stringPreferencesKey("outbox_json")
         val INPROGRESS = stringPreferencesKey("inprogress_json")
+        val PENDING_STOP = stringPreferencesKey("pending_stop_json")
         val SERVER_URL = stringPreferencesKey("server_url")
         val SERVER_TOKEN = stringPreferencesKey("server_token")
     }
@@ -79,6 +81,21 @@ class WatchStore(private val context: Context) {
         context.dataStore.edit { prefs ->
             if (state == null || !state.active) prefs.remove(Keys.INPROGRESS)
             else prefs[Keys.INPROGRESS] = StopTrackJson.encodeToString(TimerState.serializer(), state)
+        }
+    }
+
+    /** A stop that was ENDED but not yet documented, mirroring the web app's
+     *  `inprogress:current` with `ended: true` and the phone's `Prefs.pendingStop`.
+     *  Wear OS reclaims a backgrounded app aggressively, so without this the
+     *  operator lowering their wrist on the reason screen lost the measurement. */
+    val pendingStop: Flow<FinishedStop?> = context.dataStore.data.map { prefs ->
+        prefs[Keys.PENDING_STOP]?.let { runCatching { StopTrackJson.decodeFromString<FinishedStop>(it) }.getOrNull() }
+    }
+
+    suspend fun savePendingStop(stop: FinishedStop?) {
+        context.dataStore.edit { prefs ->
+            if (stop == null) prefs.remove(Keys.PENDING_STOP)
+            else prefs[Keys.PENDING_STOP] = StopTrackJson.encodeToString(FinishedStop.serializer(), stop)
         }
     }
 

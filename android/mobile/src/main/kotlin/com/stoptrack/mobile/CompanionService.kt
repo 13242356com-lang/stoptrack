@@ -155,9 +155,17 @@ class CompanionService : LifecycleService() {
         if (controller.state.active) {
             if (tickJob == null) {
                 tickJob = lifecycleScope.launch {
+                    var ticks = 0
                     while (isActive && controller.state.active) {
                         updateNotification()
                         overlay?.update(controller.state)
+                        // Re-stamp the saved state periodically. The stamp is how
+                        // restore() knows the last moment this process was alive,
+                        // so a kill can cost at most this interval of real stop
+                        // time — persisting only on transitions would leave the
+                        // stamp at the Start tap and throw away every counted
+                        // minute after it.
+                        if (++ticks % AUTOSAVE_TICKS == 0) controller.autosave()
                         delay(1000)
                     }
                     tickJob = null
@@ -299,6 +307,8 @@ class CompanionService : LifecycleService() {
         private const val CHANNEL_ID = "stoptrack_bridge"
         private const val NOTIF_ID = 1001
         private const val FORWARD_INTERVAL_MS = 25_000L
+        /** Re-stamp the running timer every N one-second ticks (see onTimerChanged). */
+        private const val AUTOSAVE_TICKS = 20
         private const val NanoHttpTimeoutMs = 5000
 
         const val ACTION_START = "com.stoptrack.mobile.START"

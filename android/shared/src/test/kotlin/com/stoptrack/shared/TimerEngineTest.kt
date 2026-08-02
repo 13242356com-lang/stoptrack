@@ -244,6 +244,66 @@ class TimerEngineTest {
         assertTrue(finished.durationMs >= 0L)
     }
 
+    // ---- restore after the process died ---------------------------------------
+
+    @Test
+    fun `restoring a running stop does not count the time the process was dead`() {
+        // Running since t0, alive until t0+5min, phone dead until t0+2h30.
+        val saved = Timer.stamp(Timer.start("Line 1", t0), at(300))
+        val restored = Timer.restore(saved, at(9000))!!
+
+        assertEquals(300_000L, restored.accumulatedMs, "only the 5 min it was actually alive is banked")
+        assertEquals(at(9000), restored.segStartMs, "the segment reopens now, not before the outage")
+        assertEquals(300_000L, restored.elapsed(at(9000)), "no dead time on the clock at the moment of restore")
+        assertEquals(360_000L, restored.elapsed(at(9060)), "and it keeps counting from there")
+        assertEquals(t0, restored.startTs, "the stop still began when it began")
+        assertEquals("Line 1", restored.machine)
+    }
+
+    @Test
+    fun `the dead gap never reaches a recorded stop`() {
+        val saved = Timer.stamp(Timer.start("Line 1", t0), at(300))
+        val restored = Timer.restore(saved, at(9000))!!
+        val finished = Timer.stop(restored, at(9060))
+
+        assertEquals(360_000L, finished.durationMs,
+            "5 min before the phone died + 1 min after it came back — not the 2h31m of wall clock")
+        assertTrue(finished.durationMs < finished.end - finished.start,
+            "a restored stop's duration must be LESS than its span; equality would mean the outage was counted")
+    }
+
+    @Test
+    fun `a paused stop restores unchanged - it was accruing nothing`() {
+        val paused = Timer.stamp(Timer.pause(Timer.start("Line 1", t0), at(120)), at(300))
+        val restored = Timer.restore(paused, at(9000))!!
+
+        assertEquals(120_000L, restored.accumulatedMs)
+        assertTrue(restored.paused)
+        assertEquals(120_000L, restored.elapsed(at(9000)), "still frozen at what it had banked")
+    }
+
+    @Test
+    fun `a state with no savedAt is left alone rather than guessed at`() {
+        val legacy = Timer.start("Line 1", t0) // never stamped
+        assertSame(legacy, Timer.restore(legacy, at(9000)))
+    }
+
+    @Test
+    fun `an idle or null state restores to itself`() {
+        assertSame(Timer.EMPTY, Timer.restore(Timer.EMPTY, at(10)))
+        assertEquals(null, Timer.restore(null, at(10)))
+    }
+
+    @Test
+    fun `a savedAt older than the segment start cannot bank negative time`() {
+        // Clock moved backwards between the write and the read.
+        val odd = Timer.start("Line 1", t0).copy(savedAtMs = at(-600))
+        val restored = Timer.restore(odd, at(60))!!
+
+        assertTrue(restored.accumulatedMs >= 0L, "banked time must never go negative, got ${restored.accumulatedMs}")
+        assertEquals(0L, restored.accumulatedMs)
+    }
+
     // ---- purity --------------------------------------------------------------
 
     @Test

@@ -88,6 +88,21 @@ class OperatorViewModel(app: Application) : AndroidViewModel(app) {
                 timer = restore(saved)
                 _ui.update { it.copy(phase = if (timer.paused) Phase.PAUSED else Phase.RUNNING, elapsedMs = timer.elapsed(now())) }
                 if (!timer.paused) startTicking()
+            } else {
+                // No live timer, but a stop may have been ended and never
+                // documented. Put the operator straight back on the reason
+                // screen rather than silently dropping the minutes.
+                val parked = store.pendingStop.first()
+                if (parked != null) {
+                    _ui.update {
+                        it.copy(
+                            phase = Phase.DOCUMENTING,
+                            pendingStop = parked,
+                            reason = it.config.reasons.firstOrNull().orEmpty(),
+                            elapsedMs = parked.durationMs,
+                        )
+                    }
+                }
             }
         }
 
@@ -159,7 +174,14 @@ class OperatorViewModel(app: Application) : AndroidViewModel(app) {
         val finished = Timer.stop(timer, now())
         timer = Timer.EMPTY
         stopTicking()
-        viewModelScope.launch { store.saveInProgress(null) }
+        // Park it BEFORE showing the reason screen. Wear OS reclaims a
+        // backgrounded app aggressively — lower your wrist on the DOCUMENTING
+        // screen and the measurement used to be gone with no trace. Same hole
+        // the web app closed with `inprogress:current` + ended:true.
+        viewModelScope.launch {
+            store.saveInProgress(null)
+            store.savePendingStop(finished)
+        }
         val reasons = _ui.value.config.reasons
         _ui.update {
             it.copy(
@@ -183,6 +205,7 @@ class OperatorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun onDiscardPending() {
         _ui.update { it.copy(phase = Phase.IDLE, pendingStop = null) }
+        viewModelScope.launch { store.savePendingStop(null) } // deliberately dropped
     }
 
     fun dismissSaved() {
@@ -202,6 +225,7 @@ class OperatorViewModel(app: Application) : AndroidViewModel(app) {
         )
         viewModelScope.launch {
             store.addToOutbox(record)       // durable first — never lose a stop
+            store.savePendingStop(null)     // documented: the parked copy has done its job
             serverSync()                    // primary: straight to the server
             phone.sendStop(record)          // secondary: paired phone, best-effort
         }

@@ -22,6 +22,12 @@ data class TimerState(
     val segStartMs: Long? = null,
     /** machine pinned at Start. */
     val machine: String = "",
+    /**
+     * When this state was last written to storage — i.e. the last moment the
+     * process is known to have been alive. Mirrors the web autosave's `savedAt`.
+     * Null on a state that has never been persisted.
+     */
+    val savedAtMs: Long? = null,
 ) {
     val active: Boolean get() = running || paused
 
@@ -59,6 +65,35 @@ object Timer {
 
     fun resume(s: TimerState, now: Long): TimerState =
         if (s.paused) s.copy(paused = false, segStartMs = now) else s
+
+    /**
+     * Restore a persisted state after the process was killed (service death,
+     * battery death, reboot).
+     *
+     * A running state must NOT be resumed verbatim: its open segment started
+     * before the process died, so every minute the phone was off would be
+     * counted as downtime. An operator whose phone dies at 10:00 mid-stop and
+     * reopens the app at 12:30 would find 2.5 hours of downtime the machine
+     * never had — the app inventing minutes, which is the one thing it must
+     * never do.
+     *
+     * So: bank what was genuinely counted up to [TimerState.savedAtMs] (the last
+     * moment the process is known to have been alive) and reopen the segment at
+     * [now]. The gap is excluded, which under-counts rather than fabricates.
+     * A PAUSED state accrues nothing, so it restores unchanged, and a state with
+     * no savedAtMs (written before this existed) is left alone rather than
+     * guessed at.
+     */
+    fun restore(saved: TimerState?, now: Long): TimerState? {
+        if (saved == null || !saved.active) return saved
+        val savedAt = saved.savedAtMs ?: return saved
+        if (saved.paused || saved.segStartMs == null) return saved
+        val banked = saved.elapsed(savedAt.coerceAtLeast(saved.segStartMs))
+        return saved.copy(accumulatedMs = banked, segStartMs = now, savedAtMs = now)
+    }
+
+    /** Stamp a state for persistence, so [restore] can tell how long the process was dead. */
+    fun stamp(s: TimerState, now: Long): TimerState = s.copy(savedAtMs = now)
 
     /** Returns the finished stop; caller should then reset to [EMPTY]. */
     fun stop(s: TimerState, now: Long): FinishedStop {
