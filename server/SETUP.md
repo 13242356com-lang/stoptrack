@@ -112,6 +112,17 @@ and a **domain name** added to it (any cheap one, ~$10/year — e.g.
 
 ---
 
+> **If you use the tunnel, set `TRUST_PROXY=1`.** The server's rate limits are
+> per client IP. By default it uses the socket address, because
+> `X-Forwarded-For` is client-supplied and anyone can rotate it to get a fresh
+> bucket per request. Behind the Cloudflare tunnel every request arrives from
+> the connector's socket, so *without* `TRUST_PROXY=1` all your devices share
+> one bucket; *with* it, the tunnel's `CF-Connecting-IP` is trusted and each
+> device is limited separately. Only turn it on when something you control sets
+> that header — never on a server reachable directly from the LAN.
+
+---
+
 ## Part B2 — Make it private (recommended if you use the tunnel)
 
 With Part B, the token is the only thing standing between the internet and your

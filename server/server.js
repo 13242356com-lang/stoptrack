@@ -37,8 +37,17 @@ const PUBLIC_URL = (process.env.PUBLIC_URL || "").trim().replace(/\/$/, "");
 const VERBOSE = /^(1|true|yes|on)$/i.test(process.env.LOG_VERBOSE || "");
 function stamp() { return new Date().toTimeString().slice(0, 8); } // HH:MM:SS
 function log(msg) { console.log(`[${stamp()}] ${msg}`); }
+// Forwarding headers are CLIENT-SUPPLIED, so trusting them by default made both
+// rate limiters useless: one `X-Forwarded-For: 10.1.0.<n>` per request gave every
+// attempt its own bucket, and 60 wrong-token requests all returned 401 instead of
+// tripping the limiter at 20. Only honour them when TRUST_PROXY says something in
+// front of us actually sets them (the Cloudflare tunnel in SETUP.md does).
+const TRUST_PROXY = /^(1|true|yes|on)$/i.test(process.env.TRUST_PROXY || "");
 function clientIp(req) {
-  const raw = req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || (req.socket && req.socket.remoteAddress) || "?";
+  const direct = (req.socket && req.socket.remoteAddress) || "?";
+  const raw = TRUST_PROXY
+    ? (req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || direct)
+    : direct;
   return String(raw).split(",")[0].trim().replace(/^::ffff:/, "");
 }
 
@@ -75,7 +84,17 @@ for (const [legacy, target] of [
 // every device keeps working. Override with FACTORY_TOKEN if you prefer to pick
 // your own. The token is printed at startup so you can copy it to devices.
 function resolveToken() {
-  if (process.env.FACTORY_TOKEN) return process.env.FACTORY_TOKEN.trim();
+  // A BLANK FACTORY_TOKEN must not disable auth. `FACTORY_TOKEN=" "` (or an
+  // empty value from a .env / systemd unit / docker-compose line) used to
+  // resolve to "" — and an empty TOKEN means every request is authorised, so
+  // the whole downtime history was readable and writable by anyone on the
+  // factory Wi-Fi. Treat blank-after-trim as "not set" and fall through to the
+  // generated token, which is always non-empty.
+  const fromEnv = (process.env.FACTORY_TOKEN || "").trim();
+  if (fromEnv) return fromEnv;
+  if (process.env.FACTORY_TOKEN != null && !fromEnv) {
+    console.error("WARNING: FACTORY_TOKEN is set but blank — ignoring it and using the generated token below.");
+  }
   try {
     if (fs.existsSync(TOKEN_FILE)) {
       const saved = fs.readFileSync(TOKEN_FILE, "utf8").trim();
@@ -247,10 +266,11 @@ function readBody(req) {
 // In-memory only: fine for a single-process factory server, and a restart just
 // clears it. Tune via env; RATE_LIMIT=0 disables the overall cap.
 //
-// Note: the client IP comes from CF-Connecting-IP / X-Forwarded-For when set
-// (see clientIp). Behind the Cloudflare tunnel that's the real per-device IP and
-// can't be spoofed by the client; don't put this raw behind an upstream that
-// forwards a client-controlled XFF (SETUP.md already says tunnel-only).
+// Note: the client IP is the SOCKET address unless TRUST_PROXY is on (see
+// clientIp). Trusting CF-Connecting-IP / X-Forwarded-For by default let a caller
+// mint a fresh bucket per request and walk straight past both limits. Set
+// TRUST_PROXY=1 only when something you control (the Cloudflare tunnel in
+// SETUP.md) sets those headers — there they are the real per-device IP.
 const RL_WINDOW_MS = 60 * 1000;
 const RL_MAX = Number(process.env.RATE_LIMIT ?? 240);          // requests / min / IP (0 = off)
 const RL_AUTH_MAX = Number(process.env.RATE_LIMIT_AUTH ?? 20); // failed auths / min / IP (0 = off)
