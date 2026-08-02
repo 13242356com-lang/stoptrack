@@ -115,7 +115,18 @@ async function newApp(browser, { seed } = {}) {
 async function until(page, fn, ms = 5000) {
   const deadline = Date.now() + ms;
   for (;;) {
-    const v = await page.evaluate(fn);
+    // A poll can land mid-navigation — the restore flow reloads the page on
+    // purpose — and Playwright then throws "Execution context was destroyed".
+    // That is a retry, not a result: swallow it and keep polling until the
+    // deadline, or the caller sees a crash instead of its own assertion message.
+    let v;
+    try {
+      v = await page.evaluate(fn);
+    } catch (e) {
+      if (Date.now() > deadline) throw e;
+      await page.waitForTimeout(100);
+      continue;
+    }
     if (v || Date.now() > deadline) return v;
     await page.waitForTimeout(50);
   }
@@ -2118,6 +2129,9 @@ async function main() {
   await sup.click('button:has-text("Settings")');
   await sup.waitForSelector('button:has-text("Restore from backup")', { timeout: 5000 });
   await sup.setInputFiles('input[type="file"]', tombFile);
+  // handleRestoreFile reloads the page once the import lands, so wait for that
+  // navigation to settle before reading storage.
+  await sup.waitForLoadState("load").catch(() => {});
   await until(sup, () => {
     try { return (JSON.parse(localStorage.getItem("stop:sup-0") || "{}")).deleted === true; } catch { return false; }
   }, 8000);
