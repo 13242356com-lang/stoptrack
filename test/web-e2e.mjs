@@ -1863,6 +1863,78 @@ async function main() {
       `the operator's flags must reach the server, got ${JSON.stringify(arrived.flags)}`);
     await ctx4.close();
     console.log("web-e2e: PASS — handout reached a live server.js end to end (route + payload key agree)");
+
+    // ---- a stop saved DURING a push must not be deleted from the outbox ------
+    // The flush captured the outbox into `keys`, awaited the pushes, then called
+    // setOutbox([]) — wiping anything enqueued during the round trip. Nothing
+    // re-enqueues those records and seedOutboxWithAll only runs before the first
+    // poll, so the stop never reached the server, behind a green "Synced" badge.
+    // The window is the push latency, which on a factory link is most of a save.
+    const ctx5 = await browser.newContext();
+    const p5 = await ctx5.newPage();
+    await p5.route(/unpkg\.com|cdn\.tailwindcss\.com/, async (route) => {
+      const u = route.request().url();
+      if (u.includes("react-dom")) return route.fulfill({ contentType: "application/javascript", body: reactDomUmd });
+      if (u.includes("react")) return route.fulfill({ contentType: "application/javascript", body: reactUmd });
+      return route.fulfill({ contentType: "application/javascript", body: "/* tailwind stub */" });
+    });
+    // Hold every POST /stops open for 3s so a second save lands mid-flight.
+    await p5.route(`${srvUrl}/stops`, async (route) => {
+      if (route.request().method() === "POST") await new Promise((r) => setTimeout(r, 3000));
+      return route.continue();
+    });
+    await p5.addInitScript(([url, token]) => {
+      const now = Date.now();
+      const hhmm = (ms) => {
+        const d = new Date(ms);
+        return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      };
+      if (localStorage.getItem("config:lists")) return;
+      localStorage.setItem("config:sync", JSON.stringify({ url, token, enabled: true }));
+      localStorage.setItem("config:lists", JSON.stringify({
+        machines: ["Line 9"], reasons: ["Cleaning"], quickStops: [],
+        shifts: [{ id: "t1", name: "Test", start: hhmm(now - 3600e3), end: hhmm(now + 7 * 3600e3), goals: {} }],
+        rates: {}, handoverEmails: [], updatedAt: now,
+      }));
+      localStorage.setItem("config:prefs", JSON.stringify({ operator: "Ann", setupLocked: true, machine: "Line 9" }));
+    }, [srvUrl, srvToken]);
+    await p5.goto("file://" + path.join(root, "index.html"));
+    await p5.waitForSelector("text=Start Stop", { timeout: 20000 });
+
+    // Stop 1 — saving it starts a push that will be held open for 3s.
+    await p5.click("text=Start Stop");
+    await p5.waitForTimeout(600);
+    await p5.click("text=End Stop");
+    await p5.waitForSelector("text=Document this stop", { timeout: 5000 });
+    await p5.click('button:has-text("Save stop")');
+    // Stop 2 — the operator's next tap, while that push is still in flight.
+    await p5.waitForTimeout(400);
+    await p5.click("text=Start Stop");
+    await p5.waitForTimeout(600);
+    await p5.click("text=End Stop");
+    await p5.waitForSelector("text=Document this stop", { timeout: 5000 });
+    await p5.click('button:has-text("Save stop")');
+
+    const localIds = await until(p5, () => {
+      const ids = Object.keys(localStorage).filter((k) => k.startsWith("stop:"));
+      return ids.length === 2 ? ids.map((k) => k.slice(5)) : null;
+    }, 10000);
+    assert(localIds && localIds.length === 2, `both stops must be on the device, got ${JSON.stringify(localIds)}`);
+
+    // Give the sync every chance: wait out the held push, then flush again.
+    let onServer = [];
+    for (let i = 0; i < 30; i++) {
+      await p5.waitForTimeout(1000);
+      const r = await fetch(`${srvUrl}/stops?since=0`, { headers: { Authorization: `Bearer ${srvToken}` } })
+        .then((x) => x.json()).catch(() => ({ stops: [] }));
+      onServer = (r.stops || []).map((s) => s.id);
+      if (localIds.every((id) => onServer.includes(id))) break;
+    }
+    const missing = localIds.filter((id) => !onServer.includes(id));
+    assert(missing.length === 0,
+      `a stop saved while a push was in flight was never delivered: ${JSON.stringify(missing)} (server has ${JSON.stringify(onServer)}) — the outbox was cleared wholesale`);
+    await ctx5.close();
+    console.log("web-e2e: PASS — a stop saved mid-push still reaches the server (the outbox drops only what it pushed)");
   } finally {
     srv.kill();
     rmSync(srvDir, { recursive: true, force: true });
@@ -1959,6 +2031,81 @@ async function main() {
     `a later write must not shorten a recorded measurement (10min -> ${merged && merged.duration}ms)`);
   await ctxDup.close();
 
+  // ---- a backup must not hand this device someone else's session ------------
+  // importAll shallow-merged the whole prefs blob, so a backup's `offMachine`
+  // became a LIVE span here: one tap recorded 45 minutes of "No operator"
+  // downtime on a machine nobody left, under the OTHER device's operator name,
+  // below the 90-minute confirmation threshold — fabricated downtime through the
+  // documented recovery flow, once per phone the backup is restored onto. The
+  // same merge moved the New Shift cutoff BACKWARDS, re-merging the previous
+  // shift's stops into the current board and its handout.
+  const ctxRst = await browser.newContext();
+  const rstPage = await ctxRst.newPage();
+  await rstPage.route(/unpkg\.com|cdn\.tailwindcss\.com/, async (route) => {
+    const u = route.request().url();
+    if (u.includes("react-dom")) return route.fulfill({ contentType: "application/javascript", body: reactDomUmd });
+    if (u.includes("react")) return route.fulfill({ contentType: "application/javascript", body: reactUmd });
+    return route.fulfill({ contentType: "application/javascript", body: "/* tailwind stub */" });
+  });
+  await rstPage.addInitScript(() => {
+    const now = Date.now();
+    const hhmm = (ms) => {
+      const d = new Date(ms);
+      return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    };
+    if (localStorage.getItem("config:lists")) return;
+    localStorage.setItem("config:lists", JSON.stringify({
+      machines: ["Line 1", "Line 2"], reasons: ["Cleaning"], quickStops: [],
+      shifts: [{ id: "t1", name: "Test", start: hhmm(now - 3600e3), end: hhmm(now + 7 * 3600e3), goals: {} }],
+      rates: {}, handoverEmails: [], updatedAt: now,
+    }));
+    // THIS device: Bob on Line 1, with a New Shift cutoff 10 minutes ago.
+    localStorage.setItem("config:prefs", JSON.stringify({
+      operator: "Bob", setupLocked: true, machine: "Line 1", clearedBefore: now - 600e3,
+    }));
+  });
+  await rstPage.goto("file://" + path.join(root, "index.html"));
+  await rstPage.waitForSelector("text=Start Stop", { timeout: 20000 });
+  const cutBeforeRestore = await rstPage.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem("config:prefs")).clearedBefore || 0; } catch { return 0; }
+  });
+
+  const rstDir = mkdtempSync(path.join(tmpdir(), "stoptrack-rst-"));
+  const rstFile = path.join(rstDir, "backup.json");
+  writeFileSync(rstFile, JSON.stringify({
+    app: "stoptrack", schema: 1,
+    prefs: {
+      // The other phone's session: away from Line 2 for 45 minutes, as Ann, with
+      // an OLDER cutoff.
+      operator: "Ann", machine: "Line 2", setupLocked: true,
+      clearedBefore: Date.now() - 7200e3,
+      offMachine: { machine: "Line 2", operator: "Ann", start: Date.now() - 45 * 60e3 },
+      dark: false,
+    },
+    stops: [],
+  }), "utf8");
+  await rstPage.click('button:has-text("Supervisor")');
+  await rstPage.click('button:has-text("Settings")');
+  await rstPage.waitForSelector('button:has-text("Restore from backup")', { timeout: 5000 });
+  await rstPage.setInputFiles('input[type="file"]', rstFile);
+  await rstPage.waitForLoadState("load").catch(() => {});
+  await rstPage.waitForSelector("text=Start Stop", { timeout: 20000 }).catch(() => {});
+  await rstPage.waitForTimeout(600);
+
+  const afterRestore = await rstPage.evaluate(() => {
+    try { return JSON.parse(localStorage.getItem("config:prefs") || "{}"); } catch { return {}; }
+  });
+  assert(!(afterRestore.offMachine && afterRestore.offMachine.start),
+    `a backup must not hand this device an open off-machine span, prefs held ${JSON.stringify(afterRestore.offMachine)}`);
+  assert(await rstPage.locator('button:has-text("Back on")').count() === 0,
+    "a restored device must not be sitting off machine on a span it never opened — one tap would invent that downtime");
+  assert((afterRestore.clearedBefore || 0) >= cutBeforeRestore,
+    `restore must never move the New Shift cutoff backwards (${cutBeforeRestore} -> ${afterRestore.clearedBefore})`);
+  assert(afterRestore.operator === "Bob",
+    `restore must not re-identify the device's operator, got ${JSON.stringify(afterRestore.operator)}`);
+  await ctxRst.close();
+  rmSync(rstDir, { recursive: true, force: true });
+
   // ---- a live span outranks a peer's stale-span drop ------------------------
   // The restore-drop rule (a span older than the shift is dropped, not recorded)
   // runs per tab. It used to stamp the "already closed" marker, which told the
@@ -2009,6 +2156,137 @@ async function main() {
   });
   assert(skewSpan && skewSpan.start, `the live span must still be in storage, got ${JSON.stringify(skewSpan)}`);
   await ctxSkew.close();
+
+  // ---- "Resume timing" must keep what was already measured -------------------
+  // The recovery dialog's PRIMARY button restarted the stopwatch from zero: a
+  // running timer autosaves accumulated:0 with an open segment, so resuming threw
+  // away savedAt - segStart. A 5-minute breakdown resumed and ended a minute later
+  // recorded ~1 minute while keeping the original start, so the record disagreed
+  // with itself (end - start = 6m, duration = 1m). Finalize on the same fixture
+  // banks 4 minutes correctly — the two buttons in one dialog differed by 100x.
+  // Same fixture as the Finalize test above, deliberately.
+  const { ctx: ctxRes, page: pRes } = await newApp(browser, {
+    seed: () => {
+      const now = Date.now();
+      const hhmm = (ms) => {
+        const d = new Date(ms);
+        return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      };
+      if (localStorage.getItem("config:lists")) return;
+      localStorage.setItem("config:lists", JSON.stringify({
+        machines: ["Line 1"], reasons: ["Cleaning"], quickStops: [],
+        shifts: [{ id: "t1", name: "Test", start: hhmm(now - 3600e3), end: hhmm(now + 7 * 3600e3), goals: {} }],
+        rates: {}, handoverEmails: [], updatedAt: now,
+      }));
+      localStorage.setItem("config:prefs", JSON.stringify({ operator: "Bob", setupLocked: true, machine: "Line 1" }));
+      localStorage.setItem("inprogress:current", JSON.stringify({
+        operator: "Bob", machine: "Line 1", running: true, paused: false,
+        startTs: now - 300e3, accumulated: 0, segStart: now - 300e3, savedAt: now - 60e3,
+      }));
+    },
+  });
+  await pRes.waitForSelector("text=Unfinished stop found", { timeout: 20000 });
+  await pRes.click('button:has-text("Resume timing")');
+  await pRes.waitForSelector("text=End Stop", { timeout: 5000 });
+  const resumedClock = (await pRes.locator(".font-mono").first().innerText()).trim();
+  assert(!/^00:00:0\d$/.test(resumedClock),
+    `Resume must not restart from zero — the 4 minutes measured before the interruption are real downtime, clock read ${resumedClock}`);
+
+  await pRes.waitForTimeout(1200);
+  await pRes.click("text=End Stop");
+  await pRes.waitForSelector("text=Document this stop", { timeout: 5000 });
+  await pRes.click('button:has-text("Save stop")');
+  const resRec = await until(pRes, () => {
+    const k = Object.keys(localStorage).find((x) => x.startsWith("stop:"));
+    if (!k) return null;
+    try { return JSON.parse(localStorage.getItem(k)); } catch { return null; }
+  });
+  assert(resRec, "the resumed stop must be recorded");
+  // 4 min banked + ~1s after resuming. Allow slack, but nothing near 1 second.
+  assert(resRec.duration >= 240000,
+    `a resumed stop must carry the time measured BEFORE the interruption (expected >= 4m, got ${resRec.duration}ms)`);
+  assert(resRec.duration <= resRec.end - resRec.start + 50,
+    `a record must not claim more than its own span (duration ${resRec.duration}, span ${resRec.end - resRec.start})`);
+  await ctxRes.close();
+
+  // ---- a clock that moves mid-stop must not corrupt the totals ---------------
+  // End computed duration from raw Date.now() with no clamp, so an NTP correction
+  // backwards stored a NEGATIVE duration with end < start. It then SUBTRACTED
+  // from the shift total and fmtDur rendered the negative sum as "0s": 21 real
+  // minutes of downtime displayed as 0s at 100.0% uptime, and it synced that way.
+  const { ctx: ctxClk, page: pClk } = await newApp(browser, { seed: seedPlainBrowser });
+  await pClk.waitForSelector("text=Start Stop", { timeout: 20000 });
+  await pClk.evaluate(() => {
+    // Freeze an offset the page can shift under the running timer.
+    window.__skew = 0;
+    const RealNow = Date.now.bind(Date);
+    Date.now = () => RealNow() + window.__skew;
+  });
+  await pClk.click("text=Start Stop");
+  await pClk.waitForTimeout(1200);
+  await pClk.evaluate(() => { window.__skew = -25 * 60 * 1000; }); // clock snaps back 25 min
+  await pClk.click("text=End Stop");
+  await pClk.waitForSelector("text=Document this stop", { timeout: 5000 });
+  await pClk.click('button:has-text("Save stop")');
+  const clkRec = await until(pClk, () => {
+    const k = Object.keys(localStorage).find((x) => x.startsWith("stop:"));
+    if (!k) return null;
+    try { return JSON.parse(localStorage.getItem(k)); } catch { return null; }
+  });
+  assert(clkRec, "the stop must still be recorded after a clock jump");
+  assert(clkRec.duration >= 0,
+    `a backwards clock must never store a negative duration (got ${clkRec.duration}) — it cancels out real downtime and renders as "0s"`);
+  assert(clkRec.end >= clkRec.start,
+    `a record must never end before it started (start ${clkRec.start}, end ${clkRec.end})`);
+  const clkCards = await pClk.evaluate(() => document.body.innerText);
+  assert(!/NaN/.test(clkCards), "no card may render NaN after a clock jump");
+  await ctxClk.close();
+
+  // ---- a record from a peer cannot poison the totals ------------------------
+  // The server stores records opaquely and any producer can speak the contract.
+  // One duration of "45000" or -600000 made the supervisor's Downtime and Uptime
+  // cards read "NaNs" / "NaN%" and exported -600s, persisted across reloads.
+  const { ctx: ctxPois, page: pPois } = await newApp(browser, {
+    seed: () => {
+      const now = Date.now();
+      const hhmm = (ms) => {
+        const d = new Date(ms);
+        return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      };
+      if (localStorage.getItem("config:lists")) return;
+      localStorage.setItem("config:lists", JSON.stringify({
+        machines: ["Line 1"], reasons: ["Cleaning"], quickStops: [],
+        shifts: [{ id: "t1", name: "Test", start: hhmm(now - 3600e3), end: hhmm(now + 7 * 3600e3), goals: {} }],
+        rates: {}, handoverEmails: [], updatedAt: now,
+      }));
+      localStorage.setItem("config:prefs", JSON.stringify({ operator: "Bob", setupLocked: true, machine: "Line 1" }));
+    },
+  });
+  await pPois.waitForSelector("text=Start Stop", { timeout: 20000 });
+  // Feed them in the way a peer would: straight through the app's own merge seam.
+  await pPois.evaluate(() => {
+    const now = Date.now();
+    const mk = (id, duration) => ({
+      id, machine: "Line 1", operator: "Bob", start: now - 600e3, end: now - 300e3,
+      duration, reason: "Cleaning", notes: "", discarded: false, loggedAt: now, updatedAt: now,
+    });
+    // window.__stoptrackApplyRemote is not exposed, so use the storage path the
+    // pull writes through, then reload — same end state as a sync pull.
+    for (const r of [mk("poison-str", "45000"), mk("poison-neg", -600000), mk("poison-nan", "abc")]) {
+      localStorage.setItem(`stop:${r.id}`, JSON.stringify(r));
+    }
+  });
+  await pPois.reload();
+  await pPois.waitForSelector("text=Start Stop", { timeout: 20000 });
+  const poisText = await pPois.evaluate(() => document.body.innerText);
+  assert(!/NaN/.test(poisText),
+    "a peer's malformed duration must not turn the operator's cards into NaN");
+  await pPois.click('button:has-text("Supervisor")');
+  await pPois.waitForTimeout(500);
+  const poisSup = await pPois.evaluate(() => document.body.innerText);
+  assert(!/NaN/.test(poisSup),
+    "a peer's malformed duration must not turn the supervisor's cards into NaN");
+  await ctxPois.close();
 
   // ---- the supervisor's numbers ---------------------------------------------
   // There was NO supervisor coverage at all, which is why three wrong numbers
@@ -2162,6 +2440,7 @@ async function main() {
   console.log(`web-e2e: PASS — rates commit on blur/Enter/tab-hide, never per keystroke (Line 1 ${ratesReloaded["Line 1"]}, Line 2 ${ratesReloaded["Line 2"]}); duplicate Add says why; scrap-only output saves`);
   console.log("web-e2e: PASS — a manual report that hit full storage can be retried once storage recovers (the latch releases)");
   console.log(`web-e2e: PASS — two tabs documenting ONE parked stop record it once (${dupCounted}ms over a ${dupWindow}ms window), the peer's card clears, and a late write can't shorten it`);
+  console.log("web-e2e: PASS — a backup cannot hand a device an open span, move the shift cutoff backwards, or re-identify its operator");
   console.log("web-e2e: PASS — a live off-machine span outranks a peer's stale-span drop and a future-dated marker (no silently unlogged break)");
   console.log("web-e2e: PASS — supervisor numbers agree: Uptime 75.0% == OEE availability, P counts only rated machines (66.7%), badged partial, and the machine filter reaches the OEE panel");
 }

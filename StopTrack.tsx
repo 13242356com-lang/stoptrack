@@ -157,6 +157,15 @@ const legacyShiftOf = (shifts) =>
 
 // Stable key fragment for a machine name (used in production record ids).
 const machineSlug = (m) => String(m || "").replace(/[^a-zA-Z0-9]+/g, "-");
+
+// A duration that arrived from somewhere else. Anything non-finite or negative
+// becomes 0: a bad value must never poison the totals it is summed into, and
+// downtime the app cannot vouch for is better reported as none than as NaN or as
+// a negative that quietly cancels out real minutes.
+const sanitizeDuration = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+};
 // Is this the same operator? Names are typed by hand, shift after shift, so
 // "bob", "Bob" and " Bob " are one person. Matching them exactly emptied the
 // whole board — 0 stops, 0 downtime — with no hint that the name was the reason.
@@ -973,7 +982,18 @@ const api = {
         const gcAt = (s.discarded && s.discardedAt) || (s.deleted && s.deletedAt);
         if (gcAt && now - gcAt > RETENTION_MS) {
           try { await STORE.delete(s.key, SHARED); } catch { /* ignore */ }
-        } else survivors.push(s);
+        } else if (s.deleted) {
+          survivors.push(s); // a tombstone has no measurement to coerce
+        } else {
+          // Coerce the duration at the READ boundary, so no consumer has to. A
+          // record can arrive from a sync pull, a restored backup, the Android
+          // shell, or a future producer speaking the contract — one value of
+          // "45000", -600000 or "abc" made every aggregate NaN (the supervisor's
+          // cards read "NaNs" / "NaN%") and exported -600s. Reporting downtime the
+          // app cannot vouch for as 0 is honest; NaN and negatives are not.
+          const clean = sanitizeDuration(s.duration);
+          survivors.push(clean === s.duration ? s : { ...s, duration: clean });
+        }
       }
       survivors.sort((a, b) => b.start - a.start);
       return { ok: true, stops: survivors };
@@ -1228,7 +1248,22 @@ const api = {
     // shift / operator without wiping this device's dark-mode etc.
     if (data.prefs) {
       const cur = (await this.loadPrefs()) || {};
-      await this.savePrefs({ ...cur, ...data.prefs });
+      // SESSION-SCOPED prefs are not portable and must not ride in on a backup.
+      // An `offMachine` span from the backed-up device became a LIVE span here:
+      // one tap recorded 45 minutes of "No operator" downtime on a machine nobody
+      // left, under the other device's operator name, below the 90-minute
+      // confirmation threshold — the app inventing minutes through the documented
+      // recovery flow. Restore one backup onto three new phones and each invents
+      // its own copy. Who is standing here and which machine they are at is also
+      // this device's business, not the backup's.
+      const { offMachine, offMachineClosed, operator, machine, setupLocked, ...portable } = data.prefs;
+      const merged = { ...cur, ...portable };
+      // The New Shift cutoff only ever moves FORWARD — the same rule the cross-tab
+      // reconciler follows. Restoring an older backup used to move it backwards,
+      // re-merging the previous shift's stops into the current board and its
+      // handout.
+      merged.clearedBefore = Math.max(Number(cur.clearedBefore) || 0, Number(data.prefs.clearedBefore) || 0);
+      await this.savePrefs(merged);
     }
     // Records — upsert by id, newest last-write stamp wins.
     const mergeInto = async (incoming, existing, saver) => {
@@ -1266,6 +1301,18 @@ const api = {
   },
   async setOutbox(ids) {
     try { await STORE.set("sync:outbox", JSON.stringify([...new Set(ids)]), false); } catch { /* ignore */ }
+  },
+  // Drop ONLY the keys that were just pushed, re-reading the outbox first so
+  // anything enqueued during the round trip survives. Clearing the whole outbox
+  // after a push deleted those records permanently: nothing re-enqueues them and
+  // seedOutboxWithAll only runs before the first poll, so a stop saved while a
+  // push was in flight never reached the server — behind a green "Synced" badge.
+  async clearFromOutbox(pushedKeys) {
+    try {
+      const done = new Set(pushedKeys || []);
+      const keys = await this.getOutbox();
+      await this.setOutbox(keys.filter((k) => !done.has(k)));
+    } catch { /* ignore — a failed trim just re-pushes next flush, which is safe */ }
   },
   // Append a storage key (stop:<id> / prod:<id>) to the outbox. No-op until
   // sync is configured (see syncEnabled). Older outboxes stored bare stop ids;
@@ -1317,27 +1364,38 @@ const api = {
   async remotePush(records, cfg) {
     if (!cfg?.url) return { ok: false, error: "No server URL" };
     const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/stops`, { token: cfg.token, method: "POST", body: { stops: records } });
-    return res.ok ? { ok: true, serverTime: res.data?.serverTime || Date.now() } : res;
+    return res.ok ? { ok: true, serverTime: this._serverTime(res.data) } : res;
+  },
+  // A 200 whose body isn't the sync contract (captive-portal sign-in page, proxy
+  // error, truncated response) parsed to {} and then `|| Date.now()` handed back
+  // the CLIENT's clock as the server's time. The pull cursor only moves forward,
+  // so one portal hit advanced it past everything on the server and that device
+  // never saw the factory's downtime again — with a green "Synced" badge. A
+  // serverTime we did not actually receive is null, and the caller must not
+  // advance the cursor on it.
+  _serverTime(data) {
+    const t = Number(data && data.serverTime);
+    return Number.isFinite(t) && t > 0 ? t : null;
   },
   async remotePull(since, cfg) {
     if (!cfg?.url) return { ok: false, error: "No server URL" };
     const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/stops?since=${since || 0}`, { token: cfg.token });
-    return res.ok ? { ok: true, stops: res.data?.stops || [], serverTime: res.data?.serverTime || Date.now() } : res;
+    return res.ok ? { ok: true, stops: res.data?.stops || [], serverTime: this._serverTime(res.data) } : res;
   },
   async remotePushProduction(records, cfg) {
     if (!cfg?.url) return { ok: false, error: "No server URL" };
     const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/production`, { token: cfg.token, method: "POST", body: { records } });
-    return res.ok ? { ok: true, serverTime: res.data?.serverTime || Date.now() } : res;
+    return res.ok ? { ok: true, serverTime: this._serverTime(res.data) } : res;
   },
   async remotePullProduction(since, cfg) {
     if (!cfg?.url) return { ok: false, error: "No server URL" };
     const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/production?since=${since || 0}`, { token: cfg.token });
-    return res.ok ? { ok: true, records: res.data?.records || [], serverTime: res.data?.serverTime || Date.now() } : res;
+    return res.ok ? { ok: true, records: res.data?.records || [], serverTime: this._serverTime(res.data) } : res;
   },
   async remotePushSessions(records, cfg) {
     if (!cfg?.url) return { ok: false, error: "No server URL" };
     const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/sessions`, { token: cfg.token, method: "POST", body: { records } });
-    return res.ok ? { ok: true, serverTime: res.data?.serverTime || Date.now() } : res;
+    return res.ok ? { ok: true, serverTime: this._serverTime(res.data) } : res;
   },
   async remotePushHandovers(records, cfg) {
     if (!records.length) return { ok: true };
@@ -1349,13 +1407,13 @@ const api = {
     if (!cfg?.url) return { ok: false, records: [] };
     const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/handovers?since=${since || 0}`, { token: cfg.token });
     if (!res.ok) return { ok: false, records: [], error: res.error || `HTTP ${res.status}` };
-    return { ok: true, records: res.data?.records || [], serverTime: res.data?.serverTime || Date.now() };
+    return { ok: true, records: res.data?.records || [], serverTime: this._serverTime(res.data) };
   },
 
   async remotePullSessions(since, cfg) {
     if (!cfg?.url) return { ok: false, error: "No server URL" };
     const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/sessions?since=${since || 0}`, { token: cfg.token });
-    return res.ok ? { ok: true, records: res.data?.records || [], serverTime: res.data?.serverTime || Date.now() } : res;
+    return res.ok ? { ok: true, records: res.data?.records || [], serverTime: this._serverTime(res.data) } : res;
   },
   // Ask the sync server to email a shift handover report. The server answers
   // 501 when SMTP isn't configured; callers surface that and fall back to Copy.
@@ -1478,8 +1536,17 @@ function useTimer({ operator, machine }) {
   // Stop returns the finished {start, end, duration}; caller documents it.
   const stop = useCallback(() => {
     const s = stateRef.current;
-    const end = Date.now();
-    const duration = s.paused ? s.accumulated : s.accumulated + (end - s.segStart);
+    // A device clock can move WHILE a stop is timing (NTP catching up when the
+    // phone finds signal, someone fixing the date). Unclamped, a backwards jump
+    // stored a NEGATIVE duration with end < start: it then subtracted from the
+    // shift total, fmtDur rendered the negative sum as "0s", and 21 real minutes
+    // of downtime reported as 0s with 100.0% uptime — better than reality, so
+    // nobody would question it. It synced that way to every peer too.
+    // Every other measurement path here already clamps (endOffMachine,
+    // recoverFinalize, the manual modal); this was the one that didn't.
+    const rawEnd = Date.now();
+    const end = Math.max(Number(s.startTs) || rawEnd, rawEnd);
+    const duration = Math.max(0, s.paused ? s.accumulated : s.accumulated + (end - s.segStart));
     setState(emptyTimer);
     // The finished stop is NOT cleared here: between "End Stop" and "Save stop"
     // it used to live only in React state, so a refresh while the reason picker
@@ -1506,7 +1573,19 @@ function useTimer({ operator, machine }) {
     if (d.paused || !d.segStart) {
       setState({ running: true, paused: true, startTs: d.startTs, accumulated: d.accumulated || 0, segStart: null, machine: d.machine });
     } else {
-      setState({ running: true, paused: false, startTs: d.startTs, accumulated: d.accumulated || 0, segStart: Date.now(), machine: d.machine });
+      // BANK what was already measured before the interruption. A running timer
+      // autosaves `accumulated: 0` with an open segment, so resuming with the
+      // raw `accumulated` threw away `savedAt - segStart` — every minute counted
+      // before the tab was reloaded or discarded. A 10-minute breakdown resumed
+      // and ended a minute later recorded 60s, keeping the original `start`, so
+      // the record even disagreed with itself (end - start = 11m, duration = 1m).
+      // `savedAt` is the last moment the page is known to have been alive; the
+      // gap after it is NOT counted, so this under-counts rather than invents.
+      // Same rule as the Android Timer.restore (8f1cdb5) and as recoverFinalize.
+      const acc = Number(d.accumulated) || 0;
+      const alive = Number(d.savedAt) || 0;
+      const banked = alive > d.segStart ? acc + (alive - d.segStart) : acc;
+      setState({ running: true, paused: false, startTs: d.startTs, accumulated: banked, segStart: Date.now(), machine: d.machine });
     }
   }, []);
 
@@ -1539,6 +1618,7 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, onR
   const onCfgRef = useRef(onRemoteConfig); onCfgRef.current = onRemoteConfig;
   const runningRef = useRef(false); // guards against overlapping flushes
   const configRejectedRef = useRef(false); // server refused our last settings write
+  const badBodyRef = useRef(false); // a 200 arrived that wasn't the sync contract
 
   const enabled = !!(cfg && cfg.enabled && cfg.url);
 
@@ -1576,7 +1656,10 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, onR
           const res = await api.remotePushHandovers(handRows, c);
           if (!res.ok) { setStatus((s) => ({ ...s, syncing: false, error: res.error || "Push failed", pending: keys.length })); runningRef.current = false; return; }
         }
-        await api.setOutbox([]); // clear only after every push confirmed
+        // Clear only what we actually pushed, and only after every push
+        // confirmed. `keys` was captured before the awaits above, so a stop saved
+        // mid-flight is still queued — setOutbox([]) used to erase it for good.
+        await api.clearFromOutbox(keys);
       }
 
       // 2) CONFIG — last-write-wins both directions.
@@ -1594,30 +1677,38 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, onR
       }
 
       // 3) PULL — stops and production, each behind its own cursor.
+      // Only advance a cursor on a serverTime the SERVER actually sent. A null
+      // means the 200 wasn't the sync contract (portal page, proxy error), and
+      // moving the cursor on it would skip everything already on the server —
+      // permanently, since cursors only move forward.
       const since = await api.getCursor();
       const pull = await api.remotePull(since, c);
       if (pull.ok) {
         if (pull.stops.length) await onStopsRef.current?.(pull.stops);
-        await api.setCursor(pull.serverTime);
+        if (pull.serverTime) await api.setCursor(pull.serverTime);
+        else badBodyRef.current = true;
       }
       const prodSince = await api.getCursor("prod");
       const prodPull = await api.remotePullProduction(prodSince, c);
       if (prodPull.ok) {
         if (prodPull.records.length) await onProdRef.current?.(prodPull.records);
-        await api.setCursor(prodPull.serverTime, "prod");
+        if (prodPull.serverTime) await api.setCursor(prodPull.serverTime, "prod");
+        else badBodyRef.current = true;
       }
       const sessSince = await api.getCursor("sess");
       const sessPull = await api.remotePullSessions(sessSince, c);
       if (sessPull.ok) {
         if (sessPull.records.length) await onSessRef.current?.(sessPull.records);
-        await api.setCursor(sessPull.serverTime, "sess");
+        if (sessPull.serverTime) await api.setCursor(sessPull.serverTime, "sess");
+        else badBodyRef.current = true;
       }
 
       const handSince = await api.getCursor("hand");
       const handPull = await api.remotePullHandovers(handSince, c);
       if (handPull.ok) {
         if (handPull.records.length) await onHandRef.current?.(handPull.records);
-        await api.setCursor(handPull.serverTime, "hand");
+        if (handPull.serverTime) await api.setCursor(handPull.serverTime, "hand");
+        else badBodyRef.current = true;
       }
 
       const pending = (await api.getOutbox()).length;
@@ -1628,7 +1719,13 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, onR
         return;
       }
       const pullErr = !pull.ok ? (pull.error || "Pull failed") : !prodPull.ok ? (prodPull.error || "Pull failed") : !sessPull.ok ? (sessPull.error || "Pull failed") : !handPull.ok ? (handPull.error || "Pull failed") : null;
-      setStatus({ online: true, lastSync: Date.now(), pending, syncing: false, error: pullErr });
+      // Say so when a 200 came back that wasn't the sync contract. Silence here is
+      // how a captive-portal page read as "Synced - just now" while nothing synced.
+      const bodyErr = badBodyRef.current
+        ? "That address answered, but not like a StopTrack server — check the URL, or sign in to the Wi-Fi and try again."
+        : null;
+      badBodyRef.current = false;
+      setStatus({ online: true, lastSync: Date.now(), pending, syncing: false, error: pullErr || bodyErr });
     } catch (e) {
       setStatus((s) => ({ ...s, syncing: false, error: e?.message || "Sync error" }));
     } finally { runningRef.current = false; }
@@ -2062,7 +2159,13 @@ export default function App() {
     for (const r of incoming) {
       const local = map.get(r.id);
       if (!local || stampOf(r) > stampOf(local)) {
-        const rec = { ...r, key: `stop:${r.id}` };
+        // The server stores records opaquely and any producer can speak the sync
+        // contract (the watch, the phone bridge, a future PLC feed). One record
+        // with duration "45000" or -600000 made every aggregate NaN — the
+        // supervisor's Downtime and Uptime cards read "NaNs" / "NaN%" and the
+        // export carried -600s — and it persisted locally, surviving reloads.
+        // Coerce here, at the seam, rather than hardening every consumer.
+        const rec = { ...r, key: `stop:${r.id}`, duration: sanitizeDuration(r.duration) };
         map.set(r.id, rec);
         writes.push(rec);
       }

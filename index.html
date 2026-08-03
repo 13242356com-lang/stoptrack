@@ -222,6 +222,10 @@ function normalizeShifts(shiftsArr, legacyShift) {
 }
 const legacyShiftOf = (shifts) => shifts && shifts[0] ? { start: shifts[0].start, end: shifts[0].end } : { start: "06:00", end: "14:00" };
 const machineSlug = (m) => String(m || "").replace(/[^a-zA-Z0-9]+/g, "-");
+const sanitizeDuration = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+};
 const sameOperator = (a, b) => String(a == null ? "" : a).trim().toLowerCase() === String(b == null ? "" : b).trim().toLowerCase();
 const HOUR_MS = 60 * 60 * 1000;
 function computeOEE({ plannedMs, downtimeMs, unitsProduced, scrapCount, ratePerHour }) {
@@ -1046,8 +1050,13 @@ const api = {
                     }
                     catch (_a) { }
                 }
-                else
+                else if (s.deleted) {
                     survivors.push(s);
+                }
+                else {
+                    const clean = sanitizeDuration(s.duration);
+                    survivors.push(clean === s.duration ? s : Object.assign(Object.assign({}, s), { duration: clean }));
+                }
             }
             survivors.sort((a, b) => b.start - a.start);
             return { ok: true, stops: survivors };
@@ -1353,7 +1362,10 @@ const api = {
         }
         if (data.prefs) {
             const cur = (await this.loadPrefs()) || {};
-            await this.savePrefs(Object.assign(Object.assign({}, cur), data.prefs));
+            const _a = data.prefs, { offMachine, offMachineClosed, operator, machine, setupLocked } = _a, portable = __rest(_a, ["offMachine", "offMachineClosed", "operator", "machine", "setupLocked"]);
+            const merged = Object.assign(Object.assign({}, cur), portable);
+            merged.clearedBefore = Math.max(Number(cur.clearedBefore) || 0, Number(data.prefs.clearedBefore) || 0);
+            await this.savePrefs(merged);
         }
         const mergeInto = async (incoming, existing, saver) => {
             const local = new Map((existing || []).map((r) => [r.id, r]));
@@ -1405,6 +1417,14 @@ const api = {
     async setOutbox(ids) {
         try {
             await STORE.set("sync:outbox", JSON.stringify([...new Set(ids)]), false);
+        }
+        catch (_a) { }
+    },
+    async clearFromOutbox(pushedKeys) {
+        try {
+            const done = new Set(pushedKeys || []);
+            const keys = await this.getOutbox();
+            await this.setOutbox(keys.filter((k) => !done.has(k)));
         }
         catch (_a) { }
     },
@@ -1469,39 +1489,40 @@ const api = {
         return fetchJSON(`${cfg.url.replace(/\/$/, "")}/health`, { token: cfg.token, timeoutMs: 5000 });
     },
     async remotePush(records, cfg) {
-        var _a;
         if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
             return { ok: false, error: "No server URL" };
         const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/stops`, { token: cfg.token, method: "POST", body: { stops: records } });
-        return res.ok ? { ok: true, serverTime: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.serverTime) || Date.now() } : res;
+        return res.ok ? { ok: true, serverTime: this._serverTime(res.data) } : res;
+    },
+    _serverTime(data) {
+        const t = Number(data && data.serverTime);
+        return Number.isFinite(t) && t > 0 ? t : null;
     },
     async remotePull(since, cfg) {
-        var _a, _b;
+        var _a;
         if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
             return { ok: false, error: "No server URL" };
         const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/stops?since=${since || 0}`, { token: cfg.token });
-        return res.ok ? { ok: true, stops: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.stops) || [], serverTime: ((_b = res.data) === null || _b === void 0 ? void 0 : _b.serverTime) || Date.now() } : res;
+        return res.ok ? { ok: true, stops: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.stops) || [], serverTime: this._serverTime(res.data) } : res;
     },
     async remotePushProduction(records, cfg) {
-        var _a;
         if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
             return { ok: false, error: "No server URL" };
         const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/production`, { token: cfg.token, method: "POST", body: { records } });
-        return res.ok ? { ok: true, serverTime: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.serverTime) || Date.now() } : res;
+        return res.ok ? { ok: true, serverTime: this._serverTime(res.data) } : res;
     },
     async remotePullProduction(since, cfg) {
-        var _a, _b;
-        if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
-            return { ok: false, error: "No server URL" };
-        const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/production?since=${since || 0}`, { token: cfg.token });
-        return res.ok ? { ok: true, records: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.records) || [], serverTime: ((_b = res.data) === null || _b === void 0 ? void 0 : _b.serverTime) || Date.now() } : res;
-    },
-    async remotePushSessions(records, cfg) {
         var _a;
         if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
             return { ok: false, error: "No server URL" };
+        const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/production?since=${since || 0}`, { token: cfg.token });
+        return res.ok ? { ok: true, records: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.records) || [], serverTime: this._serverTime(res.data) } : res;
+    },
+    async remotePushSessions(records, cfg) {
+        if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
+            return { ok: false, error: "No server URL" };
         const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/sessions`, { token: cfg.token, method: "POST", body: { records } });
-        return res.ok ? { ok: true, serverTime: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.serverTime) || Date.now() } : res;
+        return res.ok ? { ok: true, serverTime: this._serverTime(res.data) } : res;
     },
     async remotePushHandovers(records, cfg) {
         if (!records.length)
@@ -1510,20 +1531,20 @@ const api = {
         return res.ok ? { ok: true } : { ok: false, error: res.error || `HTTP ${res.status}` };
     },
     async remotePullHandovers(since, cfg) {
-        var _a, _b;
+        var _a;
         if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
             return { ok: false, records: [] };
         const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/handovers?since=${since || 0}`, { token: cfg.token });
         if (!res.ok)
             return { ok: false, records: [], error: res.error || `HTTP ${res.status}` };
-        return { ok: true, records: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.records) || [], serverTime: ((_b = res.data) === null || _b === void 0 ? void 0 : _b.serverTime) || Date.now() };
+        return { ok: true, records: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.records) || [], serverTime: this._serverTime(res.data) };
     },
     async remotePullSessions(since, cfg) {
-        var _a, _b;
+        var _a;
         if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
             return { ok: false, error: "No server URL" };
         const res = await fetchJSON(`${cfg.url.replace(/\/$/, "")}/sessions?since=${since || 0}`, { token: cfg.token });
-        return res.ok ? { ok: true, records: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.records) || [], serverTime: ((_b = res.data) === null || _b === void 0 ? void 0 : _b.serverTime) || Date.now() } : res;
+        return res.ok ? { ok: true, records: ((_a = res.data) === null || _a === void 0 ? void 0 : _a.records) || [], serverTime: this._serverTime(res.data) } : res;
     },
     async sendReport(payload, cfg) {
         if (!(cfg === null || cfg === void 0 ? void 0 : cfg.url))
@@ -1615,8 +1636,9 @@ function useTimer({ operator, machine }) {
     }, []);
     const stop = useCallback(() => {
         const s = stateRef.current;
-        const end = Date.now();
-        const duration = s.paused ? s.accumulated : s.accumulated + (end - s.segStart);
+        const rawEnd = Date.now();
+        const end = Math.max(Number(s.startTs) || rawEnd, rawEnd);
+        const duration = Math.max(0, s.paused ? s.accumulated : s.accumulated + (end - s.segStart));
         setState(emptyTimer);
         api.saveInProgress({
             operator: operatorRef.current, machine: s.machine || machineRef.current,
@@ -1632,7 +1654,10 @@ function useTimer({ operator, machine }) {
             setState({ running: true, paused: true, startTs: d.startTs, accumulated: d.accumulated || 0, segStart: null, machine: d.machine });
         }
         else {
-            setState({ running: true, paused: false, startTs: d.startTs, accumulated: d.accumulated || 0, segStart: Date.now(), machine: d.machine });
+            const acc = Number(d.accumulated) || 0;
+            const alive = Number(d.savedAt) || 0;
+            const banked = alive > d.segStart ? acc + (alive - d.segStart) : acc;
+            setState({ running: true, paused: false, startTs: d.startTs, accumulated: banked, segStart: Date.now(), machine: d.machine });
         }
     }, []);
     return { state, elapsed, start, pause, resume, stop, reset, restore };
@@ -1659,6 +1684,7 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, onR
     onCfgRef.current = onRemoteConfig;
     const runningRef = useRef(false);
     const configRejectedRef = useRef(false);
+    const badBodyRef = useRef(false);
     const enabled = !!(cfg && cfg.enabled && cfg.url);
     const flush = useCallback(async () => {
         var _a, _b, _c, _d, _e;
@@ -1713,7 +1739,7 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, onR
                         return;
                     }
                 }
-                await api.setOutbox([]);
+                await api.clearFromOutbox(keys);
             }
             const localCfg = localCfgRef.current;
             const remoteCfg = await api.remoteGetConfig(c);
@@ -1733,28 +1759,40 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, onR
             if (pull.ok) {
                 if (pull.stops.length)
                     await ((_b = onStopsRef.current) === null || _b === void 0 ? void 0 : _b.call(onStopsRef, pull.stops));
-                await api.setCursor(pull.serverTime);
+                if (pull.serverTime)
+                    await api.setCursor(pull.serverTime);
+                else
+                    badBodyRef.current = true;
             }
             const prodSince = await api.getCursor("prod");
             const prodPull = await api.remotePullProduction(prodSince, c);
             if (prodPull.ok) {
                 if (prodPull.records.length)
                     await ((_c = onProdRef.current) === null || _c === void 0 ? void 0 : _c.call(onProdRef, prodPull.records));
-                await api.setCursor(prodPull.serverTime, "prod");
+                if (prodPull.serverTime)
+                    await api.setCursor(prodPull.serverTime, "prod");
+                else
+                    badBodyRef.current = true;
             }
             const sessSince = await api.getCursor("sess");
             const sessPull = await api.remotePullSessions(sessSince, c);
             if (sessPull.ok) {
                 if (sessPull.records.length)
                     await ((_d = onSessRef.current) === null || _d === void 0 ? void 0 : _d.call(onSessRef, sessPull.records));
-                await api.setCursor(sessPull.serverTime, "sess");
+                if (sessPull.serverTime)
+                    await api.setCursor(sessPull.serverTime, "sess");
+                else
+                    badBodyRef.current = true;
             }
             const handSince = await api.getCursor("hand");
             const handPull = await api.remotePullHandovers(handSince, c);
             if (handPull.ok) {
                 if (handPull.records.length)
                     await ((_e = onHandRef.current) === null || _e === void 0 ? void 0 : _e.call(onHandRef, handPull.records));
-                await api.setCursor(handPull.serverTime, "hand");
+                if (handPull.serverTime)
+                    await api.setCursor(handPull.serverTime, "hand");
+                else
+                    badBodyRef.current = true;
             }
             const pending = (await api.getOutbox()).length;
             if (configRejectedRef.current) {
@@ -1764,7 +1802,11 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, onR
                 return;
             }
             const pullErr = !pull.ok ? (pull.error || "Pull failed") : !prodPull.ok ? (prodPull.error || "Pull failed") : !sessPull.ok ? (sessPull.error || "Pull failed") : !handPull.ok ? (handPull.error || "Pull failed") : null;
-            setStatus({ online: true, lastSync: Date.now(), pending, syncing: false, error: pullErr });
+            const bodyErr = badBodyRef.current
+                ? "That address answered, but not like a StopTrack server — check the URL, or sign in to the Wi-Fi and try again."
+                : null;
+            badBodyRef.current = false;
+            setStatus({ online: true, lastSync: Date.now(), pending, syncing: false, error: pullErr || bodyErr });
         }
         catch (e) {
             setStatus((s) => (Object.assign(Object.assign({}, s), { syncing: false, error: (e === null || e === void 0 ? void 0 : e.message) || "Sync error" })));
@@ -2083,7 +2125,7 @@ function App() {
         for (const r of incoming) {
             const local = map.get(r.id);
             if (!local || stampOf(r) > stampOf(local)) {
-                const rec = Object.assign(Object.assign({}, r), { key: `stop:${r.id}` });
+                const rec = Object.assign(Object.assign({}, r), { key: `stop:${r.id}`, duration: sanitizeDuration(r.duration) });
                 map.set(r.id, rec);
                 writes.push(rec);
             }
