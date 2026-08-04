@@ -2088,13 +2088,22 @@ async function main() {
   await rstPage.click('button:has-text("Settings")');
   await rstPage.waitForSelector('button:has-text("Restore from backup")', { timeout: 5000 });
   await rstPage.setInputFiles('input[type="file"]', rstFile);
+  // The restore handler reloads the page; wait for the reloaded app to be up
+  // before reading anything, and tolerate the navigation itself.
   await rstPage.waitForLoadState("load").catch(() => {});
-  await rstPage.waitForSelector("text=Start Stop", { timeout: 20000 }).catch(() => {});
-  await rstPage.waitForTimeout(600);
+  await rstPage.waitForSelector("text=Start Stop", { timeout: 20000 });
+  await rstPage.waitForTimeout(300);
 
-  const afterRestore = await rstPage.evaluate(() => {
-    try { return JSON.parse(localStorage.getItem("config:prefs") || "{}"); } catch { return {}; }
-  });
+  // Read through `until`, not a bare evaluate: restore reloads the page, and a
+  // read that lands mid-navigation throws "Execution context was destroyed".
+  // `until` treats that as a retry. (This exact race failed in CI twice.)
+  const afterRestore = await until(rstPage, () => {
+    try {
+      const p = JSON.parse(localStorage.getItem("config:prefs") || "null");
+      // Wait for the restore to have landed: the imported dark pref is the marker.
+      return p && p.operator ? p : null;
+    } catch { return null; }
+  }, 10000) || {};
   assert(!(afterRestore.offMachine && afterRestore.offMachine.start),
     `a backup must not hand this device an open off-machine span, prefs held ${JSON.stringify(afterRestore.offMachine)}`);
   assert(await rstPage.locator('button:has-text("Back on")').count() === 0,
