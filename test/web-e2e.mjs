@@ -112,6 +112,20 @@ async function newApp(browser, { seed } = {}) {
 // deliberately RETURNS rather than throwing on timeout, so the caller still owns
 // the assertion message — a bare waitForFunction fails with a Playwright timeout
 // that says nothing about the behaviour under test.
+// Read from the page, retrying through a navigation. Several flows reload on
+// purpose (restore, recovery) and a bare page.evaluate that lands mid-reload
+// throws "Execution context was destroyed" — a retry, not a result.
+async function readSafe(page, fn, arg, ms = 8000) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    try { return await page.evaluate(fn, arg); }
+    catch (e) {
+      if (Date.now() > deadline) throw e;
+      await page.waitForTimeout(100);
+    }
+  }
+}
+
 async function until(page, fn, ms = 5000) {
   const deadline = Date.now() + ms;
   for (;;) {
@@ -2023,7 +2037,7 @@ async function main() {
   }, parkedC);
   await dupC.click('button:has-text("Save stop")');
   await dupC.waitForTimeout(800);
-  const merged = await dupC.evaluate((p) => {
+  const merged = await readSafe(dupC, (p) => {
     const slug = String(p.machine || "").replace(/[^a-zA-Z0-9]+/g, "-");
     try { return JSON.parse(localStorage.getItem(`stop:${p.startTs}-${slug}`)); } catch { return null; }
   }, parkedC);
@@ -2066,7 +2080,7 @@ async function main() {
   });
   await rstPage.goto("file://" + path.join(root, "index.html"));
   await rstPage.waitForSelector("text=Start Stop", { timeout: 20000 });
-  const cutBeforeRestore = await rstPage.evaluate(() => {
+  const cutBeforeRestore = await readSafe(rstPage, () => {
     try { return JSON.parse(localStorage.getItem("config:prefs")).clearedBefore || 0; } catch { return 0; }
   });
 
@@ -2247,7 +2261,7 @@ async function main() {
     `a backwards clock must never store a negative duration (got ${clkRec.duration}) — it cancels out real downtime and renders as "0s"`);
   assert(clkRec.end >= clkRec.start,
     `a record must never end before it started (start ${clkRec.start}, end ${clkRec.end})`);
-  const clkCards = await pClk.evaluate(() => document.body.innerText);
+  const clkCards = await readSafe(pClk, () => document.body.innerText);
   assert(!/NaN/.test(clkCards), "no card may render NaN after a clock jump");
   await ctxClk.close();
 
@@ -2287,12 +2301,12 @@ async function main() {
   });
   await pPois.reload();
   await pPois.waitForSelector("text=Start Stop", { timeout: 20000 });
-  const poisText = await pPois.evaluate(() => document.body.innerText);
+  const poisText = await readSafe(pPois, () => document.body.innerText);
   assert(!/NaN/.test(poisText),
     "a peer's malformed duration must not turn the operator's cards into NaN");
   await pPois.click('button:has-text("Supervisor")');
   await pPois.waitForTimeout(500);
-  const poisSup = await pPois.evaluate(() => document.body.innerText);
+  const poisSup = await readSafe(pPois, () => document.body.innerText);
   assert(!/NaN/.test(poisSup),
     "a peer's malformed duration must not turn the supervisor's cards into NaN");
   await ctxPois.close();
@@ -2422,7 +2436,7 @@ async function main() {
   await until(sup, () => {
     try { return (JSON.parse(localStorage.getItem("stop:sup-0") || "{}")).deleted === true; } catch { return false; }
   }, 8000);
-  const tomb = await sup.evaluate(() => {
+  const tomb = await readSafe(sup, () => {
     try { return JSON.parse(localStorage.getItem("stop:sup-0") || "null"); } catch { return null; }
   });
   assert(tomb && tomb.deleted === true, `the restored tombstone must stick, got ${JSON.stringify(tomb)}`);
@@ -2454,4 +2468,10 @@ async function main() {
   console.log("web-e2e: PASS — supervisor numbers agree: Uptime 75.0% == OEE availability, P counts only rated machines (66.7%), badged partial, and the machine filter reaches the OEE panel");
 }
 
-main().catch((e) => { console.error("web-e2e: FAIL —", e.message); process.exit(1); });
+main().catch((e) => {
+  // Print the STACK, not just the message: a bare message ("Execution context was
+  // destroyed") gives no line number, and CI is the only place some races show up.
+  console.error("web-e2e: FAIL —", e.message);
+  if (e && e.stack) console.error(e.stack);
+  process.exit(1);
+});
