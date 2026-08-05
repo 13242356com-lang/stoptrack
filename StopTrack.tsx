@@ -127,7 +127,7 @@ function shiftWindowAt(shift, now = Date.now()) {
 function normalizeShifts(shiftsArr, legacyShift) {
   // A per-machine goals map: { machine: units } with positive integers only.
   const cleanGoals = (raw) => {
-    const out = {};
+    const out = Object.create(null); // keyed by machine NAME — user string
     if (raw && typeof raw === "object") {
       for (const [m, v] of Object.entries(raw)) {
         const n = Math.max(0, Math.round(Number(v) || 0));
@@ -234,7 +234,7 @@ const goalAccent = (state) =>
 // Roaming-aware: machines-worked breakdown and shift-wide OEE come from myShift.
 function buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, activeShift, goalStatus, note, flags }) {
   const downtimeMs = myStops.reduce((a, s) => a + s.duration, 0);
-  const byReason = {};
+  const byReason = Object.create(null); // see the operator breakdown: "__proto__" as a reason
   myStops.forEach((s) => { byReason[s.reason] = (byReason[s.reason] || 0) + s.duration; });
   const topReasons = Object.entries(byReason).sort((a, b) => b[1] - a[1]);
   const longest = myStops.reduce((best, s) => (!best || s.duration > best.duration ? s : best), null);
@@ -243,9 +243,9 @@ function buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, 
   // roaming operator's three machines all read the same downtime, and the next
   // shift can't tell which one is actually in trouble. Worst machine first,
   // because that's the one they need to know about.
-  const perMachine = {};
+  const perMachine = Object.create(null); // keyed by machine NAME — user string
   myStops.forEach((s) => {
-    const bag = (perMachine[s.machine] = perMachine[s.machine] || {});
+    const bag = (perMachine[s.machine] = perMachine[s.machine] || Object.create(null));
     bag[s.reason] = (bag[s.reason] || 0) + s.duration;
   });
   const machines = (myShift.rows || []).map((row) => {
@@ -1749,6 +1749,19 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, onR
     setStatus((s) => (s.pending === pending ? s : { ...s, pending }));
   }, []);
 
+  // ...and actually CALL it. It was declared, exported and never invoked, so
+  // `pending` only ever changed at the end of a completed flush — which is
+  // exactly what cannot happen offline. The badge therefore read the generic
+  // "Offline — will sync when back online" while a queue sat there, instead of
+  // "N changes waiting to sync". Offline is when an operator most needs to know
+  // the count, so poll it while sync is on: one storage read, no network.
+  useEffect(() => {
+    if (!enabled) return;
+    refreshPending();
+    const iv = setInterval(refreshPending, 10000);
+    return () => clearInterval(iv);
+  }, [enabled, refreshPending]);
+
   return { status, flush, refreshPending, enabled };
 }
 
@@ -2144,6 +2157,14 @@ export default function App() {
     const result = await api.loadStops();
     setStops(result.stops);
   }, []);
+  // Everything a board or a handout is computed from. Used by the cross-tab
+  // storage listener, which is the only signal a peer tab gets.
+  const refreshRecords = useCallback(async () => {
+    const [st, prod, sess] = await Promise.all([api.loadStops(), api.loadProduction(), api.loadSessions()]);
+    if (st.ok) setStops(st.stops);
+    if (prod.ok && prod.records) setProduction(prod.records);
+    if (sess.ok && sess.records) setSessions(sess.records);
+  }, []);
   const syncOn = !!(syncCfg && syncCfg.enabled && syncCfg.url);
   useEffect(() => {
     if (view !== "supervisor" || syncOn) return;
@@ -2391,10 +2412,16 @@ export default function App() {
         setPendingStop(null);
         setRecovered(null);
       }
+      // A RECORD written by another tab. The 5s re-read only runs in the
+      // supervisor view, so a second tab left on the operator view showed the
+      // state it loaded with, forever — and a handover filed from it went out
+      // reading "0 stops · 0s" for a worked shift, a confidently wrong document
+      // leaving the building under the operator's name.
+      if (key == null || /^(stop|prod|sess|hand):/.test(key)) refreshRecords();
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
-  }, [reconcilePrefs, reconcileConfig, inShell]);
+  }, [reconcilePrefs, reconcileConfig, inShell, refreshRecords]);
 
   // ---- backup / restore ----------------------------------------------------
   // Download one portable JSON of everything, so it can be re-imported into a
@@ -2897,13 +2924,14 @@ export default function App() {
     const winEnd = Math.min(now, shiftWindow ? shiftWindow.end : now);
     const elapsed = Math.max(0, winEnd - winStart);
 
-    const bag = {}; // machine -> { mannedMs, downtimeMs, stops, units, scrap }
+    const bag = Object.create(null); // machine -> { mannedMs, downtimeMs, stops, units, scrap }
+    // bag is Object.create(null) — a machine named "__proto__" must not write onto the prototype.
     const entry = (m) => (bag[m] = bag[m] || { machine: m, mannedMs: 0, downtimeMs: 0, stops: 0, units: 0, scrap: 0 });
 
     // Presence spans no longer SET manned time — they only apportion the shift
     // across the machines a roaming operator worked. Each span is clipped to the
     // window first, so a span left open since yesterday can't dominate.
-    const share = {};
+    const share = Object.create(null); // keyed by machine NAME
     let shareTotal = 0;
     for (const s of sessions) {
       // Same case-insensitive rule as the stop filter, so a retyped name doesn't
@@ -3049,6 +3077,7 @@ export default function App() {
             setupLocked={setupLocked} onLockSetup={lockSetup} onUnlockSetup={unlockSetup}
             onOpenManual={() => { setSaveError(""); setManualOpen(true); }}
             syncStatus={sync.status} syncOn={syncOn}
+            tick={slowTick}
             rates={rates} myProduction={myProduction} onSaveProduction={handleSaveProduction}
             myShift={myShift} goalStatus={goalStatus}
             onOpenHandover={() => setHandoverOpen(true)}
@@ -3150,7 +3179,7 @@ function OperatorView(props) {
     shift, shifts, shiftId, onSelectShift, shiftStart, hiddenStopCount, onNewShift, showAll, onToggleShowAll,
     setupLocked, onLockSetup, onUnlockSetup, onOpenManual,
     syncStatus, syncOn,
-    rates, myProduction, onSaveProduction, myShift, goalStatus, onOpenHandover,
+    rates, myProduction, onSaveProduction, myShift, goalStatus, onOpenHandover, tick,
   } = props;
 
   const { state, elapsed, start, pause, resume } = timer;
@@ -3180,15 +3209,24 @@ function OperatorView(props) {
   // Total downtime shown on the current board.
   const downtimeMs = useMemo(() => myStops.reduce((a, s) => a + s.duration, 0), [myStops]);
   // Stops in the last hour.
+  // `tick` is in the deps on purpose: this memo reads Date.now(), so without a
+  // time input it never recomputed. The card kept whatever value it had when the
+  // last stop was logged — reporting 3 stops in the last hour for a machine that
+  // had run clean since breakfast, on the one card an operator glances at to ask
+  // "is this machine misbehaving RIGHT NOW".
   const lastHourCount = useMemo(() => {
     const cutoff = Date.now() - 60 * 60 * 1000;
     return myStops.filter((s) => s.end > cutoff).length;
-  }, [myStops]);
+  }, [myStops, tick]);
   // Shift-wide OEE (all machines worked, manned-time denominators) from App.
   const oee = myShift.overall;
   // Downtime grouped by reason, largest first.
   const byReason = useMemo(() => {
-    const map = {};
+    // Object.create(null), not {}: a reason named "__proto__" assigned onto the
+    // prototype instead of the map, so 2 real counted minutes rendered as "No
+    // downtime logged this shift" — the breakdown silently disagreeing with the
+    // total it sits under. A machine named "__proto__" polluted Object.prototype.
+    const map = Object.create(null);
     myStops.forEach((s) => { map[s.reason] = (map[s.reason] || 0) + s.duration; });
     const list = Object.entries(map).sort((a, b) => b[1] - a[1]);
     return { list, max: list[0]?.[1] || 1 };
@@ -3674,7 +3712,7 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
 
   const stats = useMemo(() => {
     const totalDowntime = active.reduce((a, s) => a + s.duration, 0);
-    const byReason = {}, byMachine = {};
+    const byReason = Object.create(null), byMachine = Object.create(null); // user strings
     active.forEach((s) => {
       byReason[s.reason] = (byReason[s.reason] || 0) + s.duration;
       byMachine[s.machine] = (byMachine[s.machine] || 0) + s.duration;
@@ -3725,14 +3763,14 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
     });
     // Manned time per machine (any operator) from sessions overlapping the range
     // — shown as coverage context next to the planned-time OEE.
-    const mannedByMachine = {};
+    const mannedByMachine = Object.create(null); // keyed by machine NAME
     (sessions || []).forEach((s) => {
       if (!inScope(s.machine)) return;
       const end = Math.min(s.end ?? nowTs, rangeBounds[1] === Infinity ? nowTs : rangeBounds[1]);
       const start = Math.max(s.start, rangeBounds[0]);
       if (end > start) mannedByMachine[s.machine] = (mannedByMachine[s.machine] || 0) + (end - start);
     });
-    const downByMachine = {};
+    const downByMachine = Object.create(null); // keyed by machine NAME
     active.forEach((s) => { downByMachine[s.machine] = (downByMachine[s.machine] || 0) + s.duration; });
     const rows = [];
     let sum = { planned: 0, down: 0, units: 0, scrap: 0, theoretical: 0, ratedUnits: 0 };
@@ -3820,7 +3858,7 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
 
   const exportCSV = () => {
     const rows = [["Machine", "Reason", "Operator", "Start", "End", "Duration (s)", "Entry", "Notes", "Discarded", "Discard Reason"]];
-    logFiltered.forEach((s) => rows.push([s.machine, s.reason, s.operator, new Date(s.start).toISOString(), new Date(s.end).toISOString(), Math.round(s.duration / 1000), s.offMachine ? "off-machine" : s.manual ? "manual" : "timed", s.notes || "", s.discarded ? "yes" : "no", s.discardReason || ""]));
+    logFiltered.forEach((s) => rows.push([s.machine, s.reason, s.operator, new Date(s.start).toISOString(), new Date(s.end).toISOString(), Math.floor(s.duration / 1000), s.offMachine ? "off-machine" : s.manual ? "manual" : "timed", s.notes || "", s.discarded ? "yes" : "no", s.discardReason || ""]));
     const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
     downloadFile(csv, `stoptrack_export_${Date.now()}.csv`, "text/csv");
   };

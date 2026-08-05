@@ -2045,6 +2045,47 @@ async function main() {
     `a later write must not shorten a recorded measurement (10min -> ${merged && merged.duration}ms)`);
   await ctxDup.close();
 
+  // ---- a peer tab's board must not go stale ---------------------------------
+  // The 5s re-read only ran in the supervisor view and the storage listener only
+  // handled prefs/config, so a second tab left on the operator view showed the
+  // state it loaded with — forever. A handover filed from it went out reading
+  // "0 stops · 0s" for a worked shift: a confidently wrong document leaving the
+  // building under the operator's name.
+  const ctxPeerBoard = await browser.newContext();
+  const peerBoardTab = async () => {
+    const p = await ctxPeerBoard.newPage();
+    await p.route(/unpkg\.com|cdn\.tailwindcss\.com/, async (route) => {
+      const u = route.request().url();
+      if (u.includes("react-dom")) return route.fulfill({ contentType: "application/javascript", body: reactDomUmd });
+      if (u.includes("react")) return route.fulfill({ contentType: "application/javascript", body: reactUmd });
+      return route.fulfill({ contentType: "application/javascript", body: "/* tailwind stub */" });
+    });
+    await p.addInitScript(seedPlainBrowser);
+    await p.goto("file://" + path.join(root, "index.html"));
+    await p.waitForSelector("text=Start Stop", { timeout: 20000 });
+    return p;
+  };
+  const pbA = await peerBoardTab();
+  const pbB = await peerBoardTab();   // loaded BEFORE tab A logs anything
+  await pbA.click("text=Start Stop");
+  await pbA.waitForTimeout(1200);
+  await pbA.click("text=End Stop");
+  await pbA.waitForSelector("text=Document this stop", { timeout: 5000 });
+  await pbA.click('button:has-text("Save stop")');
+  await until(pbA, () => Object.keys(localStorage).filter((k) => k.startsWith("stop:")).length === 1);
+
+  // Tab B never touched anything: its board must still catch up.
+  const pbSawIt = await until(pbB, () => {
+    const el = [...document.querySelectorAll("div")].find((d) => {
+      const t = (d.textContent || "").trim();
+      return t.startsWith("Stops") && t.length < 30;
+    });
+    return el ? /Stops\s*1/.test(el.textContent.replace(/\s+/g, " ")) : false;
+  }, 8000);
+  assert(pbSawIt,
+    "a second tab on the operator view must pick up a stop logged in the other tab — a handout filed from a stale tab reports 0 stops for a worked shift");
+  await ctxPeerBoard.close();
+
   // ---- a backup must not hand this device someone else's session ------------
   // importAll shallow-merged the whole prefs blob, so a backup's `offMachine`
   // became a LIVE span here: one tap recorded 45 minutes of "No operator"
@@ -2463,6 +2504,7 @@ async function main() {
   console.log(`web-e2e: PASS — rates commit on blur/Enter/tab-hide, never per keystroke (Line 1 ${ratesReloaded["Line 1"]}, Line 2 ${ratesReloaded["Line 2"]}); duplicate Add says why; scrap-only output saves`);
   console.log("web-e2e: PASS — a manual report that hit full storage can be retried once storage recovers (the latch releases)");
   console.log(`web-e2e: PASS — two tabs documenting ONE parked stop record it once (${dupCounted}ms over a ${dupWindow}ms window), the peer's card clears, and a late write can't shorten it`);
+  console.log("web-e2e: PASS — a second tab's operator board catches up when the other tab logs a stop");
   console.log("web-e2e: PASS — a backup cannot hand a device an open span, move the shift cutoff backwards, or re-identify its operator");
   console.log("web-e2e: PASS — a live off-machine span outranks a peer's stale-span drop and a future-dated marker (no silently unlogged break)");
   console.log("web-e2e: PASS — supervisor numbers agree: Uptime 75.0% == OEE availability, P counts only rated machines (66.7%), badged partial, and the machine filter reaches the OEE panel");

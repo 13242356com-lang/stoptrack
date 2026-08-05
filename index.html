@@ -196,7 +196,7 @@ function shiftWindowAt(shift, now = Date.now()) {
 }
 function normalizeShifts(shiftsArr, legacyShift) {
     const cleanGoals = (raw) => {
-        const out = {};
+        const out = Object.create(null);
         if (raw && typeof raw === "object") {
             for (const [m, v] of Object.entries(raw)) {
                 const n = Math.max(0, Math.round(Number(v) || 0));
@@ -265,13 +265,13 @@ const goalAccent = (state) => state === "missed" ? "text-red-500" : state === "r
     : state === "met" || state === "track" ? "text-emerald-500" : "";
 function buildShiftReport({ operator, machine, myStops, myShift, clearedBefore, activeShift, goalStatus, note, flags }) {
     const downtimeMs = myStops.reduce((a, s) => a + s.duration, 0);
-    const byReason = {};
+    const byReason = Object.create(null);
     myStops.forEach((s) => { byReason[s.reason] = (byReason[s.reason] || 0) + s.duration; });
     const topReasons = Object.entries(byReason).sort((a, b) => b[1] - a[1]);
     const longest = myStops.reduce((best, s) => (!best || s.duration > best.duration ? s : best), null);
-    const perMachine = {};
+    const perMachine = Object.create(null);
     myStops.forEach((s) => {
-        const bag = (perMachine[s.machine] = perMachine[s.machine] || {});
+        const bag = (perMachine[s.machine] = perMachine[s.machine] || Object.create(null));
         bag[s.reason] = (bag[s.reason] || 0) + s.duration;
     });
     const machines = (myShift.rows || []).map((row) => {
@@ -1832,6 +1832,13 @@ function useSync({ cfg, onRemoteStops, onRemoteProduction, onRemoteSessions, onR
         const pending = (await api.getOutbox()).length;
         setStatus((s) => (s.pending === pending ? s : Object.assign(Object.assign({}, s), { pending })));
     }, []);
+    useEffect(() => {
+        if (!enabled)
+            return;
+        refreshPending();
+        const iv = setInterval(refreshPending, 10000);
+        return () => clearInterval(iv);
+    }, [enabled, refreshPending]);
     return { status, flush, refreshPending, enabled };
 }
 function App() {
@@ -2112,6 +2119,15 @@ function App() {
         const result = await api.loadStops();
         setStops(result.stops);
     }, []);
+    const refreshRecords = useCallback(async () => {
+        const [st, prod, sess] = await Promise.all([api.loadStops(), api.loadProduction(), api.loadSessions()]);
+        if (st.ok)
+            setStops(st.stops);
+        if (prod.ok && prod.records)
+            setProduction(prod.records);
+        if (sess.ok && sess.records)
+            setSessions(sess.records);
+    }, []);
     const syncOn = !!(syncCfg && syncCfg.enabled && syncCfg.url);
     useEffect(() => {
         if (view !== "supervisor" || syncOn)
@@ -2322,10 +2338,12 @@ function App() {
                 setPendingStop(null);
                 setRecovered(null);
             }
+            if (key == null || /^(stop|prod|sess|hand):/.test(key))
+                refreshRecords();
         };
         window.addEventListener("storage", onStorage);
         return () => window.removeEventListener("storage", onStorage);
-    }, [reconcilePrefs, reconcileConfig, inShell]);
+    }, [reconcilePrefs, reconcileConfig, inShell, refreshRecords]);
     const downloadBackup = async () => {
         try {
             const data = await api.exportAll();
@@ -2698,9 +2716,9 @@ function App() {
         const winStart = shiftStart;
         const winEnd = Math.min(now, shiftWindow ? shiftWindow.end : now);
         const elapsed = Math.max(0, winEnd - winStart);
-        const bag = {};
+        const bag = Object.create(null);
         const entry = (m) => (bag[m] = bag[m] || { machine: m, mannedMs: 0, downtimeMs: 0, stops: 0, units: 0, scrap: 0 });
-        const share = {};
+        const share = Object.create(null);
         let shareTotal = 0;
         for (const s of sessions) {
             if (!sameOperator(s.operator, op))
@@ -2818,7 +2836,7 @@ function App() {
                     React.createElement("button", { onClick: pickRestore, className: "bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold px-3 py-1.5 rounded-lg" }, "Restore backup"),
                     React.createElement("button", { onClick: () => setNeedsRestore(false), className: `text-sm ${t.sub} px-2 py-1.5` }, "Not now"))),
             restoreMsg && React.createElement("p", { className: "max-w-3xl mx-auto text-xs text-red-500 mt-1" }, restoreMsg))),
-        React.createElement("main", { className: "max-w-3xl mx-auto p-4 pb-24" }, view === "operator" ? (React.createElement(OperatorView, { t: t, operator: operator, setOperator: setOperator, machine: machine, setMachine: chooseMachine, offMachine: offMachine, onOffMachine: startOffMachine, onBackOnMachine: () => backOnMachine(), offError: offError, timer: effectiveTimer, onStop: handleStop, pendingStop: effectivePending, reason: reason, setReason: setReason, notes: notes, setNotes: setNotes, onSave: handleSave, onDiscardPending: handleDiscardPending, saving: saving, saveError: saveError, myStops: shiftStops, visibleStops: visibleStops, machines: machines, reasons: reasons, quickStops: quickStops, applyQuickStop: applyQuickStop, lastReason: lastReason, shift: activeShift, shifts: shifts, shiftId: shiftId, onSelectShift: selectShift, shiftStart: shiftStart, hiddenStopCount: hiddenStopCount, onNewShift: () => setNewShiftOpen(true), showAll: showAll, onToggleShowAll: toggleShowAll, setupLocked: setupLocked, onLockSetup: lockSetup, onUnlockSetup: unlockSetup, onOpenManual: () => { setSaveError(""); setManualOpen(true); }, syncStatus: sync.status, syncOn: syncOn, rates: rates, myProduction: myProduction, onSaveProduction: handleSaveProduction, myShift: myShift, goalStatus: goalStatus, onOpenHandover: () => setHandoverOpen(true) })) : (supervisorPinHash && !supervisorUnlocked) ? (React.createElement(PinGate, { t: t, pinHash: supervisorPinHash, onUnlock: () => setSupervisorUnlocked(true) })) : (React.createElement(SupervisorView, { t: t, stops: stops, loading: loading, onRefresh: refreshStops, machines: machines, reasons: reasons, quickStops: quickStops, shifts: shifts, updateMachines: updateMachines, updateReasons: updateReasons, updateQuickStops: updateQuickStops, updateShifts: updateShifts, discardStop: discardStop, deleteStop: deleteStop, hasPin: !!supervisorPinHash, updatePin: updatePin, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: sync.status, onSyncNow: sync.flush, rates: rates, updateRates: updateRates, production: production, sessions: sessions, handovers: handovers, handoverEmails: handoverEmails, updateHandoverEmails: updateHandoverEmails, onDownloadBackup: downloadBackup, onRestore: pickRestore, restoreMsg: restoreMsg }))),
+        React.createElement("main", { className: "max-w-3xl mx-auto p-4 pb-24" }, view === "operator" ? (React.createElement(OperatorView, { t: t, operator: operator, setOperator: setOperator, machine: machine, setMachine: chooseMachine, offMachine: offMachine, onOffMachine: startOffMachine, onBackOnMachine: () => backOnMachine(), offError: offError, timer: effectiveTimer, onStop: handleStop, pendingStop: effectivePending, reason: reason, setReason: setReason, notes: notes, setNotes: setNotes, onSave: handleSave, onDiscardPending: handleDiscardPending, saving: saving, saveError: saveError, myStops: shiftStops, visibleStops: visibleStops, machines: machines, reasons: reasons, quickStops: quickStops, applyQuickStop: applyQuickStop, lastReason: lastReason, shift: activeShift, shifts: shifts, shiftId: shiftId, onSelectShift: selectShift, shiftStart: shiftStart, hiddenStopCount: hiddenStopCount, onNewShift: () => setNewShiftOpen(true), showAll: showAll, onToggleShowAll: toggleShowAll, setupLocked: setupLocked, onLockSetup: lockSetup, onUnlockSetup: unlockSetup, onOpenManual: () => { setSaveError(""); setManualOpen(true); }, syncStatus: sync.status, syncOn: syncOn, tick: slowTick, rates: rates, myProduction: myProduction, onSaveProduction: handleSaveProduction, myShift: myShift, goalStatus: goalStatus, onOpenHandover: () => setHandoverOpen(true) })) : (supervisorPinHash && !supervisorUnlocked) ? (React.createElement(PinGate, { t: t, pinHash: supervisorPinHash, onUnlock: () => setSupervisorUnlocked(true) })) : (React.createElement(SupervisorView, { t: t, stops: stops, loading: loading, onRefresh: refreshStops, machines: machines, reasons: reasons, quickStops: quickStops, shifts: shifts, updateMachines: updateMachines, updateReasons: updateReasons, updateQuickStops: updateQuickStops, updateShifts: updateShifts, discardStop: discardStop, deleteStop: deleteStop, hasPin: !!supervisorPinHash, updatePin: updatePin, syncCfg: syncCfg, updateSyncConfig: updateSyncConfig, syncStatus: sync.status, onSyncNow: sync.flush, rates: rates, updateRates: updateRates, production: production, sessions: sessions, handovers: handovers, handoverEmails: handoverEmails, updateHandoverEmails: updateHandoverEmails, onDownloadBackup: downloadBackup, onRestore: pickRestore, restoreMsg: restoreMsg }))),
         recovered && (React.createElement("div", { className: "fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30" },
             React.createElement("div", { className: `${dark ? "bg-slate-900" : "bg-white"} rounded-xl shadow-xl p-5 max-w-sm w-full space-y-3` },
                 React.createElement("div", { className: "flex items-center gap-2 font-bold" },
@@ -2868,7 +2886,7 @@ function App() {
         handoverOpen && (React.createElement(ShiftHandoverModal, { t: t, dark: dark, reportBase: buildShiftReport({ operator, machine, myStops: shiftStops, myShift, clearedBefore: shiftStart, activeShift, goalStatus }), handoverEmails: handoverEmails, syncCfg: syncCfg, lastHandover: handovers.find((h) => !h.machine || h.machine === machine) || null, onSaved: (rec) => { setHandovers((prev) => [rec, ...prev.filter((h) => h.id !== rec.id)]); sync.flush(); }, onClose: () => setHandoverOpen(false) }))));
 }
 function OperatorView(props) {
-    const { t, operator, setOperator, machine, setMachine, offMachine, onOffMachine, onBackOnMachine, offError, timer, onStop, pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError, myStops, visibleStops, machines, reasons, quickStops, applyQuickStop, lastReason, shift, shifts, shiftId, onSelectShift, shiftStart, hiddenStopCount, onNewShift, showAll, onToggleShowAll, setupLocked, onLockSetup, onUnlockSetup, onOpenManual, syncStatus, syncOn, rates, myProduction, onSaveProduction, myShift, goalStatus, onOpenHandover, } = props;
+    const { t, operator, setOperator, machine, setMachine, offMachine, onOffMachine, onBackOnMachine, offError, timer, onStop, pendingStop, reason, setReason, notes, setNotes, onSave, onDiscardPending, saving, saveError, myStops, visibleStops, machines, reasons, quickStops, applyQuickStop, lastReason, shift, shifts, shiftId, onSelectShift, shiftStart, hiddenStopCount, onNewShift, showAll, onToggleShowAll, setupLocked, onLockSetup, onUnlockSetup, onOpenManual, syncStatus, syncOn, rates, myProduction, onSaveProduction, myShift, goalStatus, onOpenHandover, tick, } = props;
     const { state, elapsed, start, pause, resume } = timer;
     const { running, paused } = state;
     const [confirmDiscard, setConfirmDiscard] = useState(false);
@@ -2886,11 +2904,11 @@ function OperatorView(props) {
     const lastHourCount = useMemo(() => {
         const cutoff = Date.now() - 60 * 60 * 1000;
         return myStops.filter((s) => s.end > cutoff).length;
-    }, [myStops]);
+    }, [myStops, tick]);
     const oee = myShift.overall;
     const byReason = useMemo(() => {
         var _a;
-        const map = {};
+        const map = Object.create(null);
         myStops.forEach((s) => { map[s.reason] = (map[s.reason] || 0) + s.duration; });
         const list = Object.entries(map).sort((a, b) => b[1] - a[1]);
         return { list, max: ((_a = list[0]) === null || _a === void 0 ? void 0 : _a[1]) || 1 };
@@ -3249,7 +3267,7 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
     const stats = useMemo(() => {
         var _a;
         const totalDowntime = active.reduce((a, s) => a + s.duration, 0);
-        const byReason = {}, byMachine = {};
+        const byReason = Object.create(null), byMachine = Object.create(null);
         active.forEach((s) => {
             byReason[s.reason] = (byReason[s.reason] || 0) + s.duration;
             byMachine[s.machine] = (byMachine[s.machine] || 0) + s.duration;
@@ -3286,7 +3304,7 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
             const ts = (_b = (_a = p.loggedAt) !== null && _a !== void 0 ? _a : p.shiftStart) !== null && _b !== void 0 ? _b : 0;
             return inScope(p.machine) && ts >= rangeBounds[0] && ts <= rangeBounds[1];
         });
-        const mannedByMachine = {};
+        const mannedByMachine = Object.create(null);
         (sessions || []).forEach((s) => {
             var _a;
             if (!inScope(s.machine))
@@ -3296,7 +3314,7 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
             if (end > start)
                 mannedByMachine[s.machine] = (mannedByMachine[s.machine] || 0) + (end - start);
         });
-        const downByMachine = {};
+        const downByMachine = Object.create(null);
         active.forEach((s) => { downByMachine[s.machine] = (downByMachine[s.machine] || 0) + s.duration; });
         const rows = [];
         let sum = { planned: 0, down: 0, units: 0, scrap: 0, theoretical: 0, ratedUnits: 0 };
@@ -3376,7 +3394,7 @@ function SupervisorView({ t, stops, loading, onRefresh, machines, reasons, quick
     };
     const exportCSV = () => {
         const rows = [["Machine", "Reason", "Operator", "Start", "End", "Duration (s)", "Entry", "Notes", "Discarded", "Discard Reason"]];
-        logFiltered.forEach((s) => rows.push([s.machine, s.reason, s.operator, new Date(s.start).toISOString(), new Date(s.end).toISOString(), Math.round(s.duration / 1000), s.offMachine ? "off-machine" : s.manual ? "manual" : "timed", s.notes || "", s.discarded ? "yes" : "no", s.discardReason || ""]));
+        logFiltered.forEach((s) => rows.push([s.machine, s.reason, s.operator, new Date(s.start).toISOString(), new Date(s.end).toISOString(), Math.floor(s.duration / 1000), s.offMachine ? "off-machine" : s.manual ? "manual" : "timed", s.notes || "", s.discarded ? "yes" : "no", s.discardReason || ""]));
         const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
         downloadFile(csv, `stoptrack_export_${Date.now()}.csv`, "text/csv");
     };
