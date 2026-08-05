@@ -5,7 +5,11 @@ import com.google.android.gms.wearable.DataEventBuffer
 import com.google.android.gms.wearable.DataMapItem
 import com.google.android.gms.wearable.MessageEvent
 import com.google.android.gms.wearable.WearableListenerService
+import com.stoptrack.shared.StopTrackJson
+import com.stoptrack.shared.WatchConfig
 import com.stoptrack.shared.WearProtocol
+import kotlinx.serialization.decodeFromString
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 
 /**
@@ -24,7 +28,18 @@ class PhoneMessageService : WearableListenerService() {
             if (event.dataItem.uri.path != WearProtocol.PATH_CONFIG) continue
             val json = DataMapItem.fromDataItem(event.dataItem).dataMap
                 .getString(WearProtocol.KEY_CONFIG_JSON) ?: continue
-            runBlocking { store.setConfigJson(json) }
+            // LAST-WRITE-WINS, same rule as serverSync. Adopting unconditionally
+            // let a phone's older (or empty) config clobber the newer one the watch
+            // had just pulled from the server — the documented primary path — so a
+            // real machine list reverted to defaults mid-shift and the operator's
+            // pinned machine disappeared from the picker.
+            runBlocking {
+                val incoming = runCatching {
+                    StopTrackJson.decodeFromString<WatchConfig>(json)
+                }.getOrNull()
+                val mine = store.config.first()
+                if (incoming != null && incoming.updatedAt >= mine.updatedAt) store.setConfigJson(json)
+            }
         }
     }
 

@@ -72,6 +72,15 @@ class CompanionService : LifecycleService() {
                     ?.let { controller.machine = it }
                 controller.start()
             }
+            // A machine switch from the web UI. Only while nothing is timing — a
+            // running stop's machine is pinned at Start.
+            ACTION_SET_MACHINE -> intent.getStringExtra(EXTRA_MACHINE)?.takeIf { it.isNotBlank() }?.let { m ->
+                if (!controller.state.active) {
+                    controller.machine = m
+                    lifecycleScope.launch { prefs.update(lastMachine = m) }
+                    onTimerChanged()
+                }
+            }
             ACTION_PAUSE -> controller.pause()
             ACTION_RESUME -> controller.resume()
             ACTION_END -> controller.end()
@@ -90,6 +99,9 @@ class CompanionService : LifecycleService() {
         return START_STICKY
     }
 
+    private var forwardKey: String? = null   // remoteUrl+token the forwarder is running for
+    private var publishedConfig: String? = null // last watch-config JSON actually published
+
     private fun applySettings(s: Settings) {
         current = s
         val token = s.localToken.ifBlank { null }
@@ -97,19 +109,41 @@ class CompanionService : LifecycleService() {
             restartServer(s.localPort, token)
         }
 
-        forwardJob?.cancel()
-        if (s.forwardEnabled && s.remoteUrl.isNotBlank()) {
-            forwardJob = lifecycleScope.launch(Dispatchers.IO) {
-                val forwarder = RemoteForwarder(store, prefs)
-                while (isActive) {
-                    runCatching { forwarder.runOnce(prefs.snapshot()) }
-                    delay(FORWARD_INTERVAL_MS)
+        // Restart the forwarder only when ITS OWN settings change. applySettings
+        // runs on every DataStore write, and Settings carries the quick-stop
+        // timer's autosave and cursors the forwarder itself writes — so cancelling
+        // and relaunching here meant health+push+pulls ran back-to-back forever
+        // instead of once per FORWARD_INTERVAL_MS, on a phone that has to last a
+        // shift. (The 20s timer autosave added with the reboot-resume fix feeds
+        // this same emission, which made the loop worse.)
+        val nextForwardKey = if (s.forwardEnabled && s.remoteUrl.isNotBlank())
+            "${s.remoteUrl}|${s.remoteToken}" else null
+        if (nextForwardKey != forwardKey || (nextForwardKey != null && forwardJob?.isActive != true)) {
+            forwardKey = nextForwardKey
+            forwardJob?.cancel()
+            forwardJob = null
+            if (nextForwardKey != null) {
+                forwardJob = lifecycleScope.launch(Dispatchers.IO) {
+                    val forwarder = RemoteForwarder(store, prefs)
+                    while (isActive) {
+                        runCatching { forwarder.runOnce(prefs.snapshot()) }
+                        delay(FORWARD_INTERVAL_MS)
+                    }
                 }
             }
         }
 
-        // Keep the watch's config current whenever settings change.
-        lifecycleScope.launch { bridge.publishConfig(store.watchConfigJson()) }
+        // Keep the watch's config current — but only republish when it actually
+        // changed. Republishing on every emission is what the watch then re-adopted
+        // (see PhoneMessageService), so an unchanged config kept churning the Data
+        // Layer and the watch's store.
+        lifecycleScope.launch {
+            val json = store.watchConfigJson()
+            if (json != publishedConfig) {
+                publishedConfig = json
+                bridge.publishConfig(json)
+            }
+        }
 
         // Operator + preferred machine for native quick-stops.
         controller.operator = s.operatorName
@@ -152,11 +186,16 @@ class CompanionService : LifecycleService() {
     private fun onTimerChanged() {
         updateNotification()
         overlay?.update(controller.state)
-        if (controller.state.active) {
+        // Tick only while a stop is actually COUNTING. Paused, the displayed value
+        // is frozen, so ~2400 notification rebuilds and overlay repaints over a
+        // 40-minute lunch bought nothing and kept the CPU out of deep idle on a
+        // phone that has to last a shift. The transition itself already refreshed
+        // both surfaces above, so the frozen value is still correct on screen.
+        if (controller.state.active && !controller.state.paused) {
             if (tickJob == null) {
                 tickJob = lifecycleScope.launch {
                     var ticks = 0
-                    while (isActive && controller.state.active) {
+                    while (isActive && controller.state.active && !controller.state.paused) {
                         updateNotification()
                         overlay?.update(controller.state)
                         // Re-stamp the saved state periodically. The stamp is how
@@ -312,6 +351,7 @@ class CompanionService : LifecycleService() {
         private const val NanoHttpTimeoutMs = 5000
 
         const val ACTION_START = "com.stoptrack.mobile.START"
+        const val ACTION_SET_MACHINE = "com.stoptrack.mobile.SET_MACHINE"
         const val ACTION_PAUSE = "com.stoptrack.mobile.PAUSE"
         const val ACTION_RESUME = "com.stoptrack.mobile.RESUME"
         const val ACTION_END = "com.stoptrack.mobile.END"

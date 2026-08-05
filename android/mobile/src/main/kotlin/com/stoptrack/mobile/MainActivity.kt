@@ -281,6 +281,16 @@ class MainActivity : ComponentActivity() {
         fun startStop(machine: String?) =
             fire(CompanionService.ACTION_START) { it.putExtra(CompanionService.EXTRA_MACHINE, machine ?: "") }
 
+        /** The operator switched machines in the web UI. The notification and the
+         *  bubble know nothing about that, so a stop started from either was
+         *  attributed to whatever machine was current when the app last told us —
+         *  the operator taps Line 2, pockets the phone, starts a stop from the
+         *  bubble 20 minutes later, and it lands on Line 1. Ignored while a stop is
+         *  running: that stop's machine is pinned at Start and must not move. */
+        @JavascriptInterface
+        fun setMachine(machine: String?) =
+            fire(CompanionService.ACTION_SET_MACHINE) { it.putExtra(CompanionService.EXTRA_MACHINE, machine ?: "") }
+
         @JavascriptInterface
         fun pauseStop() = fire(CompanionService.ACTION_PAUSE)
 

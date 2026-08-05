@@ -1981,12 +1981,17 @@ function App() {
         setSessions((prev) => [...prev, Object.assign(Object.assign({}, rec), { key: `sess:${rec.id}` })]);
     }, []);
     const switchMachine = useCallback((next) => {
+        var _a;
         if (next === machineRef.current)
             return;
         closeSession();
         openSession(next);
         setMachine(next);
         persistPrefs({ machine: next });
+        try {
+            (_a = nativeApi === null || nativeApi === void 0 ? void 0 : nativeApi.setMachine) === null || _a === void 0 ? void 0 : _a.call(nativeApi, next);
+        }
+        catch (e) { }
     }, [closeSession, openSession, persistPrefs]);
     useEffect(() => {
         const iv = setInterval(() => {

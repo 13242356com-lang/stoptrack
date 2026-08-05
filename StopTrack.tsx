@@ -2012,6 +2012,11 @@ export default function App() {
     // a machine they aren't standing at. The patch carries the new value because
     // persistPrefs' base still reads the pre-switch state.
     persistPrefs({ machine: next });
+    // Tell native too. The notification and the floating bubble keep their own
+    // machine, so without this a stop started from either surface after a switch
+    // was attributed to the machine the operator LEFT. Optional call: a plain
+    // browser has no shell, and an older shell has no setMachine.
+    try { nativeApi?.setMachine?.(next); } catch (e) { /* shell too old — ignore */ }
   }, [closeSession, openSession, persistPrefs]);
 
   // Heartbeat: bump the open session's updatedAt so a crash leaves a usable
